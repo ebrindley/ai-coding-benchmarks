@@ -1,0 +1,16 @@
+# Secrets-only protection. Intentionally NO linters, formatters, test runners,
+# vulnerability scanners, dependency scanners, or tools that touch benchmark fixture code.
+repos:
+  - repo: local
+    hooks:
+      - id: trufflehog
+        name: TruffleHog (secret scan)
+        description: Detect secrets before they are committed.
+        # --no-update: pin to the locally installed (Homebrew-managed) binary and
+        # avoid the self-updater, which races and fails ("cannot move binary")
+        # when pre-commit invokes the hook in parallel.
+        # pass_filenames: false: scan the git range once, not per-file batches.
+        entry: bash -c 'trufflehog git file://. --since-commit HEAD --results=verified,unknown --fail --no-update --trust-local-git-config'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
