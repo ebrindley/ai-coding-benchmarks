@@ -1,0 +1,147 @@
+# Brownfield Task: Fix Pagination Duplicate Items Bug
+#
+# Category: Bug Fix (existing-codebase)
+# Language: TypeScript (Express)
+# Complexity: Medium
+# Estimated Time: 25 minutes
+#
+# Bug: Duplicate items appear across page boundaries
+# Root cause: Missing secondary sort causing unstable ordering
+
+taskId: brownfield-004-ts-pagination-bug
+type: brownfield
+codeType: existing-codebase
+category: bugfix
+language: typescript
+description: |
+  Fix a pagination bug where duplicate items appear across page boundaries.
+
+  Bug symptoms:
+  - Page 2 sometimes shows the last item from Page 1
+  - Happens when items have the same created_at timestamp
+  - Users report seeing duplicate entries when scrolling through lists
+
+  Root cause hints:
+  - Check the ORDER BY clause in the query
+  - Missing secondary sort key (should be: ORDER BY created_at, id)
+  - OFFSET without stable sort causes duplicates when data has ties
+
+  Constraints:
+  - Fix must be in the query/repository layer, not client-side dedup
+  - Fixture has 100 records, 10 per page
+  - Tests assert exact IDs per page: [1-10], [11-20], etc.
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: no-duplicates
+      description: No duplicate items across any page boundaries
+      substantiation: test
+      artifactRef: tests/pagination.test.ts::no-duplicates-across-pages
+
+    - id: stable-ordering
+      description: Same query returns same order every time
+      substantiation: test
+      artifactRef: tests/pagination.test.ts::stable-ordering
+
+    - id: correct-page-contents
+      description: Page 1 returns IDs 1-10, Page 2 returns IDs 11-20, etc.
+      substantiation: test
+      artifactRef: tests/pagination.test.ts::correct-page-contents
+
+    - id: existing-tests-pass
+      description: All existing tests still pass
+      substantiation: test
+      artifactRef: npm test exits 0
+
+  niceToHave:
+    - id: index-optimized
+      description: Query uses index (EXPLAIN shows index scan)
+      substantiation: test
+      artifactRef: tests/pagination.test.ts::uses-index
+
+  successCriteria:
+    - All must-have tests pass
+    - No TypeScript errors
+    - No duplicate items in any page combination
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: install
+    check: Dependencies installed
+    command: npm install --no-audit --no-fund --package-lock=false
+    expectedExitCode: 0
+    order: 2
+
+  - gate: typecheck
+    check: TypeScript compiles without errors
+    command: npx tsc --noEmit
+    expectedExitCode: 0
+    order: 3
+
+  - gate: lint
+    check: No ESLint errors
+    command: npx eslint src/
+    expectedExitCode: 0
+    order: 4
+
+  - gate: tests
+    check: All tests pass
+    command: npm test
+    expectedExitCode: 0
+    order: 5
+
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 6
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - linter_delta
+      - complexity_delta
+
+toolEvidencePolicy:
+  requiredWhen: tests are part of success_criteria
+  neutralWhen: never
+
+networkPolicy:
+  allowed: true
+  provenanceRequired: true
+  record:
+    - urls
+    - timestamps
+    - content_hash
+
+fixturePath: ts-pagination-api
+
+# Fixture details
+fixture:
+  description: Express/TypeScript API with pagination bug
+  bugLocation: src/repositories/user.repository.ts::findAll()
+  testFramework: Jest
+  dataset: 100 fixed records with deterministic IDs and timestamps
+  pageSize: 10
+
+tags:
+  - typescript
+  - express
+  - pagination
+  - sql
+  - bug-fix
+  - existing-codebase
+
+estimatedMinutes: 25

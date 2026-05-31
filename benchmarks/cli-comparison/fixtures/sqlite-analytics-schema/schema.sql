@@ -1,0 +1,2 @@
+-- Implement the schema here.
+-- This file should be idempotent (safe to apply multiple times).

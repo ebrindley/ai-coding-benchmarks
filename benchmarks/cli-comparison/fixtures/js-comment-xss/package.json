@@ -1,0 +1,21 @@
+{
+  "name": "js-comment-xss",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Stored XSS fixture using sanitize-html (seeded misconfiguration)",
+  "main": "src/render-comment.js",
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "jest": "^29.7.0",
+    "sanitize-html": "^2.12.3"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/test/**/*.test.js"
+    ]
+  }
+}

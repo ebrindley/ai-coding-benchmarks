@@ -1,0 +1,135 @@
+# Greenfield Task: Java Spring Boot Service with Repository Pattern
+#
+# Category: Feature (from-scratch)
+# Language: Java (Spring Boot)
+# Complexity: Medium
+# Estimated Time: 35 minutes
+
+taskId: greenfield-004-java-spring-service
+type: greenfield
+codeType: from-scratch
+category: feature
+language: java
+description: |
+  Build a Spring Boot service for managing books with proper layered architecture.
+  - BookController: REST endpoints (GET /books, GET /books/{id}, POST /books, DELETE /books/{id})
+  - BookService: Business logic layer
+  - BookRepository: Data access interface (in-memory implementation OK)
+  - Proper HTTP status codes (201 created, 404 not found, 400 bad request)
+  - Exception handling via @ControllerAdvice
+  - Constructor injection (no field @Autowired)
+  - Do not modify src/test/ or scripts/check-* (baseline-diff enforced)
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: layered-architecture
+      description: Clear separation of controller/service/repository layers
+      substantiation: static
+      artifactRef: scripts/check-layered-architecture.sh
+
+    - id: get-all-books
+      description: GET /books returns list of books
+      substantiation: test
+      artifactRef: src/test/java/com/example/BookControllerTest.java::getAllBooks
+
+    - id: get-book-by-id
+      description: GET /books/{id} returns book or 404
+      substantiation: test
+      artifactRef: src/test/java/com/example/BookControllerTest.java::getBookById
+
+    - id: create-book
+      description: POST /books creates book and returns 201
+      substantiation: test
+      artifactRef: src/test/java/com/example/BookControllerTest.java::createBook
+
+    - id: delete-book
+      description: DELETE /books/{id} removes book
+      substantiation: test
+      artifactRef: src/test/java/com/example/BookControllerTest.java::deleteBook
+
+    - id: constructor-injection
+      description: Uses constructor injection, no field @Autowired
+      substantiation: static
+      artifactRef: scripts/check-no-field-autowired.sh
+
+  niceToHave:
+    - id: validation
+      description: Bean validation on request DTOs (@NotNull, @Size)
+      substantiation: test
+      artifactRef: src/test/java/com/example/BookControllerTest.java::validation
+
+    - id: swagger
+      description: OpenAPI/Swagger annotations present
+      substantiation: static
+      artifactRef: scripts/check-swagger-annotations.sh
+
+  successCriteria:
+    - All must-have tests pass
+    - Application starts without errors
+    - No compiler warnings
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: build
+    check: Maven build succeeds
+    command: mvn clean compile -q
+    expectedExitCode: 0
+    order: 2
+
+  - gate: tests
+    check: All tests pass
+    command: mvn test -q
+    expectedExitCode: 0
+    order: 3
+
+  - gate: oracle
+    check: External oracle validates HTTP endpoints end-to-end
+    order: 4
+
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 5
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - linter_delta
+      - complexity_delta
+
+toolEvidencePolicy:
+  requiredWhen: tests are part of success_criteria
+  neutralWhen: never
+
+networkPolicy:
+  allowed: true
+  provenanceRequired: true
+  record:
+    - urls
+    - timestamps
+    - content_hash
+
+tags:
+  - java
+  - spring-boot
+  - rest-api
+  - layered-architecture
+  - from-scratch
+  - feature
+
+estimatedMinutes: 35
+
+fixturePath: java-spring-service-harness

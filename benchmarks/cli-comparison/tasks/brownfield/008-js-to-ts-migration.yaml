@@ -1,0 +1,86 @@
+# Brownfield Task: Migrate CommonJS Utility Library to TypeScript ESM
+#
+# Category: Migration (existing-codebase)
+# Language: JavaScript -> TypeScript
+# Complexity: High
+# Estimated Time: 40 minutes
+
+taskId: brownfield-008-js-to-ts-migration
+type: brownfield
+codeType: existing-codebase
+category: migration
+language: javascript
+targetLanguage: typescript
+description: |
+  Migrate a small CommonJS utility library to TypeScript with ES modules.
+
+  Current state:
+  - src/ contains CommonJS modules (require/module.exports)
+  - Tests are in Jest and currently passing
+
+  Target state:
+  - src/ becomes TypeScript (*.ts)
+  - ES module syntax (import/export)
+  - tsconfig.json enables "strict": true
+  - All existing tests pass (you may adjust runner config, but do not edit test assertions)
+
+  Constraints:
+  - Keep behavior identical
+  - Do not modify any files under test/ (baseline-diff enforced)
+  - Prefer no `any` (explicit or implicit)
+complexity: high
+
+expectedOutcome:
+  mustHave:
+    - id: typescript-compiles
+      description: TypeScript compiles in strict mode
+      substantiation: test
+      artifactRef: npm run typecheck exits 0
+
+    - id: tests-pass
+      description: All existing tests pass
+      substantiation: test
+      artifactRef: npm test exits 0
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only allowed source/config files changed (no test/validator edits)
+    order: 1
+
+  - gate: install
+    check: Dependencies installed
+    command: npm install --no-audit --no-fund --package-lock=false
+    expectedExitCode: 0
+    order: 2
+
+  - gate: typecheck
+    check: TypeScript compiles in strict mode
+    command: npm run typecheck
+    expectedExitCode: 0
+    order: 3
+
+  - gate: tests
+    check: All tests pass
+    command: npm test
+    expectedExitCode: 0
+    order: 4
+
+  - gate: oracle
+    check: External oracle validates consumer import and exports
+    order: 5
+
+  - gate: requirements
+    check: All must_have items substantiated
+    order: 6
+
+fixturePath: js-utils-commonjs
+
+tags:
+  - migration
+  - javascript
+  - typescript
+  - esm
+  - commonjs
+  - existing-codebase
+
+estimatedMinutes: 40

@@ -1,0 +1,187 @@
+# Brownfield Task: Refactor Duplicate Validation Logic into Shared Module
+#
+# Category: Refactor (existing-codebase)
+# Language: Python
+# Complexity: Medium
+# Estimated Time: 25 minutes
+#
+# REFACTOR CONSTRAINTS:
+# - All 32 existing tests must pass WITHOUT modification
+# - No public API changes (function signatures unchanged)
+# - Behavior must be identical before and after
+#
+# This is a TRUE refactor: DRY extraction only
+
+taskId: brownfield-007-python-refactor-duplicate-logic
+type: brownfield
+codeType: existing-codebase
+category: refactor
+language: python
+description: |
+  Extract duplicate validation logic into a shared module.
+
+  Current state:
+  - validate_email() duplicated in user_service.py, order_service.py, admin_service.py
+  - validate_phone() duplicated in 2 files
+  - validate_address() duplicated in 3 files
+  - Minor variations exist (some have extra whitespace stripping)
+
+  Target state:
+  - shared/validators.py with canonical implementations
+  - All services import from shared module
+  - Identical behavior (including whitespace handling)
+
+  CRITICAL CONSTRAINTS:
+  - All 32 existing tests MUST pass without any modifications
+  - Public function signatures MUST remain unchanged
+  - Validation behavior must be identical (including edge cases)
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: shared-module-created
+      description: shared/validators.py exists with extracted functions
+      substantiation: static
+      artifactRef: scripts/check_shared_module.py
+
+    - id: no-duplication
+      description: validate_email not duplicated (only in shared/)
+      substantiation: static
+      artifactRef: scripts/check_no_duplication.py
+
+    - id: existing-tests-pass
+      description: All 32 existing tests pass
+      substantiation: test
+      artifactRef: pytest tests/ exits 0
+
+    - id: no-test-modifications
+      description: No test files were modified
+      substantiation: static
+      artifactRef: scripts/check_no_test_edits.py
+
+    - id: api-unchanged
+      description: Public function signatures unchanged
+      substantiation: static
+      artifactRef: scripts/check_api_compat.py
+
+  niceToHave:
+    - id: type-hints
+      description: Extracted functions have type hints
+      substantiation: static
+      artifactRef: scripts/check_type_hints.py
+
+    - id: docstrings
+      description: Extracted functions have docstrings
+      substantiation: static
+      artifactRef: scripts/check_docstrings.py
+
+  successCriteria:
+    - All 32 existing tests pass without modification
+    - No public API changes
+    - Duplicate code consolidated into shared module
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: install
+    check: Python tooling installed in .venv
+    command: bash scripts/setup-venv.sh
+    expectedExitCode: 0
+    order: 2
+
+  - gate: no-test-edits
+    check: No test files modified (true refactor)
+    command: ./.venv/bin/python scripts/check_no_test_edits.py
+    expectedExitCode: 0
+    order: 3
+
+  - gate: no-api-change
+    check: Public API unchanged (symbol snapshot)
+    command: ./.venv/bin/python scripts/check_api_compat.py
+    expectedExitCode: 0
+    order: 4
+
+  - gate: lint
+    check: No Python lint errors
+    command: ./.venv/bin/ruff check .
+    expectedExitCode: 0
+    order: 5
+
+  - gate: tests
+    check: All tests pass
+    command: ./.venv/bin/python -m pytest tests/ -v
+    expectedExitCode: 0
+    order: 6
+
+  - gate: requirements
+    check: All must_have items substantiated
+    order: 7
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - complexity_delta
+
+toolEvidencePolicy:
+  requiredWhen: tests are part of success_criteria
+  neutralWhen: never
+
+networkPolicy:
+  allowed: true
+  provenanceRequired: true
+  record:
+    - urls
+    - timestamps
+    - content_hash
+
+fixturePath: python-services-app
+
+# Fixture details
+fixture:
+  description: Python services app with duplicate validation logic
+  duplicateLocations:
+    - src/services/user_service.py (validate_email, validate_phone, validate_address)
+    - src/services/order_service.py (validate_email, validate_address)
+    - src/services/admin_service.py (validate_email, validate_phone, validate_address)
+  testCount: 32 tests in 4 test files
+  testFiles:
+    - tests/test_user_service.py (10 tests)
+    - tests/test_order_service.py (10 tests)
+    - tests/test_admin_service.py (8 tests)
+    - tests/test_integration.py (4 tests)
+  apiBaseline: baseline/api_symbols.json
+  targetModule: src/shared/validators.py
+  checkScripts:
+    noTestEdits: scripts/check_no_test_edits.py
+    apiCompat: scripts/check_api_compat.py
+    sharedModule: scripts/check_shared_module.py
+    noDuplication: scripts/check_no_duplication.py
+    typeHints: scripts/check_type_hints.py
+    docstrings: scripts/check_docstrings.py
+
+# Refactor-specific configuration
+refactorConstraints:
+  noTestEdits: true
+  noApiChange: true
+  apiBaselinePath: baseline/api_symbols.json
+
+tags:
+  - python
+  - refactor
+  - dry
+  - validation
+  - existing-codebase
+
+estimatedMinutes: 25

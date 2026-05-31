@@ -1,0 +1,124 @@
+# Greenfield Task: JavaScript Event Emitter with Wildcards
+#
+# Category: Feature (from-scratch)
+# Language: JavaScript (Node.js)
+# Complexity: Medium
+# Estimated Time: 25 minutes
+
+taskId: greenfield-003-js-event-emitter
+type: greenfield
+codeType: starter-code
+category: feature
+language: javascript
+description: |
+  Build an event emitter that supports wildcard subscriptions.
+  - on(pattern, handler) subscribes to events matching pattern
+  - Wildcard '*' matches single segment: 'user.*' matches 'user.created', 'user.deleted'
+  - Wildcard '**' matches multiple segments: 'user.**' matches 'user.profile.updated'
+  - emit(event, data) triggers all matching handlers
+  - off(pattern, handler) unsubscribes specific handler
+  - once(pattern, handler) fires once then auto-removes
+  - Errors in handlers don't crash other handlers
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: basic-emit
+      description: on() and emit() work for exact event names
+      substantiation: test
+      artifactRef: test/emitter.test.js::basic-emit
+
+    - id: wildcard-single
+      description: Single wildcard (*) matches one segment
+      substantiation: test
+      artifactRef: test/emitter.test.js::wildcard-single
+
+    - id: wildcard-multi
+      description: Double wildcard (**) matches multiple segments
+      substantiation: test
+      artifactRef: test/emitter.test.js::wildcard-multi
+
+    - id: once-listener
+      description: once() fires exactly once then auto-removes
+      substantiation: test
+      artifactRef: test/emitter.test.js::once-listener
+
+    - id: off-unsubscribe
+      description: off() removes specific handler
+      substantiation: test
+      artifactRef: test/emitter.test.js::off-unsubscribe
+
+    - id: error-isolation
+      description: Error in one handler doesn't prevent other handlers from running
+      substantiation: test
+      artifactRef: test/emitter.test.js::error-isolation
+
+  niceToHave:
+    - id: listener-count
+      description: listenerCount(pattern) returns number of listeners
+      substantiation: test
+      artifactRef: test/emitter.test.js::listener-count
+
+    - id: remove-all
+      description: removeAllListeners(pattern) removes all for pattern
+      substantiation: test
+      artifactRef: test/emitter.test.js::remove-all
+
+  successCriteria:
+    - All must-have tests pass
+    - No memory leaks (listeners properly cleaned up)
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test edits)
+    order: 1
+
+  - gate: tests
+    check: All tests pass
+    command: npm test
+    expectedExitCode: 0
+    order: 2
+
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 3
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - linter_delta
+      - complexity_delta
+
+toolEvidencePolicy:
+  requiredWhen: tests are part of success_criteria
+  neutralWhen: never
+
+networkPolicy:
+  allowed: true
+  provenanceRequired: true
+  record:
+    - urls
+    - timestamps
+    - content_hash
+
+tags:
+  - javascript
+  - nodejs
+  - events
+  - patterns
+  - from-scratch
+  - feature
+
+estimatedMinutes: 25
+
+fixturePath: js-event-emitter-harness

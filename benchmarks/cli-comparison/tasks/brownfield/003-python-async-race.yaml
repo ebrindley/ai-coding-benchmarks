@@ -1,0 +1,164 @@
+# Brownfield Task: Fix Async Race Condition in Task Processor
+#
+# Category: Bug Fix (existing-codebase)
+# Language: Python (asyncio)
+# Complexity: Medium
+# Estimated Time: 30 minutes
+#
+# Bug: Multiple workers sometimes process the same task
+# Root cause: Missing lock around task claiming logic
+
+taskId: brownfield-003-python-async-race
+type: brownfield
+codeType: existing-codebase
+category: bugfix
+language: python
+description: |
+  Fix a race condition in an async background task processor.
+
+  Bug symptoms:
+  - When multiple workers run concurrently, same task processed twice
+  - Duplicate results appear in output
+  - Happens ~5% of the time under load
+
+  Root cause hints:
+  - Check claim_task() function
+  - No lock protecting read-modify-write of task status
+  - Fix must use asyncio primitives (Lock, Semaphore)
+
+  Constraints:
+  - Must not significantly impact throughput (<10% degradation)
+  - Use asyncio.Lock or equivalent
+  - Do not change the public TaskProcessor API
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: no-duplicate-processing
+      description: Same task never processed twice under concurrent load
+      substantiation: test
+      artifactRef: tests/test_processor.py::test_no_duplicate_processing
+
+    - id: uses-asyncio-lock
+      description: Fix uses asyncio.Lock or similar primitive
+      substantiation: static
+      artifactRef: scripts/check_asyncio_primitives.py
+
+    - id: existing-tests-pass
+      description: All existing tests still pass (excludes performance tests)
+      substantiation: test
+      artifactRef: pytest tests/ exits 0
+
+  niceToHave:
+    - id: throughput-maintained
+      description: Throughput within 10% of original (100 tasks in <2s)
+      substantiation: test
+      artifactRef: tests/test_processor.py::test_throughput_maintained
+      note: Time-based test, excluded by default to avoid CI flakiness
+
+    - id: race-test-added
+      description: New test specifically for race condition scenario
+      substantiation: test
+      artifactRef: tests/test_processor.py::test_race_condition_prevented
+
+    - id: documented
+      description: Comment explaining the race condition and fix
+      substantiation: static
+      artifactRef: scripts/check_fix_documented.py
+
+  successCriteria:
+    - All must-have tests pass
+    - No duplicate processing under 10 concurrent workers
+    - asyncio.Lock used in claim_task()
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: install
+    check: Python tooling installed in .venv
+    command: bash scripts/setup-venv.sh
+    expectedExitCode: 0
+    order: 2
+
+  - gate: lint
+    check: No Python lint errors
+    command: ./.venv/bin/ruff check .
+    expectedExitCode: 0
+    order: 3
+
+  - gate: asyncio-primitives
+    check: Fix uses asyncio.Lock or similar primitive
+    command: ./.venv/bin/python scripts/check_asyncio_primitives.py
+    expectedExitCode: 0
+    order: 4
+
+  - gate: tests
+    check: All tests pass (excludes performance tests by default)
+    command: ./.venv/bin/python -m pytest tests/ -v
+    expectedExitCode: 0
+    order: 5
+
+  - gate: fix-documented
+    check: Fix is documented with comments (nice-to-have)
+    command: ./.venv/bin/python scripts/check_fix_documented.py
+    expectedExitCode: 0
+    order: 6
+    required: false
+
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 7
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - linter_delta
+      - complexity_delta
+
+toolEvidencePolicy:
+  requiredWhen: tests are part of success_criteria
+  neutralWhen: never
+
+networkPolicy:
+  allowed: true
+  provenanceRequired: true
+  record:
+    - urls
+    - timestamps
+    - content_hash
+
+fixturePath: python-async-processor
+
+# Fixture details
+fixture:
+  description: Async task processor with race condition bug
+  bugLocation: src/processor.py::claim_task()
+  testFramework: pytest + pytest-asyncio
+  concurrencyTest: Spawns 10 workers, processes 100 tasks
+  testCount: 12 tests (4 basic, 4 race condition, 4 throughput)
+  deterministicPattern: Fixed seed scheduler for reproducible interleaving
+  checkScripts:
+    asyncioPrimitives: scripts/check_asyncio_primitives.py
+    fixDocumented: scripts/check_fix_documented.py
+
+tags:
+  - python
+  - asyncio
+  - concurrency
+  - race-condition
+  - bug-fix
+  - existing-codebase
+
+estimatedMinutes: 30

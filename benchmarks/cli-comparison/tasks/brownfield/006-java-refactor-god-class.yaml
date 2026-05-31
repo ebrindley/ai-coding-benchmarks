@@ -1,0 +1,172 @@
+# Brownfield Task: Refactor God Class into Focused Services
+#
+# Category: Refactor (existing-codebase)
+# Language: Java (Spring Boot)
+# Complexity: Medium
+# Estimated Time: 30 minutes
+#
+# REFACTOR CONSTRAINTS:
+# - All existing tests must pass WITHOUT modification
+# - No public API changes (method signatures unchanged)
+# - Behavior must be identical before and after
+#
+# This is a TRUE refactor: internal restructuring only
+
+taskId: brownfield-006-java-refactor-god-class
+type: brownfield
+codeType: existing-codebase
+category: refactor
+language: java
+description: |
+  Refactor a 2000-line "god class" into focused, single-responsibility services.
+
+  Current state:
+  - OrderService.java handles orders, inventory, notifications, payments
+  - 2000+ lines, 45 methods, 12 dependencies
+  - Hard to test, hard to maintain, violates SRP
+
+  Target state:
+  - OrderService: Order lifecycle only
+  - InventoryService: Stock management
+  - NotificationService: Email/SMS notifications
+  - PaymentService: Payment processing
+
+  CRITICAL CONSTRAINTS:
+  - All existing tests MUST pass without any modifications
+  - Public API of OrderService MUST remain unchanged
+  - Other classes may call new services, but OrderService signature stays same
+  - Use constructor injection for new service dependencies
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: services-extracted
+      description: At least 3 new service classes created
+      substantiation: static
+      artifactRef: scripts/check-service-count.sh
+
+    - id: srp-compliance
+      description: Each service has single responsibility (<500 lines)
+      substantiation: static
+      artifactRef: scripts/check-class-size.sh
+
+    - id: existing-tests-pass
+      description: All existing tests pass
+      substantiation: test
+      artifactRef: mvn test exits 0
+
+    - id: no-test-modifications
+      description: No test files were modified
+      substantiation: static
+      artifactRef: scripts/check-no-test-edits.sh
+
+    - id: api-unchanged
+      description: OrderService public method signatures unchanged
+      substantiation: static
+      artifactRef: scripts/check-api-compat.sh
+
+  niceToHave:
+    - id: dependency-injection
+      description: New services use constructor injection
+      substantiation: static
+      artifactRef: scripts/check-constructor-injection.sh
+
+    - id: reduced-complexity
+      description: Cyclomatic complexity reduced
+      substantiation: static
+      artifactRef: scripts/check-complexity.sh
+
+  successCriteria:
+    - All existing tests pass without modification
+    - No public API changes to OrderService
+    - God class split into 3+ focused services
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: no-test-edits
+    check: No test files modified (true refactor)
+    command: bash scripts/check-no-test-edits.sh
+    expectedExitCode: 0
+    order: 2
+
+  - gate: no-api-change
+    check: Public API unchanged (japicmp baseline)
+    command: bash scripts/check-api-compat.sh
+    expectedExitCode: 0
+    order: 3
+
+  - gate: build
+    check: Maven build succeeds
+    command: mvn clean compile -q
+    expectedExitCode: 0
+    order: 4
+
+  - gate: tests
+    check: All tests pass
+    command: mvn test -q
+    expectedExitCode: 0
+    order: 5
+
+  - gate: requirements
+    check: All must_have items substantiated
+    order: 6
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - complexity_delta
+
+toolEvidencePolicy:
+  requiredWhen: tests are part of success_criteria
+  neutralWhen: never
+
+networkPolicy:
+  allowed: true
+  provenanceRequired: true
+  record:
+    - urls
+    - timestamps
+    - content_hash
+
+fixturePath: java-god-class-service
+
+# Fixture details
+fixture:
+  description: Spring Boot app with monolithic OrderService
+  godClass: src/main/java/com/example/service/OrderService.java
+  testCount: 6 tests in 1 test file
+  apiBaseline: baseline/order-service-public-api.txt
+  checkScripts:
+    noTestEdits: scripts/check-no-test-edits.sh
+    apiCompat: scripts/check-api-compat.sh
+    serviceCount: scripts/check-service-count.sh
+    classSize: scripts/check-class-size.sh
+
+# Refactor-specific configuration
+refactorConstraints:
+  noTestEdits: true
+  noApiChange: true
+  apiBaselinePath: baseline/order-service-public-api.txt
+
+tags:
+  - java
+  - spring-boot
+  - refactor
+  - srp
+  - god-class
+  - existing-codebase
+
+estimatedMinutes: 35

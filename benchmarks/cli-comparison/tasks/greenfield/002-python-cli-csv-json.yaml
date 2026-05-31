@@ -1,0 +1,140 @@
+# Greenfield Task: Python CLI CSV to JSON Transformer
+#
+# Category: Feature (from-scratch)
+# Language: Python
+# Complexity: Medium
+# Estimated Time: 25 minutes
+
+taskId: greenfield-002-python-cli-csv-json
+type: greenfield
+codeType: starter-code
+category: feature
+language: python
+description: |
+  Build a CLI tool that reads a CSV file and outputs JSON.
+  - Accept CSV file path as positional argument
+  - First row treated as headers (becomes JSON keys)
+  - Output valid JSON array to stdout
+  - Handle errors gracefully (missing file, malformed CSV)
+  - Support --pretty flag for formatted output
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: cli-help
+      description: CLI shows usage with --help flag
+      substantiation: test
+      artifactRef: tests/test_cli.py::test_help_flag
+
+    - id: csv-to-json
+      description: Converts CSV to JSON array correctly
+      substantiation: test
+      artifactRef: tests/test_cli.py::test_basic_conversion
+
+    - id: headers-as-keys
+      description: First row becomes JSON object keys
+      substantiation: test
+      artifactRef: tests/test_cli.py::test_headers_as_keys
+
+    - id: error-missing-file
+      description: Returns exit code 1 and stderr message for missing file
+      substantiation: test
+      artifactRef: tests/test_cli.py::test_missing_file_error
+
+    - id: error-malformed-csv
+      description: Handles malformed CSV gracefully
+      substantiation: test
+      artifactRef: tests/test_cli.py::test_malformed_csv
+
+  niceToHave:
+    - id: pretty-flag
+      description: --pretty flag outputs formatted JSON
+      substantiation: test
+      artifactRef: tests/test_cli.py::test_pretty_flag
+
+    - id: type-inference
+      description: Infers numeric types from string values
+      substantiation: test
+      artifactRef: tests/test_cli.py::test_type_inference
+
+    - id: streaming
+      description: Handles large files without loading entire file into memory
+      substantiation: test
+      artifactRef: tests/test_cli.py::test_large_file_streaming
+
+  successCriteria:
+    - All must-have tests pass
+    - No Python lint errors (ruff)
+    - Type hints present on public functions
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: install
+    check: Python tooling installed in .venv
+    command: bash scripts/setup-venv.sh
+    expectedExitCode: 0
+    order: 2
+
+  - gate: lint
+    check: No Python lint errors
+    command: ./.venv/bin/ruff check .
+    expectedExitCode: 0
+    order: 3
+
+  - gate: typecheck
+    check: Type checking passes
+    command: ./.venv/bin/mypy src/
+    expectedExitCode: 0
+    order: 4
+
+  - gate: tests
+    check: All tests pass
+    command: ./.venv/bin/pytest tests/ -v
+    expectedExitCode: 0
+    order: 5
+
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 6
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - linter_delta
+      - complexity_delta
+
+toolEvidencePolicy:
+  requiredWhen: tests are part of success_criteria
+  neutralWhen: never
+
+networkPolicy:
+  allowed: true
+  provenanceRequired: true
+  record:
+    - urls
+    - timestamps
+    - content_hash
+
+tags:
+  - cli
+  - python
+  - file-io
+  - transformation
+  - feature
+
+estimatedMinutes: 25
+
+fixturePath: python-csv2json-harness

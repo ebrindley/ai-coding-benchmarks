@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+.venv/
+__pycache__/
+
+# Build outputs
+dist/
+target/
+.oracle-dist/
+coverage/
+
+# Runtime artifacts
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+

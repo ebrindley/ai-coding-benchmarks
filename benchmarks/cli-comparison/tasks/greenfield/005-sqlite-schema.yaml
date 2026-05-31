@@ -1,0 +1,95 @@
+# Greenfield Task: SQLite Analytics Schema (No Docker)
+#
+# Category: Feature (starter harness with tests)
+# Language: SQL (SQLite)
+# Complexity: Medium
+# Estimated Time: 25 minutes
+
+taskId: greenfield-005-sqlite-schema
+type: greenfield
+codeType: starter-code
+category: feature
+language: sql
+description: |
+  Implement an e-commerce analytics schema using SQLite (no Docker).
+
+  Requirements:
+  - Create tables: customers, products, orders, order_items
+  - Proper primary keys + foreign keys (enforced with PRAGMA foreign_keys=ON)
+  - Indexes on frequently queried columns:
+      orders(order_date), orders(customer_id), order_items(product_id)
+  - Create a VIEW named daily_sales_summary with columns:
+      (sale_date, total_orders, total_revenue, avg_order_value)
+    where sale_date is DATE(order_date).
+  - Provide a single `schema.sql` file that can be applied repeatedly (idempotent).
+
+  Constraints:
+  - Do not change the test harness files under scripts/ or tests/
+  - Only edit schema.sql
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: tables-created
+      description: All tables exist with required columns
+      substantiation: test
+      artifactRef: tests/test_schema.py::test_tables_exist
+
+    - id: foreign-keys
+      description: Foreign key constraints are enforced
+      substantiation: test
+      artifactRef: tests/test_schema.py::test_foreign_keys_enforced
+
+    - id: indexes-present
+      description: Required indexes exist
+      substantiation: test
+      artifactRef: tests/test_schema.py::test_indexes_exist
+
+    - id: view-correct
+      description: daily_sales_summary computes correct aggregates for seed data
+      substantiation: test
+      artifactRef: tests/test_schema.py::test_daily_sales_summary
+
+  successCriteria:
+    - Schema applies without errors
+    - All tests pass
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only schema.sql changed (no harness/test edits)
+    order: 1
+    baselineDiffPolicy:
+      allow:
+        - schema.sql
+
+  - gate: schema-apply
+    check: Schema applies cleanly
+    command: python3 scripts/db_test.py apply
+    expectedExitCode: 0
+    order: 2
+
+  - gate: tests
+    check: All tests pass
+    command: python3 -m unittest discover -s tests -p 'test_*.py' -q
+    expectedExitCode: 0
+    order: 3
+
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 4
+
+networkPolicy:
+  allowed: false
+  provenanceRequired: false
+  record: []
+
+fixturePath: sqlite-analytics-schema
+
+tags:
+  - sql
+  - sqlite
+  - schema
+  - analytics
+  - greenfield
+
+estimatedMinutes: 25

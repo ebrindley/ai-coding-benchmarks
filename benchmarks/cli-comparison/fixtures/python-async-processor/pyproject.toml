@@ -1,0 +1,32 @@
+[project]
+name = "async-processor"
+version = "1.0.0"
+description = "Async task processor with race condition bug (benchmark fixture)"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+# Exclude performance tests by default (time-based, potentially flaky)
+# Run with: pytest -m performance (to include them)
+addopts = "-m 'not performance'"
+markers = [
+    "performance: marks tests as performance-sensitive (time-based, may be flaky)",
+]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

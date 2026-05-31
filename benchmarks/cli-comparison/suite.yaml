@@ -1,0 +1,21 @@
+# Default CLI comparison task list.
+#
+# Repetitions are included for reproducibility of the published comparison, but
+# this file is runner-neutral. Any harness can consume the task IDs.
+
+name: cli-comparison
+repetitions: 3
+
+tasks:
+  - greenfield-002-python-cli-csv-json
+  - greenfield-003-js-event-emitter
+  - greenfield-004-java-spring-service
+  - greenfield-005-sqlite-schema
+  - brownfield-002-js-rate-limiter-bug
+  - brownfield-003-python-async-race
+  - brownfield-004-ts-pagination-bug
+  - brownfield-005-sqlite-join-bug
+  - brownfield-009-js-xss-vulnerability
+  - brownfield-006-java-refactor-god-class
+  - brownfield-007-python-refactor-duplicate-logic
+  - brownfield-008-js-to-ts-migration

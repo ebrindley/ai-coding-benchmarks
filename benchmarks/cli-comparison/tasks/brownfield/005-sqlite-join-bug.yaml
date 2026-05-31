@@ -1,0 +1,100 @@
+# Brownfield Task: Fix Incorrect JOIN Causing Missing Rows (SQLite, No Docker)
+#
+# Category: Bug Fix (existing-codebase)
+# Language: SQL (SQLite)
+# Complexity: Medium
+# Estimated Time: 20 minutes
+#
+# Bug: Report query missing orders that have no items
+# Root cause: INNER JOIN should be LEFT JOIN
+
+taskId: brownfield-005-sqlite-join-bug
+type: brownfield
+codeType: existing-codebase
+category: bugfix
+language: sql
+description: |
+  Fix a report query that's missing rows due to incorrect JOIN type.
+
+  Bug symptoms:
+  - Monthly sales report shows fewer orders than expected
+  - Orders with no items are missing
+  - Total revenue is correct, but order count is wrong
+
+  Root cause hints:
+  - Check the JOIN between orders and order_items
+  - INNER JOIN excludes orders with no matching items
+  - Should be LEFT JOIN to include all orders
+
+  Constraints:
+  - Fix the query in reports/monthly_sales.sql
+  - Must return exact row count (seed data has 50 orders, 45 with items)
+  - Specific order IDs must appear: 101, 105, 112 (orders with no items)
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: all-orders-included
+      description: Query returns all 50 orders including those with no items
+      substantiation: test
+      artifactRef: tests/test_reports.py::test_all_orders_count
+
+    - id: specific-ids-present
+      description: Orders 101, 105, 112 (no items) appear in results
+      substantiation: test
+      artifactRef: tests/test_reports.py::test_no_item_orders_present
+
+    - id: revenue-unchanged
+      description: Total revenue calculation still correct
+      substantiation: test
+      artifactRef: tests/test_reports.py::test_revenue_correct
+
+    - id: null-handling
+      description: Orders with no items show 0 for item_count and revenue
+      substantiation: test
+      artifactRef: tests/test_reports.py::test_null_handling
+
+  successCriteria:
+    - Query returns exactly 50 rows
+    - Order IDs 101, 105, 112 present in results
+    - Total revenue matches expected value
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only reports/monthly_sales.sql changed (no harness/test edits)
+    order: 1
+    baselineDiffPolicy:
+      allow:
+        - reports/monthly_sales.sql
+
+  - gate: validate
+    check: Query file parses and returns rows
+    command: python3 scripts/db_test.py validate
+    expectedExitCode: 0
+    order: 2
+
+  - gate: tests
+    check: All tests pass
+    command: python3 -m unittest discover -s tests -p 'test_*.py' -q
+    expectedExitCode: 0
+    order: 3
+
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 4
+
+networkPolicy:
+  allowed: false
+  provenanceRequired: false
+  record: []
+
+fixturePath: sqlite-ecommerce-reports
+
+tags:
+  - sql
+  - sqlite
+  - joins
+  - bug-fix
+  - existing-codebase
+
+estimatedMinutes: 20

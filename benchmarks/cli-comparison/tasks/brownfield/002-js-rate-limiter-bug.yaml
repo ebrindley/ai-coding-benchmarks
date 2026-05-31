@@ -1,0 +1,145 @@
+# Brownfield Task: Fix Off-by-One Bug in Rate Limiter
+#
+# Category: Bug Fix (starter-code)
+# Language: JavaScript (Node.js/Express)
+# Complexity: Medium
+# Estimated Time: 25 minutes
+#
+# Bug: Rate limiter window resets incorrectly, allowing 101st request
+# Root cause: Off-by-one in timestamp comparison
+# Key constraint: Implementation MUST accept injected clock function for testability
+
+taskId: brownfield-002-js-rate-limiter-bug
+type: brownfield
+codeType: starter-code
+category: bugfix
+language: javascript
+description: |
+  Fix an off-by-one bug in a rate limiter middleware.
+
+  Bug symptoms:
+  - Limit is 100 requests per 60 seconds per IP
+  - 101st request within window sometimes succeeds when it shouldn't
+  - Window reset timing is inconsistent
+
+  Root cause hints:
+  - Check the timestamp comparison logic in shouldReset()
+  - Off-by-one: using > instead of >= (or vice versa)
+
+  Constraints:
+  - Implementation MUST accept a clock function via dependency injection
+  - Tests use fake clock (Sinon) - do not rely on real time
+  - Do not change the public API of the middleware
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: 101st-request-blocked
+      description: 101st request within window returns 429
+      substantiation: test
+      artifactRef: test/rate-limiter.test.js::blocks-101st-request
+
+    - id: window-reset-correct
+      description: Window resets exactly at 60000ms, not 60001ms
+      substantiation: test
+      artifactRef: test/rate-limiter.test.js::window-reset-timing
+
+    - id: retry-after-header
+      description: 429 response includes correct Retry-After header
+      substantiation: test
+      artifactRef: test/rate-limiter.test.js::retry-after-header
+
+    - id: clock-injection
+      description: Implementation accepts clock function via options
+      substantiation: static
+      artifactRef: scripts/check-clock-injection.js
+
+    - id: existing-tests-pass
+      description: All existing tests still pass
+      substantiation: test
+      artifactRef: npm test exits 0
+
+  niceToHave:
+    - id: per-ip-isolation
+      description: Different IPs have independent limits
+      substantiation: test
+      artifactRef: test/rate-limiter.test.js::per-ip-isolation
+
+  successCriteria:
+    - All must-have tests pass (using fake clock)
+    - No ESLint errors
+    - Public API unchanged
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: install
+    check: Dependencies installed
+    command: npm install --no-audit --no-fund --package-lock=false
+    expectedExitCode: 0
+    order: 2
+
+  - gate: lint
+    check: No ESLint errors
+    command: npx eslint src/
+    expectedExitCode: 0
+    order: 3
+
+  - gate: tests
+    check: All tests pass
+    command: npm test
+    expectedExitCode: 0
+    order: 4
+
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 5
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - linter_delta
+      - complexity_delta
+
+toolEvidencePolicy:
+  requiredWhen: tests are part of success_criteria
+  neutralWhen: never
+
+networkPolicy:
+  allowed: true
+  provenanceRequired: true
+  record:
+    - urls
+    - timestamps
+    - content_hash
+
+fixturePath: js-rate-limiter-buggy
+
+# Fixture details
+fixture:
+  description: Express app with buggy rate limiter middleware
+  bugLocation: src/middleware/rate-limiter.js
+  testFramework: Jest + Sinon (fake timers)
+  clockInjection: Required via options.now parameter
+
+tags:
+  - javascript
+  - express
+  - middleware
+  - bug-fix
+  - timing
+  - starter-code
+
+estimatedMinutes: 25

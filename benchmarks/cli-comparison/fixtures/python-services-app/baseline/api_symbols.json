@@ -1,0 +1,238 @@
+{
+  "$schema": "api_baseline_v1",
+  "generated_at": "2026-01-03T00:00:00Z",
+  "description": "API baseline snapshot for refactor validation. Changes to this file = API change.",
+  "modules": {
+    "src.services.user_service": {
+      "classes": {
+        "User": {
+          "type": "dataclass",
+          "fields": {
+            "id": "int",
+            "email": "str",
+            "phone": "Optional[str]",
+            "address": "Optional[str]"
+          }
+        },
+        "ValidationError": {
+          "type": "exception",
+          "bases": ["Exception"]
+        },
+        "UserService": {
+          "type": "class",
+          "methods": {
+            "__init__": {
+              "signature": "(self, repository=None)",
+              "return": "None"
+            },
+            "validate_email": {
+              "signature": "(self, email: str)",
+              "return": "str"
+            },
+            "validate_phone": {
+              "signature": "(self, phone: str)",
+              "return": "str"
+            },
+            "validate_address": {
+              "signature": "(self, address: str)",
+              "return": "str"
+            },
+            "create_user": {
+              "signature": "(self, email: str, phone: Optional[str] = None, address: Optional[str] = None)",
+              "return": "User",
+              "note": "Signature spans multiple lines but logical signature unchanged"
+            },
+            "get_user": {
+              "signature": "(self, user_id: int)",
+              "return": "Optional[User]"
+            },
+            "update_email": {
+              "signature": "(self, user_id: int, email: str)",
+              "return": "User"
+            },
+            "update_phone": {
+              "signature": "(self, user_id: int, phone: str)",
+              "return": "User"
+            },
+            "update_address": {
+              "signature": "(self, user_id: int, address: str)",
+              "return": "User"
+            },
+            "list_users": {
+              "signature": "(self)",
+              "return": "List[User]"
+            },
+            "delete_user": {
+              "signature": "(self, user_id: int)",
+              "return": "bool"
+            }
+          }
+        }
+      }
+    },
+    "src.services.order_service": {
+      "classes": {
+        "OrderStatus": {
+          "type": "enum",
+          "values": ["PENDING", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"]
+        },
+        "OrderItem": {
+          "type": "dataclass",
+          "fields": {
+            "product_id": "int",
+            "quantity": "int",
+            "price": "float"
+          }
+        },
+        "Order": {
+          "type": "dataclass",
+          "fields": {
+            "id": "int",
+            "customer_email": "str",
+            "shipping_address": "str",
+            "items": "List[OrderItem]",
+            "status": "OrderStatus",
+            "created_at": "datetime"
+          }
+        },
+        "ValidationError": {
+          "type": "exception",
+          "bases": ["Exception"]
+        },
+        "OrderService": {
+          "type": "class",
+          "methods": {
+            "__init__": {
+              "signature": "(self, inventory_service=None)",
+              "return": "None"
+            },
+            "validate_email": {
+              "signature": "(self, email: str)",
+              "return": "str"
+            },
+            "validate_address": {
+              "signature": "(self, address: str)",
+              "return": "str"
+            },
+            "create_order": {
+              "signature": "(self, customer_email: str, shipping_address: str, items: List[dict])",
+              "return": "Order"
+            },
+            "get_order": {
+              "signature": "(self, order_id: int)",
+              "return": "Optional[Order]"
+            },
+            "update_shipping_address": {
+              "signature": "(self, order_id: int, address: str)",
+              "return": "Order"
+            },
+            "confirm_order": {
+              "signature": "(self, order_id: int)",
+              "return": "Order"
+            },
+            "ship_order": {
+              "signature": "(self, order_id: int)",
+              "return": "Order"
+            },
+            "cancel_order": {
+              "signature": "(self, order_id: int)",
+              "return": "Order"
+            },
+            "list_orders": {
+              "signature": "(self, status: Optional[OrderStatus] = None)",
+              "return": "List[Order]"
+            },
+            "get_order_total": {
+              "signature": "(self, order_id: int)",
+              "return": "float"
+            }
+          }
+        }
+      }
+    },
+    "src.services.admin_service": {
+      "classes": {
+        "AdminRole": {
+          "type": "enum",
+          "values": ["VIEWER", "EDITOR", "ADMIN", "SUPER_ADMIN"]
+        },
+        "AdminUser": {
+          "type": "dataclass",
+          "fields": {
+            "id": "int",
+            "email": "str",
+            "phone": "str",
+            "address": "str",
+            "role": "AdminRole",
+            "created_at": "datetime"
+          }
+        },
+        "ValidationError": {
+          "type": "exception",
+          "bases": ["Exception"]
+        },
+        "AdminService": {
+          "type": "class",
+          "methods": {
+            "__init__": {
+              "signature": "(self, audit_logger=None)",
+              "return": "None"
+            },
+            "validate_email": {
+              "signature": "(self, email: str)",
+              "return": "str"
+            },
+            "validate_phone": {
+              "signature": "(self, phone: str)",
+              "return": "str"
+            },
+            "validate_address": {
+              "signature": "(self, address: str)",
+              "return": "str"
+            },
+            "create_admin": {
+              "signature": "(self, email: str, phone: str, address: str, role: AdminRole = AdminRole.VIEWER)",
+              "return": "AdminUser"
+            },
+            "get_admin": {
+              "signature": "(self, admin_id: int)",
+              "return": "Optional[AdminUser]"
+            },
+            "update_email": {
+              "signature": "(self, admin_id: int, email: str)",
+              "return": "AdminUser"
+            },
+            "update_phone": {
+              "signature": "(self, admin_id: int, phone: str)",
+              "return": "AdminUser"
+            },
+            "update_address": {
+              "signature": "(self, admin_id: int, address: str)",
+              "return": "AdminUser"
+            },
+            "promote_admin": {
+              "signature": "(self, admin_id: int, new_role: AdminRole)",
+              "return": "AdminUser"
+            },
+            "demote_admin": {
+              "signature": "(self, admin_id: int, new_role: AdminRole)",
+              "return": "AdminUser"
+            },
+            "list_admins": {
+              "signature": "(self, role: Optional[AdminRole] = None)",
+              "return": "List[AdminUser]"
+            },
+            "delete_admin": {
+              "signature": "(self, admin_id: int)",
+              "return": "bool"
+            },
+            "get_admins_by_role": {
+              "signature": "(self, role: AdminRole)",
+              "return": "List[AdminUser]"
+            }
+          }
+        }
+      }
+    }
+  }
+}
