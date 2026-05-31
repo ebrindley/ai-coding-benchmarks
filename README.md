@@ -1,76 +1,54 @@
 # AI Coding Benchmarks
 
-Reproducible coding-agent benchmark challenges for comparing AI coding tools.
+A public reference set of benchmark scenarios for evaluating AI coding models
+and agentic coding tools on small but realistic software engineering tasks.
 
-This repository contains standalone benchmark tasks, starting fixtures, and
-oracle checks. It intentionally does not include any orchestration framework,
-provider credentials, private run logs, or local machine configuration.
+This is **not** a leaderboard, an endorsement of any tool, or a
+community-maintained benchmark suite. It is a fixed, reusable set of tasks,
+starting fixtures, and validators that you can run against any coding agent to
+compare results yourself.
 
-## What Is Included
+## What's Included
 
-- `benchmarks/cli-comparison/tasks/` - task specifications for greenfield and
-  brownfield coding challenges.
-- `benchmarks/cli-comparison/fixtures/` - starting codebases used by the tasks.
-- `benchmarks/cli-comparison/oracles/` - external validators for tasks that need
-  checks beyond ordinary build/test commands.
-- `benchmarks/cli-comparison/suite.yaml` - the default task list for the current
-  CLI comparison suite.
+- `benchmarks/cli-comparison/tasks/` — greenfield and brownfield task specs.
+- `benchmarks/cli-comparison/fixtures/` — starting codebases for the tasks.
+- `benchmarks/cli-comparison/oracles/` — validators for checks beyond ordinary
+  build/test commands.
+- `benchmarks/cli-comparison/suite.yaml` — the default task list.
 
-## What Is Not Included
+It contains no runner/orchestration code, credentials, run logs, or results.
 
-- Provider-specific runner code.
-- Private credentials, API keys, or local environment files.
-- Raw agent transcripts or per-run worktree artifacts.
-- Any dependency on a specific orchestration framework.
+## Running a Task
 
-## Benchmark Scope
-
-The current suite mixes small but practical coding-agent challenges:
-
-- greenfield implementation,
-- brownfield bug fixing,
-- refactoring,
-- migration,
-- security,
-- SQL,
-- Python,
-- JavaScript,
-- TypeScript,
-- Java.
-
-This is not a universal leaderboard and does not include benchmark writeups or
-published comparison results. It is a reusable task suite: inspect the tasks,
-run your own agents, compare outputs, and propose improvements.
-
-## Running Challenges Manually
-
-Each task YAML lists:
-
-- the fixture to start from,
-- the implementation constraints,
-- the expected outcome,
-- the gates that should pass.
-
-A typical manual workflow is:
+Each task YAML lists the fixture to start from, the constraints, the expected
+outcome, and the gates that must pass. A typical manual run:
 
 1. Copy the referenced fixture into a temporary working directory.
-2. Ask an agent to complete the task using the task description.
-3. Run the eligibility gate commands listed in the task YAML.
-4. Run any task-specific oracle in `benchmarks/cli-comparison/oracles/`.
-5. Inspect the diff to ensure the task constraints were respected.
+2. Have an agent complete the task from its description.
+3. Run the task's eligibility gate commands.
+4. Run any task-specific oracle in `oracles/`.
+5. Inspect the diff to confirm the constraints were respected.
 
-The exact automation harness is intentionally left to the user. This keeps the
-benchmark portable across Cursor, Claude Code, Codex, Gemini CLI, OpenCode, and
-other coding agents.
+The harness is left to you, which keeps the suite portable across any coding
+agent or CLI.
 
-## Toolchain Notes
+## Toolchain
 
-Some fixtures require local language tooling:
+Some fixtures require local tooling: Node.js + npm (JS/TS), Python 3.9+,
+Java 17 + Maven, and SQLite. Generated artifacts (`node_modules/`, `.venv/`,
+`dist/`, Maven `target/`, SQLite database files) should not be committed.
 
-- Node.js and npm for JavaScript/TypeScript fixtures.
-- Python 3.9+ for Python fixtures.
-- Java 17 and Maven for Java fixtures.
-- SQLite for SQL fixtures.
+## Contributing & Governance
 
-Generated artifacts such as `node_modules/`, `.venv/`, `dist/`, `.oracle-dist/`,
-Maven `target/`, and SQLite database files should not be committed.
+This repository is owned and maintained solely by its author.
+
+- Forking, copying, and adapting are allowed under the [MIT License](LICENSE).
+- **Pull requests are not accepted.**
+- Feedback, suggestions, corrections, and bug reports are welcome via
+  [Issues](../../issues).
+- Submitted suggestions may be used, adapted, or declined at the author's
+  discretion.
+
+## License
+
+[MIT](LICENSE) © 2026 Ed Brindley

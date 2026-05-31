@@ -1,0 +1,24 @@
+name: Suggestion
+description: Suggest a new task, an improvement, or a correction.
+title: "[Suggestion]: "
+labels: ["suggestion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Pull requests are not accepted; suggestions
+        may be used, adapted, or declined at the author's discretion.
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggestion
+      description: What would you like to see added, changed, or corrected?
+    validations:
+      required: true
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Rationale
+      description: Why is this useful for evaluating AI coding tools?
+    validations:
+      required: false
