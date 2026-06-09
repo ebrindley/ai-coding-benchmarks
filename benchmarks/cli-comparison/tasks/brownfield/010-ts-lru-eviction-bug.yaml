@@ -1,0 +1,90 @@
+# Brownfield Task: Fix LRU Cache Eviction-Order Bug (TypeScript)
+#
+# Category: Bug Fix (existing-codebase)
+# Language: TypeScript (Node.js, zero dependencies)
+# Complexity: Medium
+# Estimated Time: 20 minutes
+
+taskId: brownfield-010-ts-lru-eviction-bug
+type: brownfield
+codeType: existing-codebase
+category: bugfix
+language: typescript
+description: |
+  Fix an eviction-order bug in the LRU cache in src/lru-cache.ts.
+
+  Bug symptoms:
+  - The cache evicts entries in insertion order (FIFO) rather than
+    least-recently-used order.
+  - Reading a key with get() does not refresh its recency, so a recently-read
+    key can be wrongly evicted before an untouched one.
+
+  Constraints:
+  - Preserve the public API (get/set/size/keys) and the capacity semantics.
+  - Use only the standard library and Node's built-in test runner.
+  - Do not edit tests/.
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: get-refreshes-recency
+      description: get() marks a key most-recently-used so it survives eviction
+      substantiation: test
+      artifactRef: tests/lru-cache.test.ts::get-marks-recently-used
+    - id: set-refreshes-recency
+      description: re-setting a key refreshes its recency
+      substantiation: test
+      artifactRef: tests/lru-cache.test.ts::set-updates-recency
+    - id: capacity-respected
+      description: Size never exceeds capacity
+      substantiation: test
+      artifactRef: tests/lru-cache.test.ts::respects-capacity-size
+
+  successCriteria:
+    - All tests pass
+    - Type check is clean
+    - Public API unchanged
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test edits)
+    order: 1
+  - gate: typecheck
+    check: TypeScript compiles with no errors
+    command: npm run typecheck
+    expectedExitCode: 0
+    order: 2
+  - gate: tests
+    check: All tests pass
+    command: npm test
+    expectedExitCode: 0
+    order: 3
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 4
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - typecheck_delta
+
+fixturePath: ts-lru-cache
+
+tags:
+  - typescript
+  - bug-fix
+  - data-structures
+  - lru-cache
+  - existing-codebase
+
+estimatedMinutes: 20

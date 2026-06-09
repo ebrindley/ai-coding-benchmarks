@@ -1,0 +1,100 @@
+# Greenfield Task: TypeScript Immutable Money Value Type
+#
+# Category: Feature (from-scratch)
+# Language: TypeScript (Node.js, zero dependencies)
+# Complexity: Medium
+# Estimated Time: 25 minutes
+
+taskId: greenfield-006-ts-money-value-type
+type: greenfield
+codeType: from-scratch
+category: feature
+language: typescript
+description: |
+  Implement an immutable Money value type in src/money.ts so all tests pass.
+
+  Money holds an integer number of minor units (cents) and a 3-letter ISO
+  currency code. Requirements (pinned by tests/money.test.ts):
+  - Constructor normalizes the currency to uppercase; rejects non-integer
+    amounts and currency codes that are not exactly 3 letters.
+  - Static fromDollars(value, currency) rounds to the nearest cent.
+  - plus/minus operate on matching currencies and throw on a mismatch.
+  - times(factor) rounds to integer cents.
+  - Instances are immutable; operations return new Money instances.
+  - equals compares amount and currency; toString renders "USD 12.34".
+  - Use only the standard library and Node's built-in test runner.
+  - Do not edit tests/.
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: construct-and-validate
+      description: Constructor normalizes currency and rejects bad input
+      substantiation: test
+      artifactRef: tests/money.test.ts::construct-and-read
+    - id: from-dollars
+      description: fromDollars rounds to nearest cent
+      substantiation: test
+      artifactRef: tests/money.test.ts::from-dollars
+    - id: arithmetic
+      description: plus/minus/times produce correct amounts
+      substantiation: test
+      artifactRef: tests/money.test.ts::plus-same-currency
+    - id: currency-safety
+      description: Cross-currency arithmetic throws
+      substantiation: test
+      artifactRef: tests/money.test.ts::arithmetic-rejects-currency-mismatch
+    - id: immutability
+      description: Operations do not mutate the receiver
+      substantiation: test
+      artifactRef: tests/money.test.ts::immutability
+
+  successCriteria:
+    - All tests pass
+    - Type check is clean
+    - No runtime dependencies added
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test edits)
+    order: 1
+  - gate: typecheck
+    check: TypeScript compiles with no errors
+    command: npm run typecheck
+    expectedExitCode: 0
+    order: 2
+  - gate: tests
+    check: All tests pass
+    command: npm test
+    expectedExitCode: 0
+    order: 3
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 4
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - typecheck_delta
+
+fixturePath: ts-money
+
+tags:
+  - typescript
+  - value-object
+  - immutability
+  - from-scratch
+  - feature
+  - zero-dependency
+
+estimatedMinutes: 25

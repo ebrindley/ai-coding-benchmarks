@@ -1,0 +1,92 @@
+# Brownfield Task: Fix Data Race in Go Worker Pool
+#
+# Category: Bug Fix (existing-codebase)
+# Language: Go (standard library only)
+# Complexity: Medium
+# Estimated Time: 25 minutes
+
+taskId: brownfield-011-go-worker-pool-race
+type: brownfield
+codeType: existing-codebase
+category: bugfix
+language: go
+description: |
+  Fix a concurrency bug in SumSquares in pool.go.
+
+  Bug symptoms:
+  - Multiple worker goroutines update a shared accumulator without
+    synchronization (a data race), so the total is sometimes wrong.
+  - The function does not wait for workers to finish, so it can return a partial
+    sum.
+
+  Constraints:
+  - Keep the SumSquares signature and the parallel fan-out across `workers`
+    goroutines; do not collapse it to a single-threaded loop.
+  - The fix must be race-free under `go test -race` and produce the correct sum
+    every time.
+  - Use only the standard library. Do not edit pool_test.go.
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: correct-result
+      description: Returns the exact sum of squares for all sizes
+      substantiation: test
+      artifactRef: pool_test.go::TestCorrectAcrossSizes
+    - id: deterministic-under-load
+      description: Repeated concurrent runs always return the correct total
+      substantiation: test
+      artifactRef: pool_test.go::TestRepeatableUnderConcurrency
+    - id: race-free
+      description: No data race reported by the race detector
+      substantiation: test
+      artifactRef: pool_test.go::TestRepeatableUnderConcurrency
+
+  successCriteria:
+    - All tests pass under the race detector
+    - go vet is clean
+    - Parallel fan-out preserved
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test edits)
+    order: 1
+  - gate: vet
+    check: go vet reports no problems
+    command: go vet ./...
+    expectedExitCode: 0
+    order: 2
+  - gate: tests
+    check: All tests pass with the race detector enabled
+    command: go test -race ./...
+    expectedExitCode: 0
+    order: 3
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 4
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - vet_delta
+
+fixturePath: go-worker-pool
+
+tags:
+  - go
+  - bug-fix
+  - concurrency
+  - data-race
+  - existing-codebase
+
+estimatedMinutes: 25

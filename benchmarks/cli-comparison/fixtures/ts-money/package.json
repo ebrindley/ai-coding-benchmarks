@@ -1,0 +1,10 @@
+{
+  "name": "ts-money",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "npx --yes typescript@5.4.5 tsc --noEmit"
+  }
+}

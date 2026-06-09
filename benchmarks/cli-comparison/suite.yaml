@@ -2,6 +2,9 @@
 #
 # Repetitions are included for reproducibility of the published comparison, but
 # this file is runner-neutral. Any harness can consume the task IDs.
+#
+# Task IDs are stable identifiers, not a contiguous sequence: numbering starts
+# at 002 and some numbers are unused. Do not renumber existing tasks.
 
 name: cli-comparison
 repetitions: 3
@@ -11,6 +14,9 @@ tasks:
   - greenfield-003-js-event-emitter
   - greenfield-004-java-spring-service
   - greenfield-005-sqlite-schema
+  - greenfield-006-ts-money-value-type
+  - greenfield-007-go-kv-http-service
+  - greenfield-008-rust-rpn-calculator
   - brownfield-002-js-rate-limiter-bug
   - brownfield-003-python-async-race
   - brownfield-004-ts-pagination-bug
@@ -19,3 +25,5 @@ tasks:
   - brownfield-006-java-refactor-god-class
   - brownfield-007-python-refactor-duplicate-logic
   - brownfield-008-js-to-ts-migration
+  - brownfield-010-ts-lru-eviction-bug
+  - brownfield-011-go-worker-pool-race

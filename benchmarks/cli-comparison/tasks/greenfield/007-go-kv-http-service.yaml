@@ -1,0 +1,102 @@
+# Greenfield Task: Go In-Memory Key/Value HTTP Service
+#
+# Category: Feature (from-scratch)
+# Language: Go (standard library only)
+# Complexity: Medium
+# Estimated Time: 35 minutes
+
+taskId: greenfield-007-go-kv-http-service
+type: greenfield
+codeType: from-scratch
+category: feature
+language: go
+description: |
+  Implement NewHandler in store.go so it returns an http.Handler backing a
+  concurrency-safe in-memory string->string store. JSON/REST contract:
+  - PUT  /keys/{key}  body {"value":"..."}  -> 204; 400 if "value" missing
+  - GET  /keys/{key}                         -> 200 {"value":"..."}; 404 if absent
+  - DELETE /keys/{key}                       -> 204 if it existed; 404 otherwise
+  - GET  /keys                               -> 200 {"keys":[...]} sorted ascending
+
+  The store must be safe for concurrent use (guarded by a mutex or equivalent).
+  Use only the Go standard library. Do not change the NewHandler signature; do
+  not edit store_test.go.
+complexity: medium
+
+expectedOutcome:
+  mustHave:
+    - id: put-get-roundtrip
+      description: PUT then GET returns the stored value
+      substantiation: test
+      artifactRef: store_test.go::TestPutThenGet
+    - id: not-found
+      description: GET of an absent key returns 404
+      substantiation: test
+      artifactRef: store_test.go::TestGetMissingIs404
+    - id: validation
+      description: PUT without a "value" field returns 400
+      substantiation: test
+      artifactRef: store_test.go::TestPutRejectsMissingValue
+    - id: delete-semantics
+      description: DELETE returns 204 then 404 on a repeat
+      substantiation: test
+      artifactRef: store_test.go::TestDelete
+    - id: list-sorted
+      description: GET /keys returns keys sorted ascending
+      substantiation: test
+      artifactRef: store_test.go::TestListKeysSorted
+    - id: concurrency-safe
+      description: Concurrent writes are race-free
+      substantiation: test
+      artifactRef: store_test.go::TestConcurrentWritesAreSafe
+
+  successCriteria:
+    - All tests pass under the race detector
+    - go vet is clean
+    - No third-party modules added (empty require block)
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test edits)
+    order: 1
+  - gate: vet
+    check: go vet reports no problems
+    command: go vet ./...
+    expectedExitCode: 0
+    order: 2
+  - gate: tests
+    check: All tests pass with the race detector
+    command: go test -race ./...
+    expectedExitCode: 0
+    order: 3
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 4
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - vet_delta
+
+fixturePath: go-kv-service
+
+tags:
+  - go
+  - rest-api
+  - concurrency
+  - net-http
+  - from-scratch
+  - feature
+  - zero-dependency
+
+estimatedMinutes: 35
