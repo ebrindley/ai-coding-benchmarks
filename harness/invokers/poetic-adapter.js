@@ -181,7 +181,9 @@ export function sanitizeAdapterReasonCode(value) {
 
 /**
  * Normalize requested-model identity from a request.model string (request side).
- * Absent / null / empty → null (request did not pin a model).
+ * Absent / null / empty (trim-only emptiness check) → null.
+ * Non-empty → original string (not trimmed) so full binding does not mask
+ * leading/trailing differences.
  *
  * @param {unknown} value
  * @returns {string | null}
@@ -189,13 +191,14 @@ export function sanitizeAdapterReasonCode(value) {
 export function normalizeRequestedModelIdentity(value) {
   if (value == null) return null;
   if (typeof value !== 'string') return null;
-  const s = value.trim();
-  return s === '' ? null : s;
+  if (value.trim() === '') return null;
+  return value;
 }
 
 /**
  * Extract string value from AvailabilityCoded / AvailableValue for bind compare.
- * available + non-empty value → string; unavailable or missing → null.
+ * available + non-empty (trim check only) value → original string (not trimmed);
+ * unavailable or missing → null. Exact identity must preserve leading/trailing spaces.
  *
  * @param {unknown} coded
  * @returns {string | null}
@@ -207,7 +210,8 @@ export function valueFromAvailabilityCoded(coded) {
   const c = /** @type {Record<string, unknown>} */ (coded);
   if (c.availability !== 'available') return null;
   if (typeof c.value !== 'string' || c.value.trim() === '') return null;
-  return c.value.trim();
+  // Return original value — do not mask leading/trailing differences.
+  return c.value;
 }
 
 /**
@@ -249,6 +253,10 @@ function validateAvailabilityCoded(coded, path, opts = {}) {
     if (!('value' in c)) {
       return `${path}.value is required when availability is available`;
     }
+    // Available must not carry reason (incompatible partial).
+    if ('reason' in c && c.reason !== undefined) {
+      return `${path} must not carry reason when availability is available`;
+    }
     const vt = opts.valueType ?? 'string';
     if (vt === 'string') {
       if (typeof c.value !== 'string' || c.value.trim() === '') {
@@ -277,12 +285,54 @@ function validateAvailabilityCoded(coded, path, opts = {}) {
     if (opts.requireAvailable) {
       return `${path} must be available`;
     }
+    // Unavailable must not carry value.
+    if ('value' in c && c.value !== undefined) {
+      return `${path} must not carry value when availability is unavailable`;
+    }
     if (c.reason != null && typeof c.reason !== 'string') {
       return `${path}.reason must be a string when present`;
     }
     return null;
   }
   return `${path}.availability must be "available" or "unavailable"`;
+}
+
+/**
+ * True when path is a non-empty absolute filesystem path string.
+ * @param {unknown} p
+ * @returns {boolean}
+ */
+function isAbsolutePathString(p) {
+  return typeof p === 'string' && p.trim() !== '' && path.isAbsolute(p);
+}
+
+/**
+ * Validate usage.value token fields when usage is available.
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function validateUsageValue(value) {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    return 'usage.value must be an object when available';
+  }
+  const v = /** @type {Record<string, unknown>} */ (value);
+  const allowed = new Set([
+    'inputTokens',
+    'outputTokens',
+    'cachedInputTokens',
+    'cacheCreationInputTokens',
+  ]);
+  for (const key of Object.keys(v)) {
+    if (!allowed.has(key)) {
+      return `usage.value has unsupported field "${key}"`;
+    }
+    const n = v[key];
+    if (n === undefined) continue;
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+      return `usage.value.${key} must be a finite non-negative number`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -560,6 +610,27 @@ export function parseInvokeResult(artifact) {
       'invalid-resolutionSource',
     );
   }
+  // model.resolved / resolutionSource consistency
+  const modelResolvedAvail =
+    m.resolved != null &&
+    typeof m.resolved === 'object' &&
+    !Array.isArray(m.resolved)
+      ? String(
+          /** @type {Record<string, unknown>} */ (m.resolved).availability,
+        ).trim()
+      : '';
+  if (modelResolvedAvail === 'unavailable' && m.resolutionSource !== 'unavailable') {
+    return invalidParse(
+      'model.resolutionSource must be "unavailable" when model.resolved is unavailable',
+      'invalid-resolutionSource-consistency',
+    );
+  }
+  if (modelResolvedAvail === 'available' && m.resolutionSource === 'unavailable') {
+    return invalidParse(
+      'model.resolutionSource must not be "unavailable" when model.resolved is available',
+      'invalid-resolutionSource-consistency',
+    );
+  }
 
   // --- versions ---
   const versions = rec.versions;
@@ -706,48 +777,36 @@ export function parseInvokeResult(artifact) {
   if (usage == null || typeof usage !== 'object' || Array.isArray(usage)) {
     return invalidParse('invoke result missing usage object', 'missing-usage');
   }
+  const uErr = validateAvailabilityCoded(usage, 'usage', { valueType: 'object' });
+  if (uErr) return invalidParse(uErr, 'invalid-usage');
   const u = /** @type {Record<string, unknown>} */ (usage);
   if (u.availability === 'available') {
-    if (u.value == null || typeof u.value !== 'object' || Array.isArray(u.value)) {
-      return invalidParse(
-        'usage.value must be an object when available',
-        'invalid-usage',
-      );
-    }
-  } else {
-    const uErr = validateAvailabilityCoded(usage, 'usage', { valueType: 'object' });
-    if (uErr) return invalidParse(uErr, 'invalid-usage');
+    const usageValErr = validateUsageValue(u.value);
+    if (usageValErr) return invalidParse(usageValErr, 'invalid-usage');
   }
 
   const cost = rec.cost;
   if (cost == null || typeof cost !== 'object' || Array.isArray(cost)) {
     return invalidParse('invoke result missing cost object', 'missing-cost');
   }
+  const cErr = validateAvailabilityCoded(cost, 'cost', { valueType: 'object' });
+  if (cErr) return invalidParse(cErr, 'invalid-cost');
   const co = /** @type {Record<string, unknown>} */ (cost);
   if (co.availability === 'available') {
+    const cv = /** @type {Record<string, unknown>} */ (co.value);
     if (
-      co.value == null ||
-      typeof co.value !== 'object' ||
-      Array.isArray(co.value)
+      typeof cv.totalCostUsd !== 'number' ||
+      !Number.isFinite(cv.totalCostUsd) ||
+      cv.totalCostUsd < 0
     ) {
       return invalidParse(
-        'cost.value must be an object when available',
+        'cost.value.totalCostUsd must be a finite non-negative number when available',
         'invalid-cost',
       );
     }
-    const cv = /** @type {Record<string, unknown>} */ (co.value);
-    if (typeof cv.totalCostUsd !== 'number' || !Number.isFinite(cv.totalCostUsd)) {
-      return invalidParse(
-        'cost.value.totalCostUsd must be a finite number when available',
-        'invalid-cost',
-      );
-    }
-  } else {
-    const cErr = validateAvailabilityCoded(cost, 'cost', { valueType: 'object' });
-    if (cErr) return invalidParse(cErr, 'invalid-cost');
   }
 
-  // --- artifacts (required object with result + quarantineDir) ---
+  // --- artifacts (required object with absolute path strings) ---
   const artifacts = rec.artifacts;
   if (
     artifacts == null ||
@@ -760,27 +819,27 @@ export function parseInvokeResult(artifact) {
     );
   }
   const art = /** @type {Record<string, unknown>} */ (artifacts);
-  if (typeof art.result !== 'string' || art.result.trim() === '') {
+  if (!isAbsolutePathString(art.result)) {
     return invalidParse(
-      'artifacts.result must be a non-empty string path',
+      'artifacts.result must be a non-empty absolute path string',
       'invalid-artifacts-result',
     );
   }
-  if (typeof art.quarantineDir !== 'string' || art.quarantineDir.trim() === '') {
+  if (!isAbsolutePathString(art.quarantineDir)) {
     return invalidParse(
-      'artifacts.quarantineDir must be a non-empty string path',
+      'artifacts.quarantineDir must be a non-empty absolute path string',
       'invalid-artifacts-quarantineDir',
     );
   }
-  if (art.stdout != null && typeof art.stdout !== 'string') {
+  if (art.stdout != null && !isAbsolutePathString(art.stdout)) {
     return invalidParse(
-      'artifacts.stdout must be a string when present',
+      'artifacts.stdout must be a non-empty absolute path string when present',
       'invalid-artifacts-stdout',
     );
   }
-  if (art.stderr != null && typeof art.stderr !== 'string') {
+  if (art.stderr != null && !isAbsolutePathString(art.stderr)) {
     return invalidParse(
-      'artifacts.stderr must be a string when present',
+      'artifacts.stderr must be a non-empty absolute path string when present',
       'invalid-artifacts-stderr',
     );
   }
@@ -1128,52 +1187,6 @@ export function bindInvokeResultToRequest(parsed, expected) {
     infraFailure:
       parsed.infraFailure || 'adapter result invalid after identity bind',
     parseError: parsed.parseError || 'invalid-after-bind',
-  };
-}
-
-/**
- * Bind a parsed invoke result to the expected requestId only.
- * Prefer {@link bindInvokeResultToRequest} for full identity (provider + model).
- * Stale/pre-planted success for a different requestId is never accepted.
- * On any mismatch, clear artifact so model/parsedOutput cannot be consumed.
- *
- * @param {ParsedInvokeResult} parsed
- * @param {string} expectedRequestId
- * @returns {ParsedInvokeResult}
- */
-export function bindInvokeResultToRequestId(parsed, expectedRequestId) {
-  const expected = String(expectedRequestId);
-  const artifact = parsed.artifact;
-  // No artifact to bind — preserve the original parse/read failure (cannot be success).
-  if (artifact == null || typeof artifact !== 'object' || Array.isArray(artifact)) {
-    return {
-      ...parsed,
-      valid: false,
-      success: false,
-      artifact: null,
-    };
-  }
-  const rawId = /** @type {Record<string, unknown>} */ (artifact).requestId;
-  const got = rawId != null && String(rawId).trim() !== '' ? String(rawId) : null;
-
-  if (got === expected && parsed.valid === true) {
-    return parsed;
-  }
-
-  return {
-    ...parsed,
-    valid: false,
-    success: false,
-    // Clear model/artifact evidence after any binding failure
-    artifact: null,
-    infraFailure:
-      got === expected
-        ? parsed.infraFailure || 'adapter result invalid after requestId bind'
-        : `adapter result requestId mismatch: expected ${expected}, got ${got ?? '(missing)'}`,
-    parseError:
-      got === expected
-        ? parsed.parseError || 'invalid-after-bind'
-        : 'requestId-mismatch',
   };
 }
 

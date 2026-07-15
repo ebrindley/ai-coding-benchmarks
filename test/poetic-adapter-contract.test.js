@@ -47,10 +47,13 @@ describe('poetic-adapter strict ProviderInvokeResultV1 contract', () => {
     }
   });
 
-  it('rejects malformed availability-coded values', async () => {
-    const { parseInvokeResult } = await import(
-      '../harness/invokers/poetic-adapter.js'
-    );
+  it('rejects malformed availability-coded values and relationships', async () => {
+    const {
+      parseInvokeResult,
+      valueFromAvailabilityCoded,
+      bindInvokeResultToRequest,
+      normalizeRequestedModelIdentity,
+    } = await import('../harness/invokers/poetic-adapter.js');
     const base = buildValidInvokeResultV1();
 
     const badAvailable = {
@@ -61,6 +64,36 @@ describe('poetic-adapter strict ProviderInvokeResultV1 contract', () => {
       },
     };
     assert.equal(parseInvokeResult(badAvailable).valid, false);
+
+    // available must not carry reason
+    const availableWithReason = {
+      ...base,
+      model: {
+        .../** @type {object} */ (base.model),
+        resolved: {
+          availability: 'available',
+          value: 'm',
+          reason: 'should-not-be-here',
+        },
+        resolutionSource: 'provider-result',
+      },
+    };
+    assert.equal(parseInvokeResult(availableWithReason).valid, false);
+
+    // unavailable must not carry value
+    const unavailableWithValue = {
+      ...base,
+      model: {
+        .../** @type {object} */ (base.model),
+        resolved: {
+          availability: 'unavailable',
+          value: 'sneak',
+          reason: 'n/a',
+        },
+        resolutionSource: 'unavailable',
+      },
+    };
+    assert.equal(parseInvokeResult(unavailableWithValue).valid, false);
 
     const badProviderRequested = {
       ...base,
@@ -79,6 +112,36 @@ describe('poetic-adapter strict ProviderInvokeResultV1 contract', () => {
       },
     };
     assert.equal(parseInvokeResult(badResolutionSource).valid, false);
+    assert.equal(
+      parseInvokeResult(badResolutionSource).parseError,
+      'invalid-resolutionSource',
+    );
+
+    // unavailable resolved requires resolutionSource === unavailable
+    const badSrcUnavail = {
+      ...base,
+      model: {
+        requested: unavailable('no model requested'),
+        resolved: unavailable('model not resolved'),
+        resolutionSource: 'provider-result',
+      },
+    };
+    assert.equal(parseInvokeResult(badSrcUnavail).valid, false);
+    assert.match(
+      String(parseInvokeResult(badSrcUnavail).parseError),
+      /resolutionSource-consistency/,
+    );
+
+    // available resolved forbids resolutionSource === unavailable
+    const badSrcAvail = {
+      ...base,
+      model: {
+        requested: available('m1'),
+        resolved: available('m1'),
+        resolutionSource: 'unavailable',
+      },
+    };
+    assert.equal(parseInvokeResult(badSrcAvail).valid, false);
 
     const freeReason = {
       ...base,
@@ -89,6 +152,158 @@ describe('poetic-adapter strict ProviderInvokeResultV1 contract', () => {
       },
     };
     assert.equal(parseInvokeResult(freeReason).valid, false);
+
+    // Exact identity: leading/trailing spaces preserved (not trimmed away)
+    const spaced = available('  model-x  ');
+    assert.equal(valueFromAvailabilityCoded(spaced), '  model-x  ');
+    assert.equal(normalizeRequestedModelIdentity('  model-x  '), '  model-x  ');
+    assert.equal(normalizeRequestedModelIdentity('   '), null);
+    assert.equal(normalizeRequestedModelIdentity(''), null);
+    const fullSpaced = buildValidInvokeResultV1({
+      requestId: 'sp-1',
+      provider: 'openai',
+      requestedModel: '  model-x  ',
+      resolvedModel: '  model-x  ',
+    });
+    // Force exact spaced available value in model.requested
+    /** @type {any} */ (fullSpaced).model.requested = available('  model-x  ');
+    /** @type {any} */ (fullSpaced).model.resolved = available('  model-x  ');
+    /** @type {any} */ (fullSpaced).model.resolutionSource = 'provider-result';
+    const parsedSp = parseInvokeResult(fullSpaced);
+    assert.equal(parsedSp.valid, true, parsedSp.parseError || parsedSp.infraFailure);
+    const boundExact = bindInvokeResultToRequest(parsedSp, {
+      requestId: 'sp-1',
+      provider: 'openai',
+      requestedModel: '  model-x  ',
+    });
+    assert.equal(boundExact.valid, true, boundExact.parseError || boundExact.infraFailure);
+    const boundTrimMismatch = bindInvokeResultToRequest(parsedSp, {
+      requestId: 'sp-1',
+      provider: 'openai',
+      requestedModel: 'model-x',
+    });
+    assert.equal(boundTrimMismatch.valid, false);
+    assert.match(String(boundTrimMismatch.parseError), /requested-model/i);
+  });
+
+  it('validates usage token fields and absolute artifact paths', async () => {
+    const { parseInvokeResult } = await import(
+      '../harness/invokers/poetic-adapter.js'
+    );
+    const base = buildValidInvokeResultV1();
+
+    const badUsage = {
+      ...base,
+      usage: {
+        availability: 'available',
+        value: { inputTokens: -1 },
+      },
+    };
+    assert.equal(parseInvokeResult(badUsage).valid, false);
+
+    const badUsageNaN = {
+      ...base,
+      usage: {
+        availability: 'available',
+        value: { outputTokens: Number.NaN },
+      },
+    };
+    assert.equal(parseInvokeResult(badUsageNaN).valid, false);
+
+    const badUsageInf = {
+      ...base,
+      usage: {
+        availability: 'available',
+        value: { cachedInputTokens: Number.POSITIVE_INFINITY },
+      },
+    };
+    assert.equal(parseInvokeResult(badUsageInf).valid, false);
+
+    const badUsageField = {
+      ...base,
+      usage: {
+        availability: 'available',
+        value: { totalTokens: 9 },
+      },
+    };
+    assert.equal(parseInvokeResult(badUsageField).valid, false);
+
+    const okUsage = {
+      ...base,
+      usage: {
+        availability: 'available',
+        value: {
+          inputTokens: 1,
+          outputTokens: 2,
+          cachedInputTokens: 0,
+          cacheCreationInputTokens: 3,
+        },
+      },
+    };
+    assert.equal(parseInvokeResult(okUsage).valid, true);
+
+    const badCost = {
+      ...base,
+      cost: {
+        availability: 'available',
+        value: { totalCostUsd: -0.01 },
+      },
+    };
+    assert.equal(parseInvokeResult(badCost).valid, false);
+
+    const badCostInf = {
+      ...base,
+      cost: {
+        availability: 'available',
+        value: { totalCostUsd: Number.POSITIVE_INFINITY },
+      },
+    };
+    assert.equal(parseInvokeResult(badCostInf).valid, false);
+
+    const okCost = {
+      ...base,
+      cost: {
+        availability: 'available',
+        value: { totalCostUsd: 0 },
+      },
+    };
+    assert.equal(parseInvokeResult(okCost).valid, true);
+
+    const relArt = {
+      ...base,
+      artifacts: {
+        result: 'relative/out.json',
+        quarantineDir: 'relative/q',
+      },
+    };
+    assert.equal(parseInvokeResult(relArt).valid, false);
+
+    const emptyArt = {
+      ...base,
+      artifacts: {
+        result: '',
+        quarantineDir: '/tmp/q',
+      },
+    };
+    assert.equal(parseInvokeResult(emptyArt).valid, false);
+
+    const relStdout = {
+      ...base,
+      artifacts: {
+        .../** @type {object} */ (base.artifacts),
+        stdout: 'not/absolute.txt',
+      },
+    };
+    assert.equal(parseInvokeResult(relStdout).valid, false);
+
+    const emptyStderr = {
+      ...base,
+      artifacts: {
+        .../** @type {object} */ (base.artifacts),
+        stderr: '   ',
+      },
+    };
+    assert.equal(parseInvokeResult(emptyStderr).valid, false);
   });
 
   it('provider mismatch and requested-model mismatch fail bind', async () => {

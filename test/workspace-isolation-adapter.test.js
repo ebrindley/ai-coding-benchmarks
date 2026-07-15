@@ -724,7 +724,7 @@ process.exit(0);
         invokePoeticAdapter,
         expectedProviderRawPaths,
         ingestProviderRawEvidence,
-        bindInvokeResultToRequestId,
+        bindInvokeResultToRequest,
         parseInvokeResult,
       } = await import('../harness/invokers/index.js');
 
@@ -786,7 +786,11 @@ process.exit(0);
       );
       assert.equal(stale.valid, true);
       assert.ok(stale.artifact);
-      const bound = bindInvokeResultToRequestId(stale, 'current-id');
+      const bound = bindInvokeResultToRequest(stale, {
+        requestId: 'current-id',
+        provider: 'fake',
+        requestedModel: null,
+      });
       assert.equal(bound.valid, false);
       assert.equal(bound.artifact, null);
       assert.equal(bound.success, false);
