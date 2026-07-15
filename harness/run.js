@@ -447,6 +447,34 @@ export async function runCampaign(opts) {
         arms: experiment.arms,
       });
 
+      // Freeze per-trial expected fixture digests in immutable trial metadata
+      // (independent authority for fixtureDigest verification; not derived from result).
+      /** @type {Record<string, string>} */
+      const fixtureDigestByPath = {};
+      for (const task of taskList) {
+        const fixturePath =
+          task && typeof task.fixturePath === 'string' ? task.fixturePath : null;
+        if (!fixturePath || fixtureDigestByPath[fixturePath]) continue;
+        try {
+          const fixtureAbs = await peers.resolveUnder(
+            path.join(suiteDir, 'fixtures'),
+            fixturePath,
+          );
+          fixtureDigestByPath[fixturePath] = await digestArtifactDir(fixtureAbs);
+        } catch {
+          /* missing fixture: leave unset; execution will INFRA_FAIL */
+        }
+      }
+      for (const t of trials) {
+        const task = tasksById[t.taskId];
+        const fp =
+          task && typeof task.fixturePath === 'string' ? task.fixturePath : null;
+        if (fp && fixtureDigestByPath[fp]) {
+          t.expectedFixtureDigest = fixtureDigestByPath[fp];
+          t.fixturePath = fp;
+        }
+      }
+
       // experiment.id already validated by preflight / assertSafeCampaignId
       const safeCampaignId = peers.assertSafeCampaignId(experiment.id);
       manifest = peers.createManifest({
@@ -774,33 +802,33 @@ export async function runCampaign(opts) {
         };
 
         // Exact on-disk raw bytes + artifact tree digests (not lengths alone).
+        // resultDigest is computed by writeTrialResult over the final envelope.
         const artifactDigest =
           typeof peers.computeArtifactDigest === 'function'
             ? await peers.computeArtifactDigest(artifactDir)
             : await digestArtifactDir(artifactDir);
+        // Prefer frozen expectedFixtureDigest authority; fall back to workspace hash.
+        const fixtureDigest =
+          trial.expectedFixtureDigest != null
+            ? String(trial.expectedFixtureDigest)
+            : workspace.fixtureHash;
         const digests = peers.buildTrialDigests({
-          resultDigest:
-            typeof peers.computeResultDigest === 'function'
-              ? peers.computeResultDigest({
-                  classification: classified.classification,
-                  gateResults: safeGateResults,
-                  exitCode: invokerResult.exitCode,
-                })
-              : sha256Json({
-                  classification: classified.classification,
-                  gateResults: safeGateResults,
-                  exitCode: invokerResult.exitCode,
-                }),
           artifactDigest,
-          fixtureDigest: workspace.fixtureHash,
+          fixtureDigest,
           rawOutputDigest: rawQuarantine.digests?.rawOutputDigest,
           rawStdoutSha256: rawQuarantine.digests?.rawStdoutSha256,
           rawStderrSha256: rawQuarantine.digests?.rawStderrSha256,
           rawOutputFileSha256: rawQuarantine.digests?.rawOutputFileSha256,
         });
 
+        // Do not persist manifest-only authority fields on the public result record.
+        const {
+          expectedFixtureDigest: _expFix,
+          fixturePath: _fixPath,
+          ...trialPublic
+        } = trial;
         await peers.writeTrialResult(campaignDir, trial.id, {
-          ...trial,
+          ...trialPublic,
           ...trialUpdate,
           exitCode: invokerResult.exitCode,
           digests,
@@ -814,6 +842,7 @@ export async function runCampaign(opts) {
           error: message,
           resolvedModel: null,
           resolvedModelAvailable: false,
+          resolvedModelSource: 'unavailable',
           finishedAt: new Date().toISOString(),
           startedAt,
           ...(trialWorkspaceDir
@@ -822,23 +851,16 @@ export async function runCampaign(opts) {
         };
         try {
           // Infra path without provider raw artifacts: mark unavailable for reportability.
-          const infraDigests = peers.buildTrialDigests({
-            resultDigest:
-              typeof peers.computeResultDigest === 'function'
-                ? peers.computeResultDigest({
-                    classification: 'INFRA_FAIL',
-                    gateResults: [],
-                    exitCode: null,
-                  })
-                : sha256Json({
-                    classification: 'INFRA_FAIL',
-                    gateResults: [],
-                    exitCode: null,
-                  }),
-          });
+          // resultDigest stamped by writeTrialResult over the final envelope.
+          const infraDigests = peers.buildTrialDigests({});
           infraDigests.rawEvidenceUnavailable = true;
+          const {
+            expectedFixtureDigest: _expFix2,
+            fixturePath: _fixPath2,
+            ...trialPublicInfra
+          } = trial;
           await peers.writeTrialResult(campaignDir, trial.id, {
-            ...trial,
+            ...trialPublicInfra,
             ...trialUpdate,
             exitCode: null,
             digests: infraDigests,
@@ -876,14 +898,17 @@ export async function runCampaign(opts) {
       }
     }
 
-    // Before report/summary: verify stored digests match on-disk raw/artifact bytes.
-    // Fail closed on mismatch (tamper or partial write).
+    // Before report/summary: full evidence verification (resultDigest envelope,
+    // raw/artifact bytes, fixture authority). Unavailable/unverified records
+    // must not produce a benchmark report (fail closed).
     const evidenceCheck = await peers.verifyCampaignEvidenceDigests(
       campaignDir,
       manifest.trials,
       trialResults,
+      { failOnUnavailable: true },
     );
     if (!evidenceCheck.ok) {
+      // Do not write or reuse report.json when evidence is unavailable/tampered.
       return {
         ok: false,
         stage: 'evidence',
@@ -891,13 +916,24 @@ export async function runCampaign(opts) {
         manifest,
         executed,
         remaining: manifest.trials.filter((t) => t.state === 'pending').length,
-        errors: [evidenceCheck.error || 'evidence digest verification failed'],
+        errors: [
+          evidenceCheck.error ||
+            'evidence digest verification failed (no benchmark report)',
+        ],
         failures: evidenceCheck.failures,
+        unavailable: evidenceCheck.unavailable,
         schemaVersion: SCHEMA_VERSION,
       };
     }
 
-    const report = peers.buildReport(manifest, trialResults);
+    // Only fully verified results enter the benchmark report.
+    const reportable =
+      evidenceCheck.reportableResults &&
+      evidenceCheck.reportableResults.length > 0
+        ? evidenceCheck.reportableResults
+        : [];
+
+    const report = peers.buildReport(manifest, reportable);
     const human = peers.formatHumanSummary(report);
     await writeFile(
       path.join(campaignDir, 'report.json'),
@@ -923,6 +959,7 @@ export async function runCampaign(opts) {
       humanSummary: human,
       executed,
       remaining,
+      verified: evidenceCheck.verified,
       schemaVersion: SCHEMA_VERSION,
       warnings: [
         ...pf.warnings,

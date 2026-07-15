@@ -12,7 +12,7 @@
  * No live provider trials unless experiment arms configure invokers; tests use fakes.
  */
 
-import { readFile, access } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
@@ -185,41 +185,44 @@ export async function main(argv, io = {}) {
         return 1;
       }
       const campaignDir = path.resolve(args.campaign);
-      const reportPath = path.join(campaignDir, 'report.json');
-      try {
-        await access(reportPath);
-      } catch {
-        // rebuild from manifest + results
-        const { loadManifest } = await import('./manifest.js');
-        const { readTrialResult } = await import('./results.js');
-        const { buildReport, formatHumanSummary } = await import('./summary.js');
-        const manifest = await loadManifest(campaignDir);
-        const results = [];
-        for (const t of manifest.trials || []) {
-          try {
-            results.push(await readTrialResult(campaignDir, t.id));
-          } catch {
-            results.push(t);
-          }
+      // Never trust an existing report.json without full evidence verification.
+      // Always load manifest/results, verify, and rebuild from verified results only.
+      const { loadManifest } = await import('./manifest.js');
+      const {
+        readTrialResult,
+        verifyCampaignEvidenceDigests,
+      } = await import('./results.js');
+      const { buildReport, formatHumanSummary } = await import('./summary.js');
+      const manifest = await loadManifest(campaignDir);
+      const results = [];
+      for (const t of manifest.trials || []) {
+        if (t.state !== 'completed' && t.state !== 'failed') continue;
+        try {
+          results.push(await readTrialResult(campaignDir, t.id));
+        } catch {
+          // Missing result for completed/failed is handled by verify (fail closed).
         }
-        const report = buildReport(manifest, results);
-        if (args.json) {
-          writeOut(`${JSON.stringify(report, null, 2)}\n`);
-        } else {
-          writeOut(`${formatHumanSummary(report)}\n`);
-        }
-        return 0;
       }
-      const report = JSON.parse(await readFile(reportPath, 'utf8'));
+      const evidence = await verifyCampaignEvidenceDigests(
+        campaignDir,
+        manifest.trials,
+        results,
+        { failOnUnavailable: true },
+      );
+      if (!evidence.ok) {
+        writeErr(
+          `error: evidence verification failed (no benchmark report): ${evidence.error || 'fail closed'}\n`,
+        );
+        return 1;
+      }
+      const report = buildReport(
+        manifest,
+        evidence.reportableResults || [],
+      );
       if (args.json) {
         writeOut(`${JSON.stringify(report, null, 2)}\n`);
       } else {
-        try {
-          const { formatHumanSummary } = await import('./summary.js');
-          writeOut(`${formatHumanSummary(report)}\n`);
-        } catch {
-          writeOut(`${JSON.stringify(report, null, 2)}\n`);
-        }
+        writeOut(`${formatHumanSummary(report)}\n`);
       }
       return 0;
     }

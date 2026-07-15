@@ -17,10 +17,27 @@
 import { writeFile, mkdir, readFile, lstat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { spawnControlled } from './spawn-controlled.js';
-import { readTextNoFollow, UnsafePathError } from '../safe-fs.js';
+import {
+  readTextNoFollow,
+  readContainedRegularFileNoFollow,
+  UnsafePathError,
+} from '../safe-fs.js';
+import { assertSafeIdSegment, PathEscapeError } from '../paths.js';
 
 /** Bridge result schema id. */
 export const POETIC_INVOKE_RESULT_SCHEMA = 'poetic.provider.invoke.result.v1';
+
+/**
+ * Deterministic provider raw quarantine under the output's scratch parent:
+ *   <dirname(outputPath)>/invoke-artifacts/<requestId>/{stdout,stderr}.txt
+ *
+ * Wrapper CLI stdout/stderr are intentionally quiet; actual provider streams
+ * live only in these private files. Never trust free-form paths from the
+ * result artifact — only these exact locations.
+ */
+export const PROVIDER_RAW_ARTIFACTS_DIR = 'invoke-artifacts';
+export const PROVIDER_RAW_STDOUT_NAME = 'stdout.txt';
+export const PROVIDER_RAW_STDERR_NAME = 'stderr.txt';
 
 /**
  * Documented outcome kinds for poetic.provider.invoke.result.v1.
@@ -218,7 +235,8 @@ export function parseInvokeResult(artifact) {
       timedOut: false,
       infraFailure: `invoke result schema mismatch: expected ${POETIC_INVOKE_RESULT_SCHEMA}, got ${schema || '(missing)'}`,
       parseError: 'schema-mismatch',
-      artifact: rec,
+      // Fail closed: invalid parse never retains model/artifact evidence
+      artifact: null,
     };
   }
 
@@ -232,7 +250,7 @@ export function parseInvokeResult(artifact) {
       timedOut: false,
       infraFailure: 'invoke result missing outcome object',
       parseError: 'missing-outcome',
-      artifact: rec,
+      artifact: null,
     };
   }
 
@@ -246,7 +264,7 @@ export function parseInvokeResult(artifact) {
       timedOut: false,
       infraFailure: 'invoke result outcome.kind is missing',
       parseError: 'missing-kind',
-      artifact: rec,
+      artifact: null,
     };
   }
 
@@ -272,8 +290,8 @@ export function parseInvokeResult(artifact) {
         mapped.infraFailure ??
         `unknown adapter outcome kind (${kind})`,
       parseError: 'unknown-kind',
-      // Strip free-form reason from artifact copy used on ordinary records
-      artifact: sanitizeArtifactReasonCode(rec),
+      // Invalid kinds never supply model/artifact evidence
+      artifact: null,
     };
   }
 
@@ -491,6 +509,7 @@ async function resolveExpectedRequestId(request, requestPath) {
 /**
  * Bind a parsed invoke result to the expected requestId.
  * Stale/pre-planted success for a different requestId is never accepted.
+ * On any mismatch, clear artifact so model/parsedOutput cannot be consumed.
  *
  * @param {ParsedInvokeResult} parsed
  * @param {string} expectedRequestId
@@ -501,12 +520,17 @@ export function bindInvokeResultToRequestId(parsed, expectedRequestId) {
   const artifact = parsed.artifact;
   // No artifact to bind — preserve the original parse/read failure (cannot be success).
   if (artifact == null || typeof artifact !== 'object' || Array.isArray(artifact)) {
-    return parsed;
+    return {
+      ...parsed,
+      valid: false,
+      success: false,
+      artifact: null,
+    };
   }
   const rawId = /** @type {Record<string, unknown>} */ (artifact).requestId;
   const got = rawId != null && String(rawId).trim() !== '' ? String(rawId) : null;
 
-  if (got === expected) {
+  if (got === expected && parsed.valid === true) {
     return parsed;
   }
 
@@ -514,9 +538,116 @@ export function bindInvokeResultToRequestId(parsed, expectedRequestId) {
     ...parsed,
     valid: false,
     success: false,
-    infraFailure: `adapter result requestId mismatch: expected ${expected}, got ${got ?? '(missing)'}`,
-    parseError: 'requestId-mismatch',
+    // Clear model/artifact evidence after any binding failure
+    artifact: null,
+    infraFailure:
+      got === expected
+        ? parsed.infraFailure || 'adapter result invalid after requestId bind'
+        : `adapter result requestId mismatch: expected ${expected}, got ${got ?? '(missing)'}`,
+    parseError:
+      got === expected
+        ? parsed.parseError || 'invalid-after-bind'
+        : 'requestId-mismatch',
   };
+}
+
+/**
+ * Deterministic expected provider raw paths under the output's scratch parent.
+ *
+ * @param {string} outputPath
+ * @param {string} requestId
+ * @returns {{
+ *   scratchRoot: string,
+ *   requestId: string,
+ *   dir: string,
+ *   stdoutPath: string,
+ *   stderrPath: string,
+ * } | { error: string }}
+ */
+export function expectedProviderRawPaths(outputPath, requestId) {
+  if (outputPath == null || String(outputPath).trim() === '') {
+    return { error: 'outputPath is required for provider raw paths' };
+  }
+  let safeId;
+  try {
+    safeId = assertSafeIdSegment(String(requestId), { label: 'requestId' });
+  } catch (err) {
+    const message =
+      err instanceof PathEscapeError || err instanceof Error
+        ? err.message
+        : String(err);
+    return { error: `unsafe requestId for provider raw paths: ${message}` };
+  }
+  const scratchRoot = path.resolve(path.dirname(String(outputPath)));
+  const dir = path.join(scratchRoot, PROVIDER_RAW_ARTIFACTS_DIR, safeId);
+  return {
+    scratchRoot,
+    requestId: safeId,
+    dir,
+    stdoutPath: path.join(dir, PROVIDER_RAW_STDOUT_NAME),
+    stderrPath: path.join(dir, PROVIDER_RAW_STDERR_NAME),
+  };
+}
+
+/**
+ * After full schema + requestId binding, ingest actual Poetic provider
+ * stdout/stderr from deterministic quarantine paths under the scratch tree.
+ * Fail closed on missing/unsafe/escape/symlink paths — never claim provider evidence.
+ *
+ * @param {string} outputPath
+ * @param {string} requestId
+ * @param {{ maxBytes?: number }} [opts]
+ * @returns {Promise<{
+ *   ok: boolean,
+ *   stdout: string,
+ *   stderr: string,
+ *   unavailable?: boolean,
+ *   error?: string,
+ * }>}
+ */
+export async function ingestProviderRawEvidence(outputPath, requestId, opts = {}) {
+  const paths = expectedProviderRawPaths(outputPath, requestId);
+  if ('error' in paths) {
+    return {
+      ok: false,
+      stdout: '',
+      stderr: '',
+      unavailable: true,
+      error: paths.error,
+    };
+  }
+
+  try {
+    const stdoutBuf = await readContainedRegularFileNoFollow(
+      paths.scratchRoot,
+      paths.stdoutPath,
+      paths.stdoutPath,
+      opts,
+    );
+    const stderrBuf = await readContainedRegularFileNoFollow(
+      paths.scratchRoot,
+      paths.stderrPath,
+      paths.stderrPath,
+      opts,
+    );
+    return {
+      ok: true,
+      stdout: stdoutBuf.toString('utf8'),
+      stderr: stderrBuf.toString('utf8'),
+    };
+  } catch (err) {
+    const message =
+      err instanceof UnsafePathError || err instanceof Error
+        ? err.message
+        : String(err);
+    return {
+      ok: false,
+      stdout: '',
+      stderr: '',
+      unavailable: true,
+      error: `provider raw evidence unavailable (fail closed): ${message}`,
+    };
+  }
 }
 
 /**
@@ -674,12 +805,15 @@ export async function invokePoeticAdapter({
   const base = {
     exitCode: result.exitCode,
     timedOut: result.timedOut,
-    stdout: result.stdout,
-    stderr: result.stderr,
+    // Quiet wrapper streams — replaced with actual provider raw only after
+    // full valid+requestId bind and safe path ingestion below.
+    stdout: '',
+    stderr: '',
     outputPath: String(outputPath),
     success: false,
     outcomeKind: null,
     reasonCode: null,
+    parsedOutput: null,
     ...(result.signal ? { signal: result.signal } : {}),
   };
 
@@ -689,7 +823,9 @@ export async function invokePoeticAdapter({
   // Accept only when artifact requestId exactly equals this invoke's requestId.
   parsed = bindInvokeResultToRequestId(parsed, expectedRequestId);
 
-  base.parsedOutput = parsed.artifact ?? null;
+  // Only a fully valid exact-bound result may supply model/artifact evidence.
+  const fullyBound = parsed.valid === true && parsed.artifact != null;
+  base.parsedOutput = fullyBound ? parsed.artifact : null;
   base.outcomeKind = parsed.outcomeKind;
   base.reasonCode = parsed.reasonCode;
 
@@ -709,15 +845,50 @@ export async function invokePoeticAdapter({
     base.providerFailure = parsed.providerFailure;
   }
 
+  // After full schema + requestId bind: ingest actual provider raw from
+  // deterministic scratch-side invoke-artifacts/<requestId>/{stdout,stderr}.txt.
+  // On any invalid/missing/unsafe path: do not claim provider evidence.
+  if (fullyBound) {
+    const raw = await ingestProviderRawEvidence(
+      String(outputPath),
+      expectedRequestId,
+    );
+    if (raw.ok) {
+      base.stdout = raw.stdout;
+      base.stderr = raw.stderr;
+      base.providerRawEvidence = 'actual';
+    } else {
+      base.stdout = '';
+      base.stderr = '';
+      base.providerRawEvidence = 'unavailable';
+      base.providerRawEvidenceError = raw.error;
+      // Fail closed: cannot claim success without validated provider raw.
+      if (!base.infraFailure) {
+        base.infraFailure =
+          raw.error ||
+          'provider raw evidence unavailable under invoke-artifacts (fail closed)';
+      } else {
+        base.infraFailure = `${base.infraFailure}; ${raw.error || 'provider raw unavailable'}`;
+      }
+    }
+  } else {
+    base.providerRawEvidence = 'unavailable';
+    // Quiet wrapper streams are not provider evidence — leave empty.
+    base.stdout = '';
+    base.stderr = '';
+  }
+
   // Success only when spawn did not time out, exit is 0,
-  // outcome.kind is success, and requestId matches.
+  // outcome.kind is success, requestId matches, and provider raw was ingested.
   const exitOk = result.exitCode === 0;
   base.success =
-    parsed.valid === true &&
+    fullyBound &&
     parsed.success === true &&
     !timedOut &&
     exitOk &&
-    !result.infraFailure;
+    !result.infraFailure &&
+    base.providerRawEvidence === 'actual' &&
+    !base.infraFailure;
 
   // Non-success with clean CLI exit still must not look like clean success.
   if (!base.success && !base.infraFailure && !base.providerFailure) {
@@ -733,6 +904,12 @@ export async function invokePoeticAdapter({
     } else {
       base.infraFailure = 'adapter did not report success';
     }
+  }
+
+  // Never expose quiet CLI bytes as provider evidence when bind failed.
+  if (!fullyBound || base.providerRawEvidence !== 'actual') {
+    base.stdout = '';
+    base.stderr = '';
   }
 
   return base;

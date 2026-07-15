@@ -290,7 +290,8 @@ export async function exportSanitizedBundle({
   const warnings = [];
   let filesCopied = 0;
 
-  // Before export: verify stored digests match on-disk raw/artifact bytes (fail closed).
+  // Before export: full evidence gate (resultDigest envelope, raw/artifact,
+  // fixture authority). Unavailable/unverified records fail closed — no export.
   if (!skipEvidenceVerify) {
     const { verifyCampaignEvidenceDigests } = await import('./results.js');
     /** @type {object[]} */
@@ -304,11 +305,20 @@ export async function exportSanitizedBundle({
       trials = [];
     }
     if (trials.length > 0) {
-      const check = await verifyCampaignEvidenceDigests(srcRoot, trials);
+      const check = await verifyCampaignEvidenceDigests(srcRoot, trials, undefined, {
+        failOnUnavailable: true,
+      });
       if (!check.ok) {
         throw new Error(
           check.error ||
             'exportSanitizedBundle: evidence digest verification failed (fail closed)',
+        );
+      }
+      // Existing report.json is never trusted without the gate above; export
+      // still copies report only when evidence is fully verified.
+      if (check.unavailable > 0) {
+        throw new Error(
+          'exportSanitizedBundle: unavailable trial evidence present (fail closed; no benchmark export)',
         );
       }
     }

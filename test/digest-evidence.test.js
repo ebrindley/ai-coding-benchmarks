@@ -421,12 +421,25 @@ describe('digest evidence binding + tamper', () => {
       assert.equal(infra.unavailable, true);
       assert.equal(infra.mismatches.length, 0);
 
-      const campInfra = await verifyCampaignEvidenceDigests(campaign, [
+      // Report path (default failOnUnavailable): unavailable fails closed
+      const campInfraReport = await verifyCampaignEvidenceDigests(campaign, [
         { id: 't-infra', state: 'failed' },
       ]);
-      assert.equal(campInfra.ok, true);
-      assert.equal(campInfra.verified, 0);
-      assert.equal(campInfra.unavailable, 1);
+      assert.equal(campInfraReport.ok, false);
+      assert.equal(campInfraReport.verified, 0);
+      assert.equal(campInfraReport.unavailable, 1);
+      assert.ok(campInfraReport.failures.some((f) => f.trialId === 't-infra'));
+
+      // Operational classification path may count unavailable without failing
+      const campInfraOps = await verifyCampaignEvidenceDigests(
+        campaign,
+        [{ id: 't-infra', state: 'failed' }],
+        undefined,
+        { failOnUnavailable: false },
+      );
+      assert.equal(campInfraOps.ok, true);
+      assert.equal(campInfraOps.verified, 0);
+      assert.equal(campInfraOps.unavailable, 1);
 
       // Missing artifactDigest fails closed for reportable trials
       const q2 = await quarantineRawOutput(campaign, 't-no-art', {
@@ -456,6 +469,240 @@ describe('digest evidence binding + tamper', () => {
       );
     } finally {
       await rm(campaign, { recursive: true, force: true });
+    }
+  });
+
+  it('final-record resultDigest binds complete envelope; fixture authority is independent', async () => {
+    const {
+      quarantineRawOutput,
+      writeTrialResult,
+      readTrialResult,
+      buildTrialDigests,
+      computeFinalResultDigest,
+      verifyTrialEvidenceDigests,
+      verifyCampaignEvidenceDigests,
+    } = await import('../harness/results.js');
+
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-final-dig-'));
+    try {
+      const q = await quarantineRawOutput(campaign, 't-env', {
+        stdout: 'env-out\n',
+        stderr: '',
+      });
+      const artDir = path.join(campaign, 'artifacts', 't-env');
+      await mkdir(artDir, { recursive: true });
+      await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
+      const { computeArtifactDigest } = await import('../harness/results.js');
+      const artDig = await computeArtifactDigest(artDir);
+      const frozenFixture = 'a'.repeat(64);
+
+      const { result: written } = await writeTrialResult(campaign, 't-env', {
+        id: 't-env',
+        experimentId: 'exp-1',
+        arm: 'arm-a',
+        provider: 'p',
+        taskId: 'task-1',
+        repetition: 1,
+        scheduleSeed: 9,
+        invocationPath: 'native-cli',
+        requestedModel: 'm-req',
+        resolvedModel: 'm-res',
+        resolvedModelAvailable: true,
+        resolvedModelSource: 'invoker-explicit',
+        postureFingerprint: 'b'.repeat(64),
+        state: 'completed',
+        classification: 'PASS',
+        classificationReason: 'ok',
+        exitCode: 0,
+        gateResults: [],
+        changedFileCount: 1,
+        startedAt: '2026-07-15T00:00:00.000Z',
+        finishedAt: '2026-07-15T00:00:01.000Z',
+        durationMs: 1000,
+        hashes: { fixtureHash: frozenFixture },
+        artifactDir: artDir,
+        digests: buildTrialDigests({
+          artifactDigest: artDig,
+          fixtureDigest: frozenFixture,
+          ...q.digests,
+        }),
+      });
+
+      assert.match(written.digests.resultDigest, /^[a-f0-9]{64}$/);
+      // Recompute from stored record must match (full envelope, not partial)
+      const recomputed = computeFinalResultDigest(written);
+      assert.equal(written.digests.resultDigest, recomputed);
+
+      // Identity/model/posture tamper breaks resultDigest
+      const onDisk = await readTrialResult(campaign, 't-env');
+      onDisk.resolvedModel = 'TAMPERED-MODEL';
+      await writeFile(
+        path.join(campaign, 'results', 't-env', 'result.json'),
+        `${JSON.stringify(onDisk, null, 2)}\n`,
+        'utf8',
+      );
+      const modelTamper = await verifyTrialEvidenceDigests(campaign, 't-env');
+      assert.equal(modelTamper.ok, false);
+      assert.ok(modelTamper.mismatches.includes('resultDigest'));
+
+      // Restore and check fixture authority vs independent expectedFixtureDigest
+      await writeTrialResult(campaign, 't-env', {
+        ...written,
+        digests: {
+          ...written.digests,
+          // omit resultDigest — rewrite recomputes
+        },
+      });
+      // Drop stored resultDigest field by re-read after rewrite
+      const restored = await readTrialResult(campaign, 't-env');
+      const good = await verifyTrialEvidenceDigests(campaign, 't-env', restored, {
+        expectedFixtureDigest: frozenFixture,
+      });
+      assert.equal(good.ok, true);
+
+      const badFix = await verifyTrialEvidenceDigests(campaign, 't-env', restored, {
+        expectedFixtureDigest: 'c'.repeat(64),
+      });
+      assert.equal(badFix.ok, false);
+      assert.ok(badFix.mismatches.includes('fixtureDigest'));
+
+      // Campaign path with frozen trial metadata
+      await writeFile(
+        path.join(campaign, 'manifest.json'),
+        JSON.stringify({
+          campaignId: 'c',
+          schemaVersion: 1,
+          status: 'completed',
+          lock: { held: false, owner: null },
+          trials: [
+            {
+              id: 't-env',
+              state: 'completed',
+              expectedFixtureDigest: frozenFixture,
+            },
+          ],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
+        'utf8',
+      );
+      const campOk = await verifyCampaignEvidenceDigests(campaign, [
+        {
+          id: 't-env',
+          state: 'completed',
+          expectedFixtureDigest: frozenFixture,
+        },
+      ]);
+      assert.equal(campOk.ok, true);
+      assert.equal(campOk.reportableResults.length, 1);
+
+      // Fixture mismatch via trial metadata fails closed (not two in-result fields)
+      const campBad = await verifyCampaignEvidenceDigests(campaign, [
+        {
+          id: 't-env',
+          state: 'completed',
+          expectedFixtureDigest: 'd'.repeat(64),
+        },
+      ]);
+      assert.equal(campBad.ok, false);
+      assert.ok(
+        campBad.failures.some((f) => f.mismatches.includes('fixtureDigest')),
+      );
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+    }
+  });
+
+  it('summary and export refuse unavailable records and report bypass', async () => {
+    const {
+      writeTrialResult,
+      buildTrialDigests,
+      verifyCampaignEvidenceDigests,
+    } = await import('../harness/results.js');
+    const { main } = await import('../harness/cli.js');
+    const { exportSanitizedBundle } = await import('../harness/export.js');
+
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-sum-gate-'));
+    const out = await mkdtemp(path.join(os.tmpdir(), 'aicb-sum-out-'));
+    try {
+      // Plant a tempting but unverified report.json
+      await writeFile(
+        path.join(campaign, 'report.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          campaignId: 'bypass',
+          generatedAt: new Date().toISOString(),
+          totals: { n: 1, completed: 1, passRate: 1 },
+          byArm: [],
+          byTask: [],
+          cells: [],
+          refusals: [],
+          classifications: { PASS: 1 },
+        }),
+        'utf8',
+      );
+      await writeFile(
+        path.join(campaign, 'manifest.json'),
+        JSON.stringify({
+          campaignId: 'bypass',
+          schemaVersion: 1,
+          status: 'completed',
+          experimentId: 'exp',
+          lock: { held: false, owner: null },
+          trials: [{ id: 't-unavail', state: 'failed' }],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
+        'utf8',
+      );
+      await writeTrialResult(campaign, 't-unavail', {
+        id: 't-unavail',
+        experimentId: 'exp',
+        arm: 'a',
+        taskId: 't',
+        repetition: 1,
+        scheduleSeed: 1,
+        invocationPath: 'native-cli',
+        requestedModel: 'm',
+        resolvedModel: null,
+        resolvedModelAvailable: false,
+        state: 'failed',
+        classification: 'INFRA_FAIL',
+        exitCode: null,
+        digests: {
+          ...buildTrialDigests({}),
+          rawEvidenceUnavailable: true,
+        },
+      });
+
+      // verify fail closed for report path
+      const v = await verifyCampaignEvidenceDigests(campaign, [
+        { id: 't-unavail', state: 'failed' },
+      ]);
+      assert.equal(v.ok, false);
+      assert.equal(v.unavailable, 1);
+
+      // summary must not reuse planted report.json
+      const code = await main([
+        'summary',
+        '--campaign',
+        campaign,
+        '--json',
+      ]);
+      assert.equal(code, 1);
+
+      await assert.rejects(
+        () =>
+          exportSanitizedBundle({
+            campaignDir: campaign,
+            outDir: out,
+            includeRaw: false,
+          }),
+        /fail closed|unavailable|evidence integrity/i,
+      );
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+      await rm(out, { recursive: true, force: true });
     }
   });
 });

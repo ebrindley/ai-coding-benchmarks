@@ -460,4 +460,132 @@ describe('schema artifacts (trial + report)', () => {
     );
     assert.ok(badType.some((e) => e.includes('schemaVersion')));
   });
+
+  it('runCampaign success and infra result.json validate against trial.schema.json', async () => {
+    const schema = await loadSchema('trial.schema.json');
+    const reportSchema = await loadSchema('report.schema.json');
+    const { runCampaign } = await import('../harness/run.js');
+    const { readTrialResult } = await import('../harness/results.js');
+    const CORPUS = path.join(REPO, 'benchmarks');
+
+    // Success path: real execute with native-cli `true` (gates may FAIL/NO_OP).
+    const campaignOk = await mkdtemp(path.join(os.tmpdir(), 'aicb-schema-run-'));
+    try {
+      const result = await runCampaign({
+        experiment: {
+          id: 'schema-run-ok',
+          schemaVersion: 1,
+          suiteId: 'cli-comparison',
+          taskIds: ['greenfield-003-js-event-emitter'],
+          repetitions: 1,
+          seed: 11,
+          timeoutMs: 30_000,
+          arms: [
+            {
+              name: 'fake',
+              provider: 'fake',
+              model: 'none',
+              invocationPath: 'native-cli',
+              command: 'true',
+              args: [],
+            },
+          ],
+        },
+        corpusRoot: CORPUS,
+        campaignDir: campaignOk,
+        harnessRoot: REPO,
+        execute: true,
+        resume: false,
+        maxTrials: 1,
+      });
+      // May complete with FAIL/NO_OP gates or evidence fail if infra gates — still write results.
+      assert.ok(result.manifest);
+      const trialId = result.manifest.trials[0].id;
+      const onDisk = await readTrialResult(campaignOk, trialId);
+      assert.ok(
+        onDisk.exitCode === 0 || onDisk.exitCode === null,
+        `exitCode=${onDisk.exitCode}`,
+      );
+      assert.ok(
+        typeof onDisk.executionRoot === 'string' || onDisk.executionRoot === null,
+      );
+      assert.ok(onDisk.digests?.resultDigest);
+      assertValid(asJsonArtifact(onDisk), schema);
+
+      // If report was written, it must match report schema
+      try {
+        const report = JSON.parse(
+          await readFile(path.join(campaignOk, 'report.json'), 'utf8'),
+        );
+        assertValid(asJsonArtifact(report), reportSchema);
+      } catch (err) {
+        // evidence stage may refuse report for unavailable — only assert when present
+        if (result.ok && result.report) {
+          assertValid(asJsonArtifact(result.report), reportSchema);
+        } else if (result.stage !== 'evidence') {
+          throw err;
+        }
+      }
+    } finally {
+      await rm(campaignOk, { recursive: true, force: true });
+    }
+
+    // Infra path: invoker command missing → INFRA_FAIL / rawEvidenceUnavailable
+    const campaignInfra = await mkdtemp(path.join(os.tmpdir(), 'aicb-schema-infra-'));
+    try {
+      const result = await runCampaign({
+        experiment: {
+          id: 'schema-run-infra',
+          schemaVersion: 1,
+          suiteId: 'cli-comparison',
+          taskIds: ['greenfield-003-js-event-emitter'],
+          repetitions: 1,
+          seed: 12,
+          timeoutMs: 5_000,
+          arms: [
+            {
+              name: 'broken',
+              provider: 'fake',
+              model: 'none',
+              invocationPath: 'native-cli',
+              command: path.join(os.tmpdir(), 'aicb-definitely-missing-bin-xyz'),
+              args: [],
+            },
+          ],
+        },
+        corpusRoot: CORPUS,
+        campaignDir: campaignInfra,
+        harnessRoot: REPO,
+        execute: true,
+        resume: false,
+        maxTrials: 1,
+      });
+      assert.ok(result.manifest);
+      const trialId = result.manifest.trials[0].id;
+      let onDisk;
+      try {
+        onDisk = await readTrialResult(campaignInfra, trialId);
+      } catch {
+        // Some failures may not write results; skip schema when absent
+        return;
+      }
+      assertValid(asJsonArtifact(onDisk), schema);
+      if (onDisk.digests?.rawEvidenceUnavailable === true) {
+        assert.equal(onDisk.classification, 'INFRA_FAIL');
+      }
+      // Unavailable must not produce a benchmark report
+      if (result.stage === 'evidence' || onDisk.digests?.rawEvidenceUnavailable) {
+        assert.equal(result.ok, false);
+        let reportPresent = true;
+        try {
+          await readFile(path.join(campaignInfra, 'report.json'), 'utf8');
+        } catch {
+          reportPresent = false;
+        }
+        assert.equal(reportPresent, false);
+      }
+    } finally {
+      await rm(campaignInfra, { recursive: true, force: true });
+    }
+  });
 });

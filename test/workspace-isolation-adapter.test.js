@@ -263,6 +263,11 @@ process.exit(0);
       assert.equal(result.exitCode, 0);
       assert.equal(result.success, false);
       assert.match(String(result.infraFailure), /requestId mismatch/i);
+      // Invalid adapter evidence cleared — no model/artifact leakage
+      assert.equal(result.parsedOutput, null);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, '');
+      assert.equal(result.providerRawEvidence, 'unavailable');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -280,10 +285,15 @@ process.exit(0);
         bin,
         `#!/usr/bin/env node
 const fs = require('fs');
+const path = require('path');
 const args = process.argv.slice(2);
 const reqPath = args[args.indexOf('--request') + 1];
 const out = args[args.indexOf('--output') + 1];
 const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
+const rawDir = path.join(path.dirname(out), 'invoke-artifacts', req.requestId);
+fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
+fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'actual-provider-out\\n');
+fs.writeFileSync(path.join(rawDir, 'stderr.txt'), '');
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: req.requestId,
@@ -321,6 +331,8 @@ process.exit(0);
       assert.equal(result.success, true);
       assert.equal(result.outcomeKind, 'success');
       assert.equal(result.infraFailure, undefined);
+      assert.equal(result.providerRawEvidence, 'actual');
+      assert.match(result.stdout, /actual-provider-out/);
       const written = JSON.parse(await readFile(outputPath, 'utf8'));
       assert.equal(written.requestId, 'match-me');
     } finally {
@@ -392,6 +404,125 @@ process.exit(0);
       // Planted target content unchanged
       const planted = JSON.parse(await readFile(target, 'utf8'));
       assert.equal(planted.requestId, 'via-symlink');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('ingests actual provider raw under invoke-artifacts; rejects escape/symlink/wrong-requestId', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-raw-path-'));
+    try {
+      const {
+        invokePoeticAdapter,
+        expectedProviderRawPaths,
+        ingestProviderRawEvidence,
+        bindInvokeResultToRequestId,
+        parseInvokeResult,
+      } = await import('../harness/invokers/index.js');
+
+      const outputPath = path.join(dir, 'scratch', 'output.json');
+      await mkdir(path.dirname(outputPath), { recursive: true, mode: 0o700 });
+      const paths = expectedProviderRawPaths(outputPath, 'req-raw-1');
+      assert.ok(!('error' in paths));
+      assert.equal(
+        paths.stdoutPath,
+        path.join(dir, 'scratch', 'invoke-artifacts', 'req-raw-1', 'stdout.txt'),
+      );
+
+      // Valid ingest
+      await mkdir(paths.dir, { recursive: true, mode: 0o700 });
+      await writeFile(paths.stdoutPath, 'REAL_PROVIDER_STDOUT\n', 'utf8');
+      await writeFile(paths.stderrPath, 'REAL_PROVIDER_STDERR\n', 'utf8');
+      const ok = await ingestProviderRawEvidence(outputPath, 'req-raw-1');
+      assert.equal(ok.ok, true);
+      assert.equal(ok.stdout, 'REAL_PROVIDER_STDOUT\n');
+      assert.equal(ok.stderr, 'REAL_PROVIDER_STDERR\n');
+
+      // Wrong requestId directory is not accepted for this id
+      const wrongId = await ingestProviderRawEvidence(outputPath, 'other-id');
+      assert.equal(wrongId.ok, false);
+      assert.equal(wrongId.unavailable, true);
+
+      // Symlink final path attack
+      const hostSecret = path.join(dir, 'host-secret.txt');
+      await writeFile(hostSecret, 'EXFIL\n', 'utf8');
+      await rm(paths.stdoutPath, { force: true });
+      await symlink(hostSecret, paths.stdoutPath);
+      const sym = await ingestProviderRawEvidence(outputPath, 'req-raw-1');
+      assert.equal(sym.ok, false);
+      assert.match(String(sym.error), /symlink|fail closed|UNSAFE/i);
+
+      // Restore regular files for end-to-end adapter success path
+      await rm(paths.stdoutPath, { force: true });
+      await writeFile(paths.stdoutPath, 'E2E_STDOUT\n', 'utf8');
+      await writeFile(paths.stderrPath, 'E2E_STDERR\n', 'utf8');
+
+      // Path escape via wrong requestId in path construction is rejected by id segment rules
+      const escape = expectedProviderRawPaths(outputPath, '../escape');
+      assert.ok('error' in escape);
+
+      // bind clears artifact on mismatch so model cannot leak
+      const stale = parseInvokeResult({
+        schema: 'poetic.provider.invoke.result.v1',
+        requestId: 'stale-model-id',
+        outcome: { kind: 'success', reasonCode: 'ok' },
+        model: {
+          resolved: { availability: 'available', value: 'should-not-attribute' },
+        },
+      });
+      assert.equal(stale.valid, true);
+      assert.ok(stale.artifact);
+      const bound = bindInvokeResultToRequestId(stale, 'current-id');
+      assert.equal(bound.valid, false);
+      assert.equal(bound.artifact, null);
+      assert.equal(bound.success, false);
+
+      // Full adapter: missing raw → no success
+      const bin = path.join(dir, 'fake-poetic-noraw');
+      await writeFile(
+        bin,
+        `#!/usr/bin/env node
+const fs = require('fs');
+const args = process.argv.slice(2);
+const out = args[args.indexOf('--output') + 1];
+const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
+fs.writeFileSync(out, JSON.stringify({
+  schema: 'poetic.provider.invoke.result.v1',
+  requestId: req.requestId,
+  outcome: { kind: 'success', reasonCode: 'ok' },
+  model: { resolved: { availability: 'available', value: 'm-x' } }
+}));
+process.exit(0);
+`,
+        'utf8',
+      );
+      await chmod(bin, 0o755);
+      const campaignDir = path.join(dir, '_camp');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
+      const noRaw = await invokePoeticAdapter({
+        poeticBin: bin,
+        requestPath: path.join(dir, 'req-nr.json'),
+        outputPath: path.join(dir, 'out-nr.json'),
+        request: {
+          schema: 'poetic.provider.invoke.request.v1',
+          requestId: 'no-raw-req',
+          provider: 'fake',
+          prompt: 'x',
+          workingDirectory: dir,
+          timeoutMs: 1000,
+        },
+        timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
+      });
+      assert.equal(noRaw.success, false);
+      assert.equal(noRaw.providerRawEvidence, 'unavailable');
+      assert.equal(noRaw.stdout, '');
+      assert.equal(noRaw.stderr, '');
+      // Bound schema was valid so parsedOutput present only if raw also required for success —
+      // success is false; model may still be on parsedOutput if bind ok.
+      // raw missing is independent of model; both are valid bound but success requires raw.
+      assert.ok(noRaw.parsedOutput == null || noRaw.success === false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

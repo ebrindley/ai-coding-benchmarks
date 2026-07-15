@@ -183,9 +183,14 @@ export {
   prepareFreshOutputPath,
   bindInvokeResultToRequestId,
   sanitizeAdapterReasonCode,
+  expectedProviderRawPaths,
+  ingestProviderRawEvidence,
   POETIC_INVOKE_RESULT_SCHEMA,
   POETIC_OUTCOME_KINDS,
   REASON_CODE_RE,
+  PROVIDER_RAW_ARTIFACTS_DIR,
+  PROVIDER_RAW_STDOUT_NAME,
+  PROVIDER_RAW_STDERR_NAME,
 } from './poetic-adapter.js';
 export { invokeNativeCli, PROMPT_TRANSPORTS } from './native-cli.js';
 export { invokePoeticSystem } from './poetic-system.js';

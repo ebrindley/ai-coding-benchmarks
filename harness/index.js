@@ -120,7 +120,10 @@ export {
   verifyCampaignEvidenceDigests,
   buildTrialDigests,
   computeResultDigest,
+  computeFinalResultDigest,
+  buildFinalResultEnvelope,
   isInfraFailureWithoutRawEvidence,
+  isUnavailableForReport,
 } from './results.js';
 export {
   getInvoker,
