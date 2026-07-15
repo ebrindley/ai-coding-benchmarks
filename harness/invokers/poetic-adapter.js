@@ -28,16 +28,41 @@ import { assertSafeIdSegment, PathEscapeError } from '../paths.js';
 export const POETIC_INVOKE_RESULT_SCHEMA = 'poetic.provider.invoke.result.v1';
 
 /**
- * Deterministic provider raw quarantine under the output's scratch parent:
- *   <dirname(outputPath)>/invoke-artifacts/<requestId>/{stdout,stderr}.txt
+ * Deterministic provider raw quarantine — mirrors Poetic's public
+ * `resolveArtifactQuarantineDir(outputPath, requestId)`:
+ *   dirname(outputPath) /
+ *     basename-without-ext(outputPath) + ".invoke-artifacts" /
+ *     requestId /
+ *     {stdout,stderr}.txt
+ *
+ * Example: /scratch/output.json
+ *   → /scratch/output.invoke-artifacts/<requestId>/{stdout,stderr}.txt
+ *
+ * Basename-without-ext uses Node path.basename(path, path.extname(path))
+ * (multi-dot: output.v1.json → output.v1.invoke-artifacts/...).
  *
  * Wrapper CLI stdout/stderr are intentionally quiet; actual provider streams
  * live only in these private files. Never trust free-form paths from the
  * result artifact — only these exact locations.
  */
-export const PROVIDER_RAW_ARTIFACTS_DIR = 'invoke-artifacts';
+export const PROVIDER_RAW_ARTIFACTS_SUFFIX = '.invoke-artifacts';
+/** @deprecated Use PROVIDER_RAW_ARTIFACTS_SUFFIX; was the wrong standalone dirname. */
+export const PROVIDER_RAW_ARTIFACTS_DIR = PROVIDER_RAW_ARTIFACTS_SUFFIX;
 export const PROVIDER_RAW_STDOUT_NAME = 'stdout.txt';
 export const PROVIDER_RAW_STDERR_NAME = 'stderr.txt';
+
+/**
+ * Resolve Poetic's deterministic quarantine directory name for an output path.
+ * Mirrors path.basename(output, path.extname(output)) + ".invoke-artifacts".
+ *
+ * @param {string} outputPath
+ * @returns {string} e.g. "output.invoke-artifacts"
+ */
+export function resolveProviderRawArtifactsDirName(outputPath) {
+  const base = path.basename(String(outputPath));
+  const stem = path.basename(base, path.extname(base));
+  return `${stem}${PROVIDER_RAW_ARTIFACTS_SUFFIX}`;
+}
 
 /**
  * Documented outcome kinds for poetic.provider.invoke.result.v1.
@@ -552,12 +577,15 @@ export function bindInvokeResultToRequestId(parsed, expectedRequestId) {
 }
 
 /**
- * Deterministic expected provider raw paths under the output's scratch parent.
+ * Deterministic expected provider raw paths under the output's parent.
+ * Exact mirror of Poetic resolveArtifactQuarantineDir(outputPath, requestId)
+ * plus stdout.txt / stderr.txt filenames.
  *
  * @param {string} outputPath
  * @param {string} requestId
  * @returns {{
  *   scratchRoot: string,
+ *   artifactsDirName: string,
  *   requestId: string,
  *   dir: string,
  *   stdoutPath: string,
@@ -578,10 +606,13 @@ export function expectedProviderRawPaths(outputPath, requestId) {
         : String(err);
     return { error: `unsafe requestId for provider raw paths: ${message}` };
   }
-  const scratchRoot = path.resolve(path.dirname(String(outputPath)));
-  const dir = path.join(scratchRoot, PROVIDER_RAW_ARTIFACTS_DIR, safeId);
+  const resolvedOutput = path.resolve(String(outputPath));
+  const scratchRoot = path.dirname(resolvedOutput);
+  const artifactsDirName = resolveProviderRawArtifactsDirName(resolvedOutput);
+  const dir = path.join(scratchRoot, artifactsDirName, safeId);
   return {
     scratchRoot,
+    artifactsDirName,
     requestId: safeId,
     dir,
     stdoutPath: path.join(dir, PROVIDER_RAW_STDOUT_NAME),
@@ -591,8 +622,9 @@ export function expectedProviderRawPaths(outputPath, requestId) {
 
 /**
  * After full schema + requestId binding, ingest actual Poetic provider
- * stdout/stderr from deterministic quarantine paths under the scratch tree.
- * Fail closed on missing/unsafe/escape/symlink paths — never claim provider evidence.
+ * stdout/stderr from deterministic quarantine paths under the scratch tree
+ * (<stem>.invoke-artifacts/<requestId>/). Fail closed on missing/unsafe/
+ * escape/symlink paths — never claim provider evidence.
  *
  * @param {string} outputPath
  * @param {string} requestId
@@ -846,7 +878,8 @@ export async function invokePoeticAdapter({
   }
 
   // After full schema + requestId bind: ingest actual provider raw from
-  // deterministic scratch-side invoke-artifacts/<requestId>/{stdout,stderr}.txt.
+  // deterministic <stem>.invoke-artifacts/<requestId>/{stdout,stderr}.txt
+  // (Poetic resolveArtifactQuarantineDir contract).
   // On any invalid/missing/unsafe path: do not claim provider evidence.
   if (fullyBound) {
     const raw = await ingestProviderRawEvidence(
@@ -866,7 +899,7 @@ export async function invokePoeticAdapter({
       if (!base.infraFailure) {
         base.infraFailure =
           raw.error ||
-          'provider raw evidence unavailable under invoke-artifacts (fail closed)';
+          'provider raw evidence unavailable under <stem>.invoke-artifacts (fail closed)';
       } else {
         base.infraFailure = `${base.infraFailure}; ${raw.error || 'provider raw unavailable'}`;
       }
