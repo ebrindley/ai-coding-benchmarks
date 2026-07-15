@@ -142,6 +142,11 @@ export function expandExperiment(experiment, opts = {}) {
     if (!arm.model) {
       throw new Error(`expandExperiment: arm "${arm.name}" missing model`);
     }
+    if (arm.provider == null || String(arm.provider).trim() === '') {
+      throw new Error(
+        `expandExperiment: arm "${arm.name}" missing provider (fail closed)`,
+      );
+    }
 
     let postureFingerprint = null;
     try {
@@ -167,7 +172,7 @@ export function expandExperiment(experiment, opts = {}) {
           }),
           experimentId,
           arm: String(arm.name),
-          provider: arm.provider != null ? String(arm.provider) : undefined,
+          provider: String(arm.provider).trim(),
           taskId,
           repetition: rep,
           scheduleSeed,

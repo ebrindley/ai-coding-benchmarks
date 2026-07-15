@@ -41,10 +41,10 @@ const TRIAL_SCHEMA_PATH = path.join(
 let cachedTrialSchema = null;
 
 /**
- * Identity fields bound to the frozen manifest trial row.
- * postureFingerprint is checked separately when set on either side.
+ * Immutable identity fields bound exactly to the frozen manifest trial row.
+ * Every field must be present on the frozen row and match the result.
  */
-const MANIFEST_IDENTITY_FIELDS = Object.freeze([
+export const MANIFEST_IDENTITY_FIELDS = Object.freeze([
   'id',
   'experimentId',
   'arm',
@@ -54,6 +54,7 @@ const MANIFEST_IDENTITY_FIELDS = Object.freeze([
   'scheduleSeed',
   'invocationPath',
   'requestedModel',
+  'postureFingerprint',
 ]);
 
 /**
@@ -350,28 +351,36 @@ export function validateJsonSchemaSubset(
 
 /**
  * Validate a trial result against trial.schema.json.
- * Fail closed on unknown fields (additionalProperties: false).
+ * Fail closed on unknown fields and missing required properties by default.
+ * There is no silent production opt-out of required-property checks.
  *
  * @param {object} result
  * @param {{ requireRequired?: boolean }} [opts]
- *   requireRequired defaults false on write of partial records; verify may
- *   pass true when a fully stamped public record is expected.
+ *   requireRequired defaults true. Passing false is rejected (fail closed).
  * @returns {Promise<string[]>} error messages (empty when valid)
  */
 export async function validateTrialResultSchema(result, opts = {}) {
+  if (opts.requireRequired === false) {
+    throw new Error(
+      'validateTrialResultSchema: requireRequired:false is not permitted (fail closed)',
+    );
+  }
   const schema = await loadTrialSchema();
   return validateJsonSchemaSubset(result, schema, schema, '$', {
-    requireRequired: opts.requireRequired === true,
+    requireRequired: true,
   });
 }
 
 /**
  * Assert result validates; throw on any schema error.
+ * Always enforces required properties (no production opt-out).
  * @param {object} result
- * @param {{ requireRequired?: boolean, label?: string }} [opts]
+ * @param {{ label?: string }} [opts]
  */
 export async function assertTrialResultSchema(result, opts = {}) {
-  const errors = await validateTrialResultSchema(result, opts);
+  const errors = await validateTrialResultSchema(result, {
+    // Always strict — ignore any requireRequired:false attempt
+  });
   if (errors.length > 0) {
     const label = opts.label || 'trial result';
     throw new Error(
@@ -391,9 +400,9 @@ function normalizeIdentityValue(v) {
 
 /**
  * Compare result identity fields against a frozen manifest trial row.
- * Always binds `id`. Other MANIFEST_IDENTITY_FIELDS are checked when the
- * frozen row has them set (real campaign rows carry the full identity).
- * postureFingerprint is checked when set on either side.
+ * Every MANIFEST_IDENTITY_FIELDS entry must be present on the frozen row
+ * (authority) and equal the result. Partial test rows fail closed with
+ * `manifest:<field>` rather than silently skipping.
  *
  * @param {object} result
  * @param {object} manifestTrial
@@ -409,36 +418,28 @@ export function collectManifestIdentityMismatches(result, manifestTrial) {
   const r = /** @type {Record<string, unknown>} */ (result);
   const m = /** @type {Record<string, unknown>} */ (manifestTrial);
 
-  // Destination / row id must always match.
-  if (String(r.id ?? '') !== String(m.id ?? '')) {
-    mismatches.push('id');
-  }
-
   for (const field of MANIFEST_IDENTITY_FIELDS) {
-    if (field === 'id') continue;
-    // Only fields frozen on the manifest row are binding authorities.
-    if (!(field in m) || m[field] === undefined) continue;
+    // Frozen authority must declare every immutable identity field.
+    if (!(field in m) || m[field] === undefined) {
+      mismatches.push(`manifest:${field}`);
+      continue;
+    }
+    // Result must carry the field for binding (null is a declared value).
+    if (!(field in r) || r[field] === undefined) {
+      mismatches.push(field);
+      continue;
+    }
     const rv = normalizeIdentityValue(r[field]);
     const mv = normalizeIdentityValue(m[field]);
+    // Stringify scalar ids for stable compare (numbers vs string seeds etc.)
+    if (field === 'repetition' || field === 'scheduleSeed') {
+      if (String(rv) !== String(mv)) {
+        mismatches.push(field);
+      }
+      continue;
+    }
     if (rv !== mv) {
       mismatches.push(field);
-    }
-  }
-
-  const rp = normalizeIdentityValue(r.postureFingerprint);
-  const mp = normalizeIdentityValue(m.postureFingerprint);
-  // Bind posture when the frozen row carries the field, or when either side
-  // has a non-null fingerprint (swapped/missing posture must not verify).
-  if ('postureFingerprint' in m && m.postureFingerprint !== undefined) {
-    if (rp !== mp) {
-      mismatches.push('postureFingerprint');
-    }
-  } else if (rp != null || mp != null) {
-    // Manifest omitted the field: still fail if the two non-null values differ
-    // when both are present; a result-only fingerprint without a frozen row
-    // field is allowed for partial test manifests.
-    if (rp != null && mp != null && rp !== mp) {
-      mismatches.push('postureFingerprint');
     }
   }
   return mismatches;
@@ -560,18 +561,45 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
       : {};
   // resultDigest is always recomputed over the final envelope below.
   delete digestsIn.resultDigest;
+  // Drop null/empty digest fields so schema (string patterns) is never fed null.
+  for (const key of Object.keys(digestsIn)) {
+    const v = digestsIn[key];
+    if (v == null || v === '') delete digestsIn[key];
+  }
 
   /** @type {Record<string, unknown>} */
   const payload = {
     ...result,
     id: safeId,
-    classification: result.classification ?? null,
-    digests: digestsIn,
-    requestedModel: result.requestedModel ?? null,
+    // Required identity / evidence fields — stamp defaults where allowed
+    experimentId:
+      result.experimentId != null ? String(result.experimentId) : result.experimentId,
+    arm: result.arm != null ? String(result.arm) : result.arm,
+    provider: result.provider != null ? String(result.provider) : result.provider,
+    taskId: result.taskId != null ? String(result.taskId) : result.taskId,
+    repetition: result.repetition,
+    scheduleSeed: result.scheduleSeed,
+    invocationPath: result.invocationPath,
+    requestedModel:
+      result.requestedModel === undefined ? null : result.requestedModel,
     // Preserve null — never invent resolved from requested
     resolvedModel:
       result.resolvedModel === undefined ? null : result.resolvedModel,
-    postureFingerprint: result.postureFingerprint ?? null,
+    resolvedModelAvailable:
+      result.resolvedModelAvailable === undefined
+        ? false
+        : Boolean(result.resolvedModelAvailable),
+    resolvedModelSource:
+      result.resolvedModelSource != null &&
+      String(result.resolvedModelSource).trim() !== ''
+        ? String(result.resolvedModelSource)
+        : 'unavailable',
+    postureFingerprint:
+      result.postureFingerprint === undefined ? null : result.postureFingerprint,
+    state: result.state,
+    classification:
+      result.classification === undefined ? null : result.classification,
+    digests: digestsIn,
     schemaVersion: SCHEMA_VERSION,
     writtenAt,
   };
@@ -589,16 +617,13 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
     if (payload[key] === undefined) delete payload[key];
   }
 
-  // Manifest identity binding (optional but fail-closed when provided).
+  // Manifest identity binding (fail-closed when provided; requires full frozen row).
   if (opts.manifestTrial != null) {
     assertManifestIdentityBinding(payload, opts.manifestTrial, 'writeTrialResult');
   }
 
-  // Schema enforcement before digest: reject unknown fields fail-closed.
-  // requireRequired=false so partial test/infra records may omit optional
-  // identity; additionalProperties:false still rejects undeclared keys.
+  // Strict schema enforcement: required properties + additionalProperties:false.
   await assertTrialResultSchema(payload, {
-    requireRequired: false,
     label: 'writeTrialResult',
   });
 
@@ -612,7 +637,6 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
 
   // Re-validate with resultDigest stamped (still schema-legal).
   await assertTrialResultSchema(payload, {
-    requireRequired: false,
     label: 'writeTrialResult',
   });
 
@@ -627,9 +651,13 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
 
 /**
  * Read a previously written trial result.
+ * Always enforces trial.schema.json (required + additionalProperties) unless
+ * opts.validate === false is explicitly requested for forensic recovery only.
+ * Production call sites must not pass validate:false.
+ *
  * @param {string} campaignDir
  * @param {string} trialId
- * @param {{ validate?: boolean }} [opts] when validate=true, enforce trial schema
+ * @param {{ validate?: boolean }} [opts]
  * @returns {Promise<object>}
  */
 export async function readTrialResult(campaignDir, trialId, opts = {}) {
@@ -640,9 +668,9 @@ export async function readTrialResult(campaignDir, trialId, opts = {}) {
   const p = path.join(dir, 'result.json');
   const text = await readFile(p, 'utf8');
   const result = JSON.parse(text);
-  if (opts.validate === true) {
+  // Default strict: only explicit validate:false skips (tests/forensics).
+  if (opts.validate !== false) {
     await assertTrialResultSchema(result, {
-      requireRequired: true,
       label: 'readTrialResult',
     });
   }
@@ -974,10 +1002,9 @@ export async function verifyTrialEvidenceDigests(
     }
   }
 
-  // Schema enforcement (unknown fields fail closed).
+  // Schema enforcement: required properties + unknown fields fail closed.
   try {
     await assertTrialResultSchema(result, {
-      requireRequired: false,
       label: 'verifyTrialEvidenceDigests',
     });
   } catch (err) {
@@ -991,8 +1018,23 @@ export async function verifyTrialEvidenceDigests(
     };
   }
 
-  // Manifest identity binding when frozen row provided.
-  if (opts.manifestTrial != null) {
+  // Manifest identity binding: required for campaign verify (always passed).
+  // Missing frozen authority fails closed.
+  if (opts.manifestTrial == null) {
+    // Standalone verify without manifestTrial is allowed only when caller
+    // explicitly opts out; campaign path always supplies the frozen row.
+    if (opts.requireManifestTrial === true) {
+      return {
+        ok: false,
+        trialId: safeId,
+        mismatches: ['manifestTrial'],
+        unavailable: false,
+        reportable: false,
+        error:
+          'manifest trial identity authority missing (fail closed)',
+      };
+    }
+  } else {
     const idMismatches = collectManifestIdentityMismatches(
       result,
       opts.manifestTrial,
@@ -1312,6 +1354,7 @@ export async function verifyCampaignEvidenceDigests(
     const v = await verifyTrialEvidenceDigests(campaignDir, id, result, {
       expectedFixtureDigest,
       requireFixtureAuthority: Boolean(expectedFixtureDigest),
+      requireManifestTrial: true,
       manifestTrial: meta,
     });
     if (v.unavailable || isUnavailableForReport(result)) {

@@ -10,7 +10,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -269,7 +269,10 @@ describe('schema artifacts (trial + report)', () => {
         artifactDir: path.join(campaign, 'artifacts', trialId),
       };
 
-      const { result: written } = await writeTrialResult(
+      const { writeCompleteTrial } = await import(
+        './helpers/complete-trial.js'
+      );
+      const { result: written } = await writeCompleteTrial(
         campaign,
         trialId,
         input,
@@ -304,13 +307,15 @@ describe('schema artifacts (trial + report)', () => {
 
   it('writeTrialResult unavailable-model path validates', async () => {
     const schema = await loadSchema('trial.schema.json');
-    const { writeTrialResult } = await import('../harness/results.js');
+    const { writeCompleteTrial } = await import(
+      './helpers/complete-trial.js'
+    );
     const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-schema-trial2-'));
     try {
-      const { result } = await writeTrialResult(campaign, 't-unavail', {
-        id: 't-unavail',
+      const { result } = await writeCompleteTrial(campaign, 't-unavail', {
         experimentId: 'exp-demo',
         arm: 'codex',
+        provider: 'openai',
         taskId: 'greenfield-003-js-event-emitter',
         repetition: 2,
         scheduleSeed: 'seed-1',
@@ -324,11 +329,12 @@ describe('schema artifacts (trial + report)', () => {
         classification: 'INFRA_FAIL',
         classificationReason: 'provider error',
         error: 'provider error',
-        digests: {},
+        digests: { rawEvidenceUnavailable: true },
       });
       assertValid(asJsonArtifact(result), schema);
       assert.equal(result.resolvedModel, null);
       assert.equal(result.resolvedModelAvailable, false);
+      assert.equal(result.provider, 'openai');
     } finally {
       await rm(campaign, { recursive: true, force: true });
     }
@@ -461,43 +467,51 @@ describe('schema artifacts (trial + report)', () => {
     assert.ok(badType.some((e) => e.includes('schemaVersion')));
   });
 
-  it('writeTrialResult enforces additionalProperties and id binding; read validate option', async () => {
+  it('writeTrialResult enforces additionalProperties and id binding; strict load/verify', async () => {
     const {
       writeTrialResult,
       readTrialResult,
       validateTrialResultSchema,
       collectManifestIdentityMismatches,
+      verifyTrialEvidenceDigests,
     } = await import('../harness/results.js');
+    const {
+      completeTrialResult,
+      completeManifestTrial,
+      writeCompleteTrial,
+    } = await import('./helpers/complete-trial.js');
     const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-schema-bind-'));
     try {
       const trialId = 'bind-1';
-      const manifestTrial = {
+      const manifestTrial = completeManifestTrial({
         id: trialId,
         experimentId: 'exp-bind',
         arm: 'a1',
         provider: 'p1',
         taskId: 'task-bind',
-        repetition: 1,
         scheduleSeed: 3,
         invocationPath: 'poetic-adapter',
         requestedModel: 'm1',
         postureFingerprint: 'e'.repeat(64),
-      };
+      });
+      const base = completeTrialResult({
+        id: trialId,
+        experimentId: 'exp-bind',
+        arm: 'a1',
+        provider: 'p1',
+        taskId: 'task-bind',
+        scheduleSeed: 3,
+        invocationPath: 'poetic-adapter',
+        requestedModel: 'm1',
+        postureFingerprint: 'e'.repeat(64),
+      });
 
       // Mismatched id rejected
       await assert.rejects(
         () =>
           writeTrialResult(campaign, trialId, {
+            ...base,
             id: 'not-bind-1',
-            experimentId: 'exp-bind',
-            arm: 'a1',
-            taskId: 'task-bind',
-            repetition: 1,
-            scheduleSeed: 3,
-            invocationPath: 'poetic-adapter',
-            requestedModel: 'm1',
-            state: 'completed',
-            digests: {},
           }),
         /result\.id.*trialId|fail closed/i,
       );
@@ -506,19 +520,20 @@ describe('schema artifacts (trial + report)', () => {
       await assert.rejects(
         () =>
           writeTrialResult(campaign, trialId, {
-            id: trialId,
-            experimentId: 'exp-bind',
-            arm: 'a1',
-            taskId: 'task-bind',
-            repetition: 1,
-            scheduleSeed: 3,
-            invocationPath: 'poetic-adapter',
-            requestedModel: 'm1',
-            state: 'completed',
-            digests: {},
+            ...base,
             sneakyExtra: 1,
           }),
         /additional property|schema validation/i,
+      );
+
+      // Missing required property rejected on write
+      await assert.rejects(
+        () =>
+          writeTrialResult(campaign, trialId, {
+            id: trialId,
+            digests: {},
+          }),
+        /missing required|schema validation|fail closed/i,
       );
 
       // Identity mismatch against manifestTrial rejected on write
@@ -527,45 +542,28 @@ describe('schema artifacts (trial + report)', () => {
           writeTrialResult(
             campaign,
             trialId,
-            {
-              id: trialId,
-              experimentId: 'exp-bind',
-              arm: 'WRONG',
-              provider: 'p1',
-              taskId: 'task-bind',
-              repetition: 1,
-              scheduleSeed: 3,
-              invocationPath: 'poetic-adapter',
-              requestedModel: 'm1',
-              postureFingerprint: 'e'.repeat(64),
-              state: 'completed',
-              digests: {},
-            },
+            { ...base, arm: 'WRONG' },
             { manifestTrial },
           ),
         /identity|manifest trial|fail closed/i,
       );
 
+      // Partial frozen row fails closed (missing identity authority)
+      await assert.rejects(
+        () =>
+          writeTrialResult(
+            campaign,
+            trialId,
+            base,
+            { manifestTrial: { id: trialId } },
+          ),
+        /manifest:|identity|fail closed/i,
+      );
+
       const { result } = await writeTrialResult(
         campaign,
         trialId,
-        {
-          id: trialId,
-          experimentId: 'exp-bind',
-          arm: 'a1',
-          provider: 'p1',
-          taskId: 'task-bind',
-          repetition: 1,
-          scheduleSeed: 3,
-          invocationPath: 'poetic-adapter',
-          requestedModel: 'm1',
-          postureFingerprint: 'e'.repeat(64),
-          state: 'completed',
-          classification: 'PASS',
-          exitCode: 0,
-          executionRoot: null,
-          digests: {},
-        },
+        base,
         { manifestTrial },
       );
       assert.equal(result.id, trialId);
@@ -574,15 +572,43 @@ describe('schema artifacts (trial + report)', () => {
         0,
       );
 
-      // Optional validate on read
-      const onDisk = await readTrialResult(campaign, trialId, {
-        validate: true,
-      });
+      // Load always validates by default
+      const onDisk = await readTrialResult(campaign, trialId);
       assert.equal(onDisk.id, trialId);
-      const schemaErrors = await validateTrialResultSchema(onDisk, {
-        requireRequired: true,
-      });
+      const schemaErrors = await validateTrialResultSchema(onDisk);
       assert.equal(schemaErrors.length, 0, schemaErrors.join('\n'));
+
+      // Missing required on ordinary load fails closed
+      await writeFile(
+        path.join(campaign, 'results', trialId, 'result.json'),
+        `${JSON.stringify({ id: trialId, digests: {} })}\n`,
+        'utf8',
+      );
+      await assert.rejects(
+        () => readTrialResult(campaign, trialId),
+        /missing required|schema validation|fail closed/i,
+      );
+
+      // Restore valid result for verify path
+      await writeCompleteTrial(campaign, trialId, base, { manifestTrial });
+      // Verify without frozen authority fails when required
+      const noAuth = await verifyTrialEvidenceDigests(
+        campaign,
+        trialId,
+        undefined,
+        { requireManifestTrial: true },
+      );
+      assert.equal(noAuth.ok, false);
+      assert.ok(
+        noAuth.mismatches.includes('manifestTrial') ||
+          /manifest/i.test(String(noAuth.error)),
+      );
+
+      // requireRequired:false is not permitted
+      await assert.rejects(
+        () => validateTrialResultSchema(onDisk, { requireRequired: false }),
+        /not permitted|fail closed/i,
+      );
     } finally {
       await rm(campaign, { recursive: true, force: true });
     }

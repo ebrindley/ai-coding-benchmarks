@@ -22,6 +22,7 @@ import {
   rename,
   rm,
   mkdtemp,
+  realpath,
 } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -359,24 +360,156 @@ function sanitizeManifestForExport(manifest, srcRoot, verifiedIds) {
 }
 
 /**
- * Reject equal or nested campaignDir/outDir in either direction.
- * Require a fresh destination: must not exist, or be an empty real directory
- * (not a symlink). Never merge into pre-existing/stale content.
+ * True when a symlink is a known OS volume alias we deliberately allow
+ * (macOS /tmp -> /private/tmp, /var -> /private/var). User-controlled
+ * intermediate symlinks are never allowed.
+ *
+ * @param {string} linkPath absolute path that is a symlink
+ * @returns {Promise<boolean>}
+ */
+async function isAllowedSystemPathSymlink(linkPath) {
+  const abs = path.resolve(linkPath);
+  if (process.platform !== 'darwin') {
+    return false;
+  }
+  // Only the top-level /tmp and /var aliases are allowed.
+  if (abs !== '/tmp' && abs !== '/var') {
+    return false;
+  }
+  try {
+    const real = await realpath(abs);
+    // Only the standard macOS volume aliases — not arbitrary /private/* links.
+    return real === '/private/tmp' || real === '/private/var';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Walk every path component from filesystem root to `absPath` with lstat.
+ * Reject any symlink ancestor that is not an allowed system alias.
+ * Returns the physical realpath of the deepest existing ancestor joined with
+ * remaining segments when the full path does not yet exist.
+ *
+ * @param {string} absPath
+ * @param {{ mustExist?: boolean }} [opts]
+ * @returns {Promise<string>} canonical absolute path
+ */
+export async function canonicalizePathNoUserSymlinks(absPath, opts = {}) {
+  const lexical = path.resolve(String(absPath));
+  if (lexical.includes('\0')) {
+    throw new Error(
+      'exportSanitizedBundle: path contains null byte (fail closed)',
+    );
+  }
+
+  const root = path.parse(lexical).root; // '/' or 'C:\\'
+  const rel = path.relative(root, lexical);
+  const parts = rel === '' ? [] : rel.split(path.sep).filter(Boolean);
+
+  let cur = root.endsWith(path.sep) ? root.slice(0, -1) || root : root;
+  // On Unix root is '/'; path.join('/', 'a') works. On walk, start at ''.
+  if (process.platform !== 'win32') {
+    cur = '';
+  }
+
+  for (let i = 0; i < parts.length; i += 1) {
+    cur = cur === '' ? path.sep + parts[i] : path.join(cur, parts[i]);
+    let st;
+    try {
+      st = await lstat(cur);
+    } catch (err) {
+      const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+      if (code === 'ENOENT') {
+        if (opts.mustExist) {
+          throw new Error(
+            `exportSanitizedBundle: path does not exist (fail closed): ${lexical}`,
+          );
+        }
+        // Remaining segments do not exist yet. Canonicalize existing prefix.
+        const existing = path.dirname(cur);
+        let realPrefix;
+        try {
+          realPrefix = await realpath(existing === path.sep ? path.sep : existing);
+        } catch {
+          realPrefix = existing;
+        }
+        const rest = parts.slice(i).join(path.sep);
+        return rest ? path.join(realPrefix, rest) : realPrefix;
+      }
+      throw err;
+    }
+    if (st.isSymbolicLink()) {
+      const allowed = await isAllowedSystemPathSymlink(cur);
+      if (!allowed) {
+        throw new Error(
+          `exportSanitizedBundle: refusing symlink ancestor (fail closed): ${cur}`,
+        );
+      }
+    }
+  }
+
+  // Full path exists: return physical realpath (system aliases collapsed).
+  try {
+    return await realpath(lexical);
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code === 'ENOENT' && !opts.mustExist) {
+      return lexical;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Reject equal or nested campaignDir/outDir in either direction using
+ * physical/canonical roots. Require a fresh destination: must not exist, or
+ * be an empty real directory (not a symlink). Staging is created only under
+ * the verified canonical parent. Never merge into pre-existing/stale content.
  *
  * @param {string} campaignDir
  * @param {string} outDir
- * @returns {Promise<{ srcRoot: string, destRoot: string, destExists: boolean }>}
+ * @returns {Promise<{
+ *   srcRoot: string,
+ *   destRoot: string,
+ *   destParent: string,
+ *   destExists: boolean,
+ * }>}
  */
-async function assertSafeExportDestination(campaignDir, outDir) {
-  const srcRoot = path.resolve(campaignDir);
-  const destRoot = path.resolve(outDir);
+export async function assertSafeExportDestination(campaignDir, outDir) {
+  // Campaign must exist and have no user-controlled symlink ancestors.
+  const srcRoot = await canonicalizePathNoUserSymlinks(campaignDir, {
+    mustExist: true,
+  });
 
+  const lexicalDest = path.resolve(String(outDir));
+  const lexicalParent = path.dirname(lexicalDest);
+
+  // Parent must exist and be free of user symlink ancestors.
+  const destParent = await canonicalizePathNoUserSymlinks(lexicalParent, {
+    mustExist: true,
+  });
+
+  // Dest basename is a single segment under the verified parent.
+  const destBase = path.basename(lexicalDest);
+  if (
+    !destBase ||
+    destBase === '.' ||
+    destBase === '..' ||
+    destBase.includes(path.sep)
+  ) {
+    throw new Error(
+      'exportSanitizedBundle: outDir basename invalid (fail closed)',
+    );
+  }
+  const destRoot = path.join(destParent, destBase);
+
+  // Physical overlap checks (canonical roots).
   if (srcRoot === destRoot) {
     throw new Error(
       'exportSanitizedBundle: outDir must not equal campaignDir (fail closed)',
     );
   }
-  // Nested either direction (separator-aware via isPathInside)
   if (isPathInside(srcRoot, destRoot) && srcRoot !== destRoot) {
     throw new Error(
       'exportSanitizedBundle: outDir must not be inside campaignDir (fail closed)',
@@ -385,6 +518,12 @@ async function assertSafeExportDestination(campaignDir, outDir) {
   if (isPathInside(destRoot, srcRoot) && srcRoot !== destRoot) {
     throw new Error(
       'exportSanitizedBundle: campaignDir must not be inside outDir (fail closed)',
+    );
+  }
+  // Parent of export under campaign is also an overlap risk for staging.
+  if (isPathInside(srcRoot, destParent) || srcRoot === destParent) {
+    throw new Error(
+      'exportSanitizedBundle: outDir parent must not be inside or equal campaignDir (fail closed)',
     );
   }
 
@@ -419,29 +558,7 @@ async function assertSafeExportDestination(campaignDir, outDir) {
     destExists = false;
   }
 
-  // Parent of dest must not be a symlink (staging publishes via rename under it).
-  const parent = path.dirname(destRoot);
-  try {
-    const parentSt = await lstat(parent);
-    if (parentSt.isSymbolicLink()) {
-      throw new Error(
-        'exportSanitizedBundle: outDir parent must not be a symlink (fail closed)',
-      );
-    }
-  } catch (err) {
-    if (err instanceof Error && /fail closed/.test(err.message)) {
-      throw err;
-    }
-    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
-    if (code === 'ENOENT') {
-      throw new Error(
-        'exportSanitizedBundle: outDir parent directory does not exist (fail closed)',
-      );
-    }
-    throw err;
-  }
-
-  return { srcRoot, destRoot, destExists };
+  return { srcRoot, destRoot, destParent, destExists };
 }
 
 /**
@@ -524,8 +641,9 @@ export async function exportSanitizedBundle({
     throw new Error('exportSanitizedBundle: outDir is required');
   }
 
-  // Destination safety first: no overlap, no symlink, fresh/empty only.
-  const { srcRoot, destRoot, destExists } =
+  // Destination safety first: canonical roots, no user symlink ancestors,
+  // physical overlap checks, fresh/empty dest only.
+  const { srcRoot, destRoot, destParent, destExists } =
     await assertSafeExportDestination(campaignDir, outDir);
 
   /** @type {string[]} */
@@ -598,11 +716,12 @@ export async function exportSanitizedBundle({
   /** @type {Set<string>} */
   const exportIds = new Set(exportResults.map((r) => String(r.id)));
 
-  // Write into a private staging directory, then rename-publish into destRoot.
-  // Never merge into a pre-existing nonempty destination; never recursive
-  // cleanup of user-chosen existing content.
-  const parent = path.dirname(destRoot);
-  const stagingRoot = await mkdtemp(path.join(parent, '.aicb-export-staging-'));
+  // Write into a private staging directory under the verified canonical parent,
+  // then rename-publish into destRoot. Never merge into a pre-existing nonempty
+  // destination; never recursive cleanup of user-chosen existing content.
+  const stagingRoot = await mkdtemp(
+    path.join(destParent, '.aicb-export-staging-'),
+  );
 
   try {
     // Sanitized manifest: trials list is exactly the verified export set.

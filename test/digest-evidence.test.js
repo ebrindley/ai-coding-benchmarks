@@ -14,6 +14,11 @@ import {
   readFile,
   rm,
 } from 'node:fs/promises';
+import {
+  writeCompleteTrial,
+  completeTrialResult,
+  completeManifestTrial,
+} from './helpers/complete-trial.js';
 
 describe('digest evidence binding + tamper', () => {
   it('quarantine hashes exact raw stdout/stderr/output bytes (not lengths)', async () => {
@@ -104,7 +109,7 @@ describe('digest evidence binding + tamper', () => {
         artifactDigest: artDig,
         ...q.digests,
       });
-      await writeTrialResult(campaign, 'trial-a', {
+      await writeCompleteTrial(campaign, 'trial-a', {
         id: 'trial-a',
         classification: 'PASS',
         exitCode: 0,
@@ -152,7 +157,7 @@ describe('digest evidence binding + tamper', () => {
       await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
       const { computeArtifactDigest } = await import('../harness/results.js');
       const artDig = await computeArtifactDigest(artDir);
-      await writeTrialResult(campaign, 'trial-b', {
+      await writeCompleteTrial(campaign, 'trial-b', {
         id: 'trial-b',
         classification: 'FAIL',
         exitCode: 1,
@@ -217,22 +222,22 @@ describe('digest evidence binding + tamper', () => {
       await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
       const { computeArtifactDigest: cad } = await import('../harness/results.js');
       const artDig = await cad(artDir);
-      await writeTrialResult(campaign, 't1', {
-        id: 't1',
-        classification: 'PASS',
-        exitCode: 0,
-        gateResults: [],
-        artifactDir: artDir,
-        digests: buildTrialDigests({
-          resultDigest: computeResultDigest({
-            classification: 'PASS',
-            gateResults: [],
-            exitCode: 0,
+      const frozenT1 = completeManifestTrial({ id: 't1', state: 'completed' });
+      await writeCompleteTrial(
+        campaign,
+        't1',
+        {
+          classification: 'PASS',
+          exitCode: 0,
+          gateResults: [],
+          artifactDir: artDir,
+          digests: buildTrialDigests({
+            artifactDigest: artDig,
+            ...q.digests,
           }),
-          artifactDigest: artDig,
-          ...q.digests,
-        }),
-      });
+        },
+        { manifestTrial: frozenT1 },
+      );
       await writeFile(
         path.join(campaign, 'manifest.json'),
         JSON.stringify({
@@ -240,7 +245,7 @@ describe('digest evidence binding + tamper', () => {
           schemaVersion: 1,
           status: 'completed',
           lock: { held: false, owner: null },
-          trials: [{ id: 't1', state: 'completed' }],
+          trials: [frozenT1],
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         }),
@@ -297,27 +302,24 @@ describe('digest evidence binding + tamper', () => {
       await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
       const { computeArtifactDigest: cad2 } = await import('../harness/results.js');
       const artDig = await cad2(artDir);
-      await writeTrialResult(campaign, 't1', {
-        id: 't1',
-        classification: 'PASS',
-        exitCode: 0,
-        gateResults: [],
-        artifactDir: artDir,
-        digests: buildTrialDigests({
-          resultDigest: computeResultDigest({
-            classification: 'PASS',
-            gateResults: [],
-            exitCode: 0,
-          }),
-          artifactDigest: artDig,
-          ...q.digests,
-        }),
-      });
-
-      const good = await verifyCampaignEvidenceDigests(
+      const frozenT1 = completeManifestTrial({ id: 't1', state: 'completed' });
+      await writeCompleteTrial(
         campaign,
-        [{ id: 't1', state: 'completed' }],
+        't1',
+        {
+          classification: 'PASS',
+          exitCode: 0,
+          gateResults: [],
+          artifactDir: artDir,
+          digests: buildTrialDigests({
+            artifactDigest: artDig,
+            ...q.digests,
+          }),
+        },
+        { manifestTrial: frozenT1 },
       );
+
+      const good = await verifyCampaignEvidenceDigests(campaign, [frozenT1]);
       assert.equal(good.ok, true);
       assert.equal(good.verified, 1);
 
@@ -326,10 +328,7 @@ describe('digest evidence binding + tamper', () => {
         'y\n',
         'utf8',
       );
-      const bad = await verifyCampaignEvidenceDigests(
-        campaign,
-        [{ id: 't1', state: 'completed' }],
-      );
+      const bad = await verifyCampaignEvidenceDigests(campaign, [frozenT1]);
       assert.equal(bad.ok, false);
       assert.ok(bad.failures.length >= 1);
       assert.match(
@@ -367,7 +366,7 @@ describe('digest evidence binding + tamper', () => {
       await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
       const { computeArtifactDigest: cad3 } = await import('../harness/results.js');
       const artDig = await cad3(artDir);
-      await writeTrialResult(campaign, 't-good', {
+      await writeCompleteTrial(campaign, 't-good', {
         id: 't-good',
         classification: 'PASS',
         exitCode: 0,
@@ -406,16 +405,24 @@ describe('digest evidence binding + tamper', () => {
         gateResults: [],
         exitCode: null,
       });
-      await writeTrialResult(campaign, 't-infra', {
+      const frozenInfra = completeManifestTrial({
         id: 't-infra',
-        classification: 'INFRA_FAIL',
-        exitCode: null,
-        gateResults: [],
-        digests: {
-          resultDigest: infraDigest,
-          rawEvidenceUnavailable: true,
-        },
+        state: 'failed',
       });
+      await writeCompleteTrial(
+        campaign,
+        't-infra',
+        {
+          state: 'failed',
+          classification: 'INFRA_FAIL',
+          exitCode: null,
+          gateResults: [],
+          digests: {
+            rawEvidenceUnavailable: true,
+          },
+        },
+        { manifestTrial: frozenInfra },
+      );
       const infra = await verifyTrialEvidenceDigests(campaign, 't-infra');
       assert.equal(infra.ok, false);
       assert.equal(infra.unavailable, true);
@@ -423,7 +430,7 @@ describe('digest evidence binding + tamper', () => {
 
       // Report path (default failOnUnavailable): unavailable fails closed
       const campInfraReport = await verifyCampaignEvidenceDigests(campaign, [
-        { id: 't-infra', state: 'failed' },
+        frozenInfra,
       ]);
       assert.equal(campInfraReport.ok, false);
       assert.equal(campInfraReport.verified, 0);
@@ -433,7 +440,7 @@ describe('digest evidence binding + tamper', () => {
       // Operational classification path may count unavailable without failing
       const campInfraOps = await verifyCampaignEvidenceDigests(
         campaign,
-        [{ id: 't-infra', state: 'failed' }],
+        [frozenInfra],
         undefined,
         { failOnUnavailable: false },
       );
@@ -446,7 +453,7 @@ describe('digest evidence binding + tamper', () => {
         stdout: 'z\n',
         stderr: '',
       });
-      await writeTrialResult(campaign, 't-no-art', {
+      await writeCompleteTrial(campaign, 't-no-art', {
         id: 't-no-art',
         classification: 'PASS',
         exitCode: 0,
@@ -496,7 +503,7 @@ describe('digest evidence binding + tamper', () => {
       const artDig = await computeArtifactDigest(artDir);
       const frozenFixture = 'a'.repeat(64);
 
-      const { result: written } = await writeTrialResult(campaign, 't-env', {
+      const { result: written } = await writeCompleteTrial(campaign, 't-env', {
         id: 't-env',
         experimentId: 'exp-1',
         arm: 'arm-a',
@@ -546,7 +553,7 @@ describe('digest evidence binding + tamper', () => {
       assert.ok(modelTamper.mismatches.includes('resultDigest'));
 
       // Restore and check fixture authority vs independent expectedFixtureDigest
-      await writeTrialResult(campaign, 't-env', {
+      await writeCompleteTrial(campaign, 't-env', {
         ...written,
         digests: {
           ...written.digests,
@@ -567,6 +574,18 @@ describe('digest evidence binding + tamper', () => {
       assert.ok(badFix.mismatches.includes('fixtureDigest'));
 
       // Campaign path with frozen trial metadata
+      const frozenRow = completeManifestTrial({
+        id: 't-env',
+        experimentId: 'exp-1',
+        arm: 'arm-a',
+        provider: 'p',
+        taskId: 'task-1',
+        scheduleSeed: 9,
+        requestedModel: 'm-req',
+        postureFingerprint: 'b'.repeat(64),
+        state: 'completed',
+        expectedFixtureDigest: frozenFixture,
+      });
       await writeFile(
         path.join(campaign, 'manifest.json'),
         JSON.stringify({
@@ -574,24 +593,40 @@ describe('digest evidence binding + tamper', () => {
           schemaVersion: 1,
           status: 'completed',
           lock: { held: false, owner: null },
-          trials: [
-            {
-              id: 't-env',
-              state: 'completed',
-              expectedFixtureDigest: frozenFixture,
-            },
-          ],
+          trials: [frozenRow],
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         }),
         'utf8',
       );
-      const campOk = await verifyCampaignEvidenceDigests(campaign, [
+      // Rewrite so frozen identity matches; digests omit null rawOutputFileSha256
+      await writeCompleteTrial(
+        campaign,
+        't-env',
         {
-          id: 't-env',
-          state: 'completed',
-          expectedFixtureDigest: frozenFixture,
+          experimentId: 'exp-1',
+          arm: 'arm-a',
+          provider: 'p',
+          taskId: 'task-1',
+          scheduleSeed: 9,
+          requestedModel: 'm-req',
+          resolvedModel: 'm-res',
+          resolvedModelAvailable: true,
+          resolvedModelSource: 'invoker-explicit',
+          postureFingerprint: 'b'.repeat(64),
+          classification: 'PASS',
+          exitCode: 0,
+          gateResults: [],
+          digests: buildTrialDigests({
+            artifactDigest: artDig,
+            fixtureDigest: frozenFixture,
+            ...q.digests,
+          }),
         },
+        { manifestTrial: frozenRow },
+      );
+      const campOk = await verifyCampaignEvidenceDigests(campaign, [
+        frozenRow,
       ]);
       assert.equal(campOk.ok, true);
       assert.equal(campOk.reportableResults.length, 1);
@@ -599,8 +634,7 @@ describe('digest evidence binding + tamper', () => {
       // Fixture mismatch via trial metadata fails closed (not two in-result fields)
       const campBad = await verifyCampaignEvidenceDigests(campaign, [
         {
-          id: 't-env',
-          state: 'completed',
+          ...frozenRow,
           expectedFixtureDigest: 'd'.repeat(64),
         },
       ]);
@@ -652,7 +686,7 @@ describe('digest evidence binding + tamper', () => {
       await writeFile(path.join(artDir, 'meta.json'), '{"ok":true}\n', 'utf8');
       const artDig = await computeArtifactDigest(artDir);
 
-      const baseResult = {
+      const baseResult = completeTrialResult({
         ...frozen,
         classification: 'PASS',
         exitCode: 0,
@@ -663,9 +697,9 @@ describe('digest evidence binding + tamper', () => {
           artifactDigest: artDig,
           ...q.digests,
         }),
-      };
+      });
 
-      const { result: written } = await writeTrialResult(
+      const { result: written } = await writeCompleteTrial(
         campaign,
         trialId,
         baseResult,
@@ -729,7 +763,7 @@ describe('digest evidence binding + tamper', () => {
       );
 
       // Restore a correct result for further checks
-      const { result: restored } = await writeTrialResult(
+      const { result: restored } = await writeCompleteTrial(
         campaign,
         trialId,
         {
@@ -816,7 +850,7 @@ describe('digest evidence binding + tamper', () => {
       // Restore campaign artifacts + result
       await writeFile(path.join(artDir, 'meta.json'), '{"ok":true}\n', 'utf8');
       const artDig2 = await computeArtifactDigest(artDir);
-      const { result: full } = await writeTrialResult(
+      const { result: full } = await writeCompleteTrial(
         campaign,
         trialId,
         {
@@ -875,7 +909,7 @@ describe('digest evidence binding + tamper', () => {
 
       // rawEvidenceUnavailable still digests full record including the flag
       const infraId = 'trial-infra-dig';
-      const { result: infraWritten } = await writeTrialResult(campaign, infraId, {
+      const { result: infraWritten } = await writeCompleteTrial(campaign, infraId, {
         id: infraId,
         experimentId: 'exp-strict',
         arm: 'arm-a',
@@ -915,7 +949,6 @@ describe('digest evidence binding + tamper', () => {
 
   it('summary and export refuse unavailable records and report bypass', async () => {
     const {
-      writeTrialResult,
       buildTrialDigests,
       verifyCampaignEvidenceDigests,
     } = await import('../harness/results.js');
@@ -941,6 +974,14 @@ describe('digest evidence binding + tamper', () => {
         }),
         'utf8',
       );
+      const frozenUnavail = completeManifestTrial({
+        id: 't-unavail',
+        experimentId: 'exp',
+        arm: 'a',
+        provider: 'fake',
+        taskId: 't',
+        state: 'failed',
+      });
       await writeFile(
         path.join(campaign, 'manifest.json'),
         JSON.stringify({
@@ -949,35 +990,34 @@ describe('digest evidence binding + tamper', () => {
           status: 'completed',
           experimentId: 'exp',
           lock: { held: false, owner: null },
-          trials: [{ id: 't-unavail', state: 'failed' }],
+          trials: [frozenUnavail],
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         }),
         'utf8',
       );
-      await writeTrialResult(campaign, 't-unavail', {
-        id: 't-unavail',
-        experimentId: 'exp',
-        arm: 'a',
-        taskId: 't',
-        repetition: 1,
-        scheduleSeed: 1,
-        invocationPath: 'native-cli',
-        requestedModel: 'm',
-        resolvedModel: null,
-        resolvedModelAvailable: false,
-        state: 'failed',
-        classification: 'INFRA_FAIL',
-        exitCode: null,
-        digests: {
-          ...buildTrialDigests({}),
-          rawEvidenceUnavailable: true,
+      await writeCompleteTrial(
+        campaign,
+        't-unavail',
+        {
+          experimentId: 'exp',
+          arm: 'a',
+          provider: 'fake',
+          taskId: 't',
+          state: 'failed',
+          classification: 'INFRA_FAIL',
+          exitCode: null,
+          digests: {
+            ...buildTrialDigests({}),
+            rawEvidenceUnavailable: true,
+          },
         },
-      });
+        { manifestTrial: frozenUnavail },
+      );
 
-      // verify fail closed for report path
+      // verify fail closed for report path (unavailable is not reportable)
       const v = await verifyCampaignEvidenceDigests(campaign, [
-        { id: 't-unavail', state: 'failed' },
+        frozenUnavail,
       ]);
       assert.equal(v.ok, false);
       assert.equal(v.unavailable, 1);

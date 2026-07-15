@@ -36,6 +36,31 @@ describe('runCampaign expansion', () => {
     );
   });
 
+  it('expandExperiment fails closed when arm is missing provider', async () => {
+    const { expandExperiment } = await import('../harness/schedule.js');
+    assert.throws(
+      () =>
+        expandExperiment(
+          {
+            id: 'no-provider',
+            seed: 1,
+            repetitions: 1,
+            arms: [
+              {
+                name: 'x',
+                model: 'm',
+                invocationPath: 'native-cli',
+                // provider intentionally omitted
+              },
+            ],
+            taskIds: ['task-a'],
+          },
+          { tasks: [{ taskId: 'task-a' }] },
+        ),
+      /missing provider|fail closed/i,
+    );
+  });
+
   it('expands over real corpus without execute', async () => {
     const {
       runCampaign,

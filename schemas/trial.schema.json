@@ -8,12 +8,19 @@
     "id",
     "experimentId",
     "arm",
+    "provider",
     "taskId",
     "repetition",
     "scheduleSeed",
     "invocationPath",
     "requestedModel",
+    "resolvedModel",
+    "resolvedModelAvailable",
+    "resolvedModelSource",
+    "postureFingerprint",
     "state",
+    "classification",
+    "digests",
     "schemaVersion",
     "writtenAt"
   ],
@@ -35,7 +42,8 @@
     },
     "provider": {
       "type": "string",
-      "description": "Provider id from the arm; identity-bound to frozen manifest when present"
+      "minLength": 1,
+      "description": "Provider id from the arm; always identity-bound to the frozen manifest row"
     },
     "taskId": {
       "type": "string",
@@ -67,12 +75,13 @@
     },
     "resolvedModelSource": {
       "type": "string",
+      "minLength": 1,
       "description": "Evidence source for resolvedModel (e.g. model.resolved.value, invoker-explicit, unavailable, absent)"
     },
     "postureFingerprint": {
       "type": ["string", "null"],
       "pattern": "^[a-f0-9]{64}$",
-      "description": "When set on result or frozen manifest row, both sides must match during identity verify"
+      "description": "Posture fingerprint (64 hex) or null; always identity-bound to the frozen manifest row. Pattern applies only when a string is present."
     },
     "state": {
       "type": "string",
@@ -107,7 +116,7 @@
     "digests": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Evidence binding digests: exact raw stdout/stderr/output bytes, artifact tree, fixture tree, and final-record result envelope. rawEvidenceUnavailable marks infra records without provider raw. resultDigest is recomputed over the full stored record excluding itself.",
+      "description": "Evidence binding digests (required object). rawEvidenceUnavailable marks infra records without provider raw. resultDigest is stamped by writeTrialResult over the full stored record excluding itself.",
       "properties": {
         "resultDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "artifactDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },

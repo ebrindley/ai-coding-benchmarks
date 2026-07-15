@@ -16,13 +16,14 @@ import {
   stat,
   symlink,
   readdir,
+  lstat,
 } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
- * Build a minimal campaign with one verified reportable trial (for export tests).
+ * Build a campaign with one verified reportable trial (for export tests).
  * @param {string} campaign
  * @param {object} [opts]
  * @param {string} [opts.trialId]
@@ -37,6 +38,10 @@ async function seedVerifiedCampaign(campaign, opts = {}) {
     buildTrialDigests,
     computeArtifactDigest,
   } = await import('../harness/results.js');
+  const {
+    completeTrialResult,
+    completeManifestTrial,
+  } = await import('./helpers/complete-trial.js');
 
   const trialId = opts.trialId ?? 't1';
   const stdout = opts.stdout ?? 'export-raw-body\n';
@@ -49,41 +54,42 @@ async function seedVerifiedCampaign(campaign, opts = {}) {
   await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
   const artDig = await computeArtifactDigest(artDir);
 
-  await writeTrialResult(campaign, trialId, {
+  const posture = 'a'.repeat(64);
+  const frozen = completeManifestTrial({
     id: trialId,
     experimentId: 'exp-export',
-    arm: 'fake',
-    provider: 'fake',
-    taskId: 'task-1',
-    repetition: 1,
-    scheduleSeed: 1,
-    invocationPath: 'native-cli',
-    requestedModel: 'm',
-    resolvedModel: null,
-    resolvedModelAvailable: false,
-    resolvedModelSource: 'unavailable',
-    postureFingerprint: 'a'.repeat(64),
+    postureFingerprint: posture,
     state: 'completed',
-    classification: 'PASS',
-    classificationReason: 'ok',
-    exitCode: 0,
-    gateResults: [
-      {
-        gate: 'tests',
-        status: 'passed',
-        exitCode: 0,
-        required: true,
-        stdoutDigest: 'b'.repeat(64),
-        stdoutPreview: 'must-not-export-preview',
-      },
-    ],
-    artifactDir: artDir,
-    digests: buildTrialDigests({
-      artifactDigest: artDig,
-      ...q.digests,
-    }),
-    ...(opts.resultExtras || {}),
   });
+
+  await writeTrialResult(
+    campaign,
+    trialId,
+    completeTrialResult({
+      id: trialId,
+      experimentId: 'exp-export',
+      postureFingerprint: posture,
+      classificationReason: 'ok',
+      exitCode: 0,
+      gateResults: [
+        {
+          gate: 'tests',
+          status: 'passed',
+          exitCode: 0,
+          required: true,
+          stdoutDigest: 'b'.repeat(64),
+          stdoutPreview: 'must-not-export-preview',
+        },
+      ],
+      artifactDir: artDir,
+      digests: buildTrialDigests({
+        artifactDigest: artDig,
+        ...q.digests,
+      }),
+      ...(opts.resultExtras || {}),
+    }),
+    { manifestTrial: frozen },
+  );
 
   const now = new Date().toISOString();
   await writeFile(
@@ -95,23 +101,14 @@ async function seedVerifiedCampaign(campaign, opts = {}) {
       experimentId: 'exp-export',
       lock: { held: false, owner: null },
       host: { user: 'localuser', platform: 'darwin' },
-      trials: [
-        {
-          id: trialId,
-          state: 'completed',
-          arm: 'fake',
-          taskId: 'task-1',
-          invocationPath: 'native-cli',
-          requestedModel: 'm',
-        },
-      ],
+      trials: [frozen],
       createdAt: now,
       updatedAt: now,
     }),
     'utf8',
   );
 
-  return { trialId, artDir };
+  return { trialId, artDir, frozen };
 }
 
 describe('export + quarantine + cli', () => {
@@ -154,8 +151,10 @@ describe('export + quarantine + cli', () => {
       const stReq = await stat(req);
       assert.equal(stReq.mode & 0o777, 0o600);
 
-      await writeTrialResult(campaign, 't1', {
-        id: 't1',
+      const { writeCompleteTrial } = await import(
+        './helpers/complete-trial.js'
+      );
+      await writeCompleteTrial(campaign, 't1', {
         classification: 'PASS',
         gateResults: [
           {
@@ -871,6 +870,43 @@ describe('export + quarantine + cli', () => {
       }
     } finally {
       await rm(campaign, { recursive: true, force: true });
+    }
+  });
+
+  it('export refuses intermediate parent symlink; never writes to link target', async () => {
+    const { exportSanitizedBundle } = await import('../harness/export.js');
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-sym-'));
+    const base = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-symbase-'));
+    try {
+      await seedVerifiedCampaign(campaign);
+
+      const realParent = path.join(base, 'real-parent');
+      await mkdir(realParent, { recursive: true });
+      const decoyTarget = path.join(base, 'decoy-target');
+      await mkdir(decoyTarget, { recursive: true });
+      // User-controlled intermediate symlink (not /tmp or /var system alias)
+      const linkParent = path.join(base, 'link-parent');
+      await symlink(decoyTarget, linkParent);
+      assert.equal((await lstat(linkParent)).isSymbolicLink(), true);
+
+      const outDir = path.join(linkParent, 'export-out');
+      await assert.rejects(
+        () =>
+          exportSanitizedBundle({
+            campaignDir: campaign,
+            outDir,
+          }),
+        /symlink ancestor|fail closed/i,
+      );
+
+      // Never wrote into the symlink target
+      const decoyListing = await readdir(decoyTarget);
+      assert.deepEqual(decoyListing, []);
+      // And no staging leaked into decoy either
+      assert.ok(!decoyListing.some((n) => String(n).includes('aicb-export')));
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+      await rm(base, { recursive: true, force: true });
     }
   });
 

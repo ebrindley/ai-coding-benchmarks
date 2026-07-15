@@ -128,17 +128,12 @@ describe('safe scratch nofollow', () => {
       }
 
       // results.json must not contain sentinel either
-      const { writeTrialResult, buildTrialDigests, computeResultDigest } =
-        await import('../harness/results.js');
-      await writeTrialResult(campaign, 't1', {
-        id: 't1',
+      const { writeCompleteTrial } = await import(
+        './helpers/complete-trial.js'
+      );
+      await writeCompleteTrial(campaign, 't1', {
         classification: 'INFRA_FAIL',
         digests: {
-          resultDigest: computeResultDigest({
-            classification: 'INFRA_FAIL',
-            gateResults: [],
-            exitCode: null,
-          }),
           rawEvidenceUnavailable: true,
         },
       });
