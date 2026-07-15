@@ -119,14 +119,20 @@ export {
   verifyTrialEvidenceDigests,
   verifyCampaignEvidenceDigests,
   buildTrialDigests,
+  computeResultDigest,
+  isInfraFailureWithoutRawEvidence,
 } from './results.js';
 export {
   getInvoker,
   buildInvocationRequest,
   parseResolvedModelEvidence,
   parseInvokeResult,
+  sanitizeAdapterReasonCode,
   POETIC_INVOKE_REQUEST_SCHEMA,
   POETIC_INVOKE_RESULT_SCHEMA,
   POETIC_OUTCOME_KINDS,
   PROMPT_TRANSPORTS,
+  detectProviderConfinement,
+  buildProviderSeatbeltProfile,
+  buildProviderConfinedArgv,
 } from './invokers/index.js';

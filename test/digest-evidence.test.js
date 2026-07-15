@@ -81,6 +81,7 @@ describe('digest evidence binding + tamper', () => {
       writeTrialResult,
       verifyTrialEvidenceDigests,
       buildTrialDigests,
+      computeResultDigest,
     } = await import('../harness/results.js');
 
     const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-tamper-raw-'));
@@ -90,12 +91,18 @@ describe('digest evidence binding + tamper', () => {
         stderr: 'e\n',
       });
       const digests = buildTrialDigests({
-        resultDigest: 'a'.repeat(64),
+        resultDigest: computeResultDigest({
+          classification: 'PASS',
+          gateResults: [],
+          exitCode: 0,
+        }),
         ...q.digests,
       });
       await writeTrialResult(campaign, 'trial-a', {
         id: 'trial-a',
         classification: 'PASS',
+        exitCode: 0,
+        gateResults: [],
         digests,
       });
 
@@ -125,6 +132,7 @@ describe('digest evidence binding + tamper', () => {
       readTrialResult,
       verifyTrialEvidenceDigests,
       buildTrialDigests,
+      computeResultDigest,
     } = await import('../harness/results.js');
 
     const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-tamper-dig-'));
@@ -135,8 +143,14 @@ describe('digest evidence binding + tamper', () => {
       await writeTrialResult(campaign, 'trial-b', {
         id: 'trial-b',
         classification: 'FAIL',
+        exitCode: 1,
+        gateResults: [],
         digests: buildTrialDigests({
-          resultDigest: 'b'.repeat(64),
+          resultDigest: computeResultDigest({
+            classification: 'FAIL',
+            gateResults: [],
+            exitCode: 1,
+          }),
           ...q.digests,
         }),
       });
@@ -177,14 +191,24 @@ describe('digest evidence binding + tamper', () => {
     const outOk = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-ok-'));
     const outBad = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-bad-'));
     try {
+      const {
+        computeResultDigest,
+      } = await import('../harness/results.js');
       const q = await quarantineRawOutput(campaign, 't1', {
         stdout: 'export-raw\n',
+        stderr: '',
       });
       await writeTrialResult(campaign, 't1', {
         id: 't1',
         classification: 'PASS',
+        exitCode: 0,
+        gateResults: [],
         digests: buildTrialDigests({
-          resultDigest: 'c'.repeat(64),
+          resultDigest: computeResultDigest({
+            classification: 'PASS',
+            gateResults: [],
+            exitCode: 0,
+          }),
           ...q.digests,
         }),
       });
@@ -237,17 +261,27 @@ describe('digest evidence binding + tamper', () => {
       quarantineRawOutput,
       writeTrialResult,
       buildTrialDigests,
+      computeResultDigest,
       verifyCampaignEvidenceDigests,
     } = await import('../harness/results.js');
 
     const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-camp-ev-'));
     try {
-      const q = await quarantineRawOutput(campaign, 't1', { stdout: 'x\n' });
+      const q = await quarantineRawOutput(campaign, 't1', {
+        stdout: 'x\n',
+        stderr: '',
+      });
       await writeTrialResult(campaign, 't1', {
         id: 't1',
         classification: 'PASS',
+        exitCode: 0,
+        gateResults: [],
         digests: buildTrialDigests({
-          resultDigest: 'd'.repeat(64),
+          resultDigest: computeResultDigest({
+            classification: 'PASS',
+            gateResults: [],
+            exitCode: 0,
+          }),
           ...q.digests,
         }),
       });
@@ -274,6 +308,90 @@ describe('digest evidence binding + tamper', () => {
         String(bad.error),
         /fail closed|mismatch|integrity failed|rawStdoutSha256|rawOutputDigest/i,
       );
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+    }
+  });
+
+  it('resultDigest tamper and missing evidence fail closed; infra-without-raw is unavailable', async () => {
+    const {
+      quarantineRawOutput,
+      writeTrialResult,
+      buildTrialDigests,
+      computeResultDigest,
+      verifyTrialEvidenceDigests,
+      verifyCampaignEvidenceDigests,
+    } = await import('../harness/results.js');
+
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-res-dig-'));
+    try {
+      const q = await quarantineRawOutput(campaign, 't-good', {
+        stdout: 'ok\n',
+        stderr: '',
+      });
+      const goodDigest = computeResultDigest({
+        classification: 'PASS',
+        gateResults: [],
+        exitCode: 0,
+      });
+      await writeTrialResult(campaign, 't-good', {
+        id: 't-good',
+        classification: 'PASS',
+        exitCode: 0,
+        gateResults: [],
+        digests: buildTrialDigests({
+          resultDigest: goodDigest,
+          ...q.digests,
+        }),
+      });
+
+      // Tamper resultDigest only
+      const { readTrialResult } = await import('../harness/results.js');
+      const r = await readTrialResult(campaign, 't-good');
+      r.digests.resultDigest = 'f'.repeat(64);
+      await writeFile(
+        path.join(campaign, 'results', 't-good', 'result.json'),
+        `${JSON.stringify(r, null, 2)}\n`,
+        'utf8',
+      );
+      const tamper = await verifyTrialEvidenceDigests(campaign, 't-good');
+      assert.equal(tamper.ok, false);
+      assert.ok(tamper.mismatches.includes('resultDigest'));
+
+      // Missing result file for completed trial
+      const missing = await verifyCampaignEvidenceDigests(campaign, [
+        { id: 'no-such-trial', state: 'completed' },
+      ]);
+      assert.equal(missing.ok, false);
+      assert.ok(missing.failures.some((f) => f.mismatches.includes('result')));
+
+      // INFRA_FAIL without raw: unavailable (not verified)
+      const infraDigest = computeResultDigest({
+        classification: 'INFRA_FAIL',
+        gateResults: [],
+        exitCode: null,
+      });
+      await writeTrialResult(campaign, 't-infra', {
+        id: 't-infra',
+        classification: 'INFRA_FAIL',
+        exitCode: null,
+        gateResults: [],
+        digests: {
+          resultDigest: infraDigest,
+          rawEvidenceUnavailable: true,
+        },
+      });
+      const infra = await verifyTrialEvidenceDigests(campaign, 't-infra');
+      assert.equal(infra.ok, false);
+      assert.equal(infra.unavailable, true);
+      assert.equal(infra.mismatches.length, 0);
+
+      const campInfra = await verifyCampaignEvidenceDigests(campaign, [
+        { id: 't-infra', state: 'failed' },
+      ]);
+      assert.equal(campInfra.ok, true);
+      assert.equal(campInfra.verified, 0);
+      assert.equal(campInfra.unavailable, 1);
     } finally {
       await rm(campaign, { recursive: true, force: true });
     }

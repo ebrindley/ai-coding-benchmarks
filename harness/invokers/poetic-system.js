@@ -83,6 +83,8 @@ export function buildPoeticSystemArgv({ prompt, provider, model, timeoutMs }) {
  * @param {unknown} [opts.taskEnv]
  * @param {unknown} [opts.extraArgs]
  * @param {unknown} [opts.systemPromptPath]
+ * @param {string} opts.campaignDir - campaign control tree hidden via OS confinement
+ * @param {import('./provider-confine.js').ProviderConfinementInfo} [opts.confinement]
  * @returns {Promise<InvokerResult>}
  */
 export async function invokePoeticSystem({
@@ -96,8 +98,21 @@ export async function invokePoeticSystem({
   taskEnv,
   extraArgs,
   systemPromptPath,
+  campaignDir,
+  confinement,
   ...rest
 }) {
+  if (campaignDir == null || String(campaignDir).trim() === '') {
+    return {
+      exitCode: null,
+      timedOut: false,
+      stdout: '',
+      stderr: '',
+      infraFailure:
+        'campaignDir is required for provider confinement (fail closed; unconfined refused)',
+      resolvedModel: null,
+    };
+  }
   if (taskEnv !== undefined) {
     return {
       exitCode: null,
@@ -173,6 +188,9 @@ export async function invokePoeticSystem({
     cwd,
     env,
     timeoutMs,
+    campaignDir: String(campaignDir),
+    confine: true,
+    confinement,
   });
 
   return {
@@ -181,7 +199,11 @@ export async function invokePoeticSystem({
     stdout: result.stdout,
     stderr: result.stderr,
     argv: args,
+    confinedArgv: result.confinedArgv,
     resolvedModel: null,
+    ...(result.executionUnavailable
+      ? { executionUnavailable: true }
+      : {}),
     ...(result.infraFailure ? { infraFailure: result.infraFailure } : {}),
     ...(result.signal ? { signal: result.signal } : {}),
   };

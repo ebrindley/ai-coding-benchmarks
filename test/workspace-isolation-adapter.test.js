@@ -185,6 +185,8 @@ process.exit(0);
         'utf8',
       );
 
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const result = await invokePoeticAdapter({
         poeticBin: bin,
         requestPath,
@@ -198,6 +200,8 @@ process.exit(0);
           timeoutMs: 1000,
         },
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
       });
 
       assert.equal(result.success, false);
@@ -237,6 +241,8 @@ process.exit(0);
 
       const requestPath = path.join(dir, 'req.json');
       const outputPath = path.join(dir, 'out.json');
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const result = await invokePoeticAdapter({
         poeticBin: bin,
         requestPath,
@@ -250,6 +256,8 @@ process.exit(0);
           timeoutMs: 1000,
         },
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
       });
 
       assert.equal(result.exitCode, 0);
@@ -290,6 +298,8 @@ process.exit(0);
 
       const requestPath = path.join(dir, 'req.json');
       const outputPath = path.join(dir, 'out.json');
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const result = await invokePoeticAdapter({
         poeticBin: bin,
         requestPath,
@@ -303,6 +313,8 @@ process.exit(0);
           timeoutMs: 1000,
         },
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
       });
 
       assert.equal(result.exitCode, 0);
@@ -354,6 +366,8 @@ process.exit(0);
       );
       await chmod(bin, 0o755);
 
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const result = await invokePoeticAdapter({
         poeticBin: bin,
         requestPath: path.join(dir, 'req.json'),
@@ -367,6 +381,8 @@ process.exit(0);
           timeoutMs: 1000,
         },
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
       });
 
       assert.equal(result.success, false);

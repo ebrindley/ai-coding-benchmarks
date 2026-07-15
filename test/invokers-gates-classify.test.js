@@ -121,8 +121,10 @@ process.stdout.write('done');
       assert.equal('trialId' in request, false);
       assert.equal('workspace' in request, false);
 
-      // Nested private parent dirs for request/output.
+      // Nested private parent dirs for request/output (execution scratch; campaign separate).
       const artDir = path.join(dir, 'artifacts', 't1');
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const requestPath = path.join(artDir, 'req.json');
       const outputPath = path.join(artDir, 'out.json');
       const result = await invokePoeticAdapter({
@@ -131,6 +133,8 @@ process.stdout.write('done');
         outputPath,
         request,
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: workspaceDir,
       });
       assert.equal(result.exitCode, 0);
       assert.equal(result.success, true);
@@ -209,6 +213,8 @@ process.exit(0);
 
         const requestPath = path.join(dir, `req-${kind}.json`);
         const outputPath = path.join(dir, `out-${kind}.json`);
+        const campaignDir = path.join(dir, `_campaign_${kind}`);
+        await mkdir(campaignDir, { recursive: true, mode: 0o700 });
         const result = await invokePoeticAdapter({
           poeticBin: bin,
           requestPath,
@@ -222,6 +228,8 @@ process.exit(0);
             timeoutMs: 1000,
           },
           timeoutMs: 10_000,
+          campaignDir,
+          cwd: dir,
         });
 
         const exp = expectByKind[kind];
@@ -278,12 +286,16 @@ process.exit(0);
         'utf8',
       );
       await chmod(badBin, 0o755);
+      const badCampaign = path.join(dir, '_campaign_bad');
+      await mkdir(badCampaign, { recursive: true, mode: 0o700 });
       const badResult = await invokePoeticAdapter({
         poeticBin: badBin,
         requestPath: path.join(dir, 'req-bad.json'),
         outputPath: path.join(dir, 'out-bad.json'),
         request: { schema: 'x', requestId: 'b', provider: 'p', prompt: 'p', workingDirectory: dir, timeoutMs: 1 },
         timeoutMs: 10_000,
+        campaignDir: badCampaign,
+        cwd: dir,
       });
       assert.equal(badResult.exitCode, 0);
       assert.equal(badResult.success, false);
@@ -347,6 +359,8 @@ process.exit(0);
         '2',
       ]);
 
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const result = await invokePoeticSystem({
         poeticBin: bin,
         prompt: 'fix the bug',
@@ -354,6 +368,7 @@ process.exit(0);
         model: 'claude-x',
         timeoutMs: 90_000,
         cwd: dir,
+        campaignDir,
         env: { ...process.env, AICB_ARGV_OUT: argvOut },
       });
       assert.equal(result.exitCode, 0);
@@ -429,6 +444,8 @@ process.exit(0);
     try {
       const bin = path.join(dir, 'fake-cli');
       const capture = path.join(dir, 'stdin.txt');
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -457,6 +474,8 @@ process.stdin.on('end', () => {
         // default promptTransport is stdin
         env: { ...process.env, AICB_CAPTURE: capture },
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
       });
       assert.equal(result.exitCode, 0);
       assert.equal(result.promptTransport, 'stdin');
@@ -471,6 +490,10 @@ process.stdin.on('end', () => {
     try {
       const bin = path.join(dir, 'fake-cli');
       const capture = path.join(dir, 'from-file.txt');
+      const campaignDir = path.join(dir, '_campaign');
+      const scratchDir = path.join(dir, 'scratch');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
+      await mkdir(scratchDir, { recursive: true, mode: 0o700 });
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -502,6 +525,9 @@ process.exit(0);
           AICB_PATH_CAPTURE: pathCap,
         },
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
+        scratchDir,
       });
       assert.equal(result.exitCode, 0);
       assert.equal(result.promptTransport, 'prompt-file');
@@ -524,11 +550,10 @@ process.exit(0);
       const { invokeNativeCli } = await import(
         '../harness/invokers/native-cli.js'
       );
-      // Capture temp path by wrapping a missing binary: child fails but prompt
-      // file is still created first. Use a spy-like command that records argv
-      // then exits via a wrapper that fails after reading path… simpler: use
-      // a script that writes the path then the harness cleans up after spawn
-      // returns (even with non-zero). Also test missing command infraFailure.
+      const campaignDir = path.join(dir, '_campaign');
+      const scratchDir = path.join(dir, 'scratch');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
+      await mkdir(scratchDir, { recursive: true, mode: 0o700 });
       const bin = path.join(dir, 'record-and-fail');
       const pathCap = path.join(dir, 'path.txt');
       await writeFile(
@@ -550,6 +575,9 @@ process.exit(1);
         promptTransport: 'prompt-file',
         env: { ...process.env, AICB_PATH_CAPTURE: pathCap },
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
+        scratchDir,
       });
       assert.equal(result.exitCode, 1);
       assert.equal(result.promptFileUsed, true);
@@ -557,14 +585,15 @@ process.exit(1);
       const usedPath = await readFile(pathCap, 'utf8');
       await assert.rejects(() => readFile(usedPath, 'utf8'), /ENOENT/);
 
-      // Spawn of non-existent command also cleans up (prompt written before spawn).
-      // Use a path that cannot exist; prompt-file still creates temp then finally removes it.
       const missing = await invokeNativeCli({
         command: path.join(dir, 'definitely-missing-binary-xyz'),
         args: [],
         prompt: 'cleanup-on-spawn-fail',
         promptTransport: 'prompt-file',
         timeoutMs: 5_000,
+        campaignDir,
+        cwd: dir,
+        scratchDir,
       });
       assert.ok(missing.infraFailure || missing.exitCode !== 0);
       assert.equal(missing.promptFileUsed, true);
@@ -583,6 +612,7 @@ process.exit(1);
       args: [],
       prompt: 'x',
       promptTransport: 'shell-template',
+      campaignDir: path.join(os.tmpdir(), 'aicb-camp-dummy'),
     });
     assert.ok(badTransport.infraFailure);
     assert.match(badTransport.infraFailure, /promptTransport/i);
@@ -590,6 +620,7 @@ process.exit(1);
     const badEnv = await invokeNativeCli({
       command: 'true',
       args: [],
+      campaignDir: path.join(os.tmpdir(), 'aicb-camp-dummy2'),
       env: Object.assign(Object.create(null), {
         PATH: '/usr/bin',
         __source: 'task-yaml',

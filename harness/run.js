@@ -61,6 +61,7 @@ async function loadPeers() {
       ensurePrivateDir,
       writePrivateFile,
       buildTrialDigests,
+      computeResultDigest,
       computeArtifactDigest,
       verifyCampaignEvidenceDigests,
     },
@@ -116,6 +117,7 @@ async function loadPeers() {
     ensurePrivateDir,
     writePrivateFile,
     buildTrialDigests,
+    computeResultDigest,
     computeArtifactDigest,
     verifyCampaignEvidenceDigests,
     buildReport,
@@ -604,13 +606,19 @@ export async function runCampaign(opts) {
           requestId: trial.id,
           timeoutMs,
         });
+        // Invocation scratch lives under the external execution workspace only —
+        // never under campaign/artifacts (provider is OS-confined away from campaign).
+        const scratchDir = path.join(workspace.workspaceDir, '.aicb-scratch');
+        await peers.ensurePrivateDir(scratchDir);
+        const requestPath = path.join(scratchDir, 'request.json');
+        const outputPath = path.join(scratchDir, 'output.json');
+        // Campaign-side copies (post-invocation only; trusted harness process).
         const artifactDir = await peers.trialPathUnder(artifactRoot, trial.id);
         await peers.ensurePrivateDir(artifactDir);
-        const requestPath = path.join(artifactDir, 'request.json');
-        const outputPath = path.join(artifactDir, 'output.json');
+        const campaignRequestPath = path.join(artifactDir, 'request.json');
+        const campaignOutputPath = path.join(artifactDir, 'output.json');
 
-        // Prompt-bearing request written privately (0600) even under permissive umask.
-        // Adapter invoker re-preps outputPath (unlink + fresh bind by requestId).
+        // Prompt-bearing request written privately in execution scratch (0600).
         await peers.writePrivateFile(
           requestPath,
           `${JSON.stringify(request, null, 2)}\n`,
@@ -620,27 +628,35 @@ export async function runCampaign(opts) {
           poeticBin: arm.poeticBin || process.env.AICB_POETIC_BIN || 'poetic',
           requestPath,
           outputPath,
-          // request already written privately; still pass for invokers that re-write
-          // and for requestId result binding
           request,
           cwd: workspace.workspaceDir,
           timeoutMs,
           command: arm.command,
           args: arm.args || [],
           prompt: request.prompt,
-          // native-cli: enumerated prompt transport only ('stdin' | 'prompt-file')
           promptTransport: arm.promptTransport,
           provider: arm.provider,
           model: arm.model,
-          // harness-controlled env only; never task YAML
+          // OS confinement: hide campaign control/evidence while provider is alive
+          campaignDir,
+          scratchDir,
           env: undefined,
         });
 
-        // Re-assert private modes after invoker may have rewritten request/output.
-        await tryChmod(requestPath, 0o600);
+        // Trusted harness only: copy scratch request/output into campaign storage
+        // after the confined provider process has exited.
+        try {
+          const reqBody = await readFile(requestPath);
+          await peers.writePrivateFile(campaignRequestPath, reqBody);
+        } catch {
+          /* request may be missing on hard failure */
+        }
+        let recordedOutputPath = outputPath;
         try {
           await access(outputPath);
-          await tryChmod(outputPath, 0o600);
+          const outBody = await readFile(outputPath);
+          await peers.writePrivateFile(campaignOutputPath, outBody);
+          recordedOutputPath = campaignOutputPath;
         } catch {
           /* output may be absent on infra failure */
         }
@@ -651,14 +667,14 @@ export async function runCampaign(opts) {
           {
             stdout: invokerResult.stdout,
             stderr: invokerResult.stderr,
-            outputPath: invokerResult.outputPath || outputPath,
+            outputPath: invokerResult.outputPath || recordedOutputPath,
           },
         );
 
         const modelEv = await resolveModelEvidence(
           arm.invocationPath,
           invokerResult,
-          outputPath,
+          recordedOutputPath,
         );
 
         const oracleRoot = path.join(suiteDir, 'oracles');
@@ -688,6 +704,8 @@ export async function runCampaign(opts) {
             command: 'git',
             args: ['-C', workspace.workspaceDir, 'status', '--porcelain'],
             timeoutMs: 10_000,
+            // Trusted harness helper — not a provider; do not require campaign mask
+            confine: false,
           });
           if (diff.exitCode === 0) {
             // Exclude .poetic/** bookkeeping so telemetry-only runs are NO_OP
@@ -748,11 +766,18 @@ export async function runCampaign(opts) {
             ? await peers.computeArtifactDigest(artifactDir)
             : await digestArtifactDir(artifactDir);
         const digests = peers.buildTrialDigests({
-          resultDigest: sha256Json({
-            classification: classified.classification,
-            gateResults: safeGateResults,
-            exitCode: invokerResult.exitCode,
-          }),
+          resultDigest:
+            typeof peers.computeResultDigest === 'function'
+              ? peers.computeResultDigest({
+                  classification: classified.classification,
+                  gateResults: safeGateResults,
+                  exitCode: invokerResult.exitCode,
+                })
+              : sha256Json({
+                  classification: classified.classification,
+                  gateResults: safeGateResults,
+                  exitCode: invokerResult.exitCode,
+                }),
           artifactDigest,
           fixtureDigest: workspace.fixtureHash,
           rawOutputDigest: rawQuarantine.digests?.rawOutputDigest,
@@ -764,6 +789,7 @@ export async function runCampaign(opts) {
         await peers.writeTrialResult(campaignDir, trial.id, {
           ...trial,
           ...trialUpdate,
+          exitCode: invokerResult.exitCode,
           digests,
         });
       } catch (err) {
@@ -782,9 +808,27 @@ export async function runCampaign(opts) {
             : { executionRoot }),
         };
         try {
+          // Infra path without provider raw artifacts: mark unavailable for reportability.
+          const infraDigests = peers.buildTrialDigests({
+            resultDigest:
+              typeof peers.computeResultDigest === 'function'
+                ? peers.computeResultDigest({
+                    classification: 'INFRA_FAIL',
+                    gateResults: [],
+                    exitCode: null,
+                  })
+                : sha256Json({
+                    classification: 'INFRA_FAIL',
+                    gateResults: [],
+                    exitCode: null,
+                  }),
+          });
+          infraDigests.rawEvidenceUnavailable = true;
           await peers.writeTrialResult(campaignDir, trial.id, {
             ...trial,
             ...trialUpdate,
+            exitCode: null,
+            digests: infraDigests,
           });
         } catch {
           /* best effort */

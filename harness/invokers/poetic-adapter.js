@@ -43,6 +43,26 @@ export const POETIC_OUTCOME_KINDS = Object.freeze([
 const OUTCOME_KIND_SET = new Set(POETIC_OUTCOME_KINDS);
 
 /**
+ * Bounded adapter reasonCode syntax for ordinary/exported records.
+ * Free-form text is rejected at the parse boundary (never flows into results).
+ */
+export const REASON_CODE_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * Validate outcome.reasonCode at the parsing boundary.
+ * Invalid/free-form codes become null (never pass through arbitrary text).
+ *
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function sanitizeAdapterReasonCode(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  if (s === '') return null;
+  return REASON_CODE_RE.test(s) ? s : null;
+}
+
+/**
  * @typedef {object} ParsedInvokeResult
  * @property {boolean} valid
  * @property {boolean} success
@@ -53,6 +73,7 @@ const OUTCOME_KIND_SET = new Set(POETIC_OUTCOME_KINDS);
  * @property {string} [providerFailure]
  * @property {Record<string, unknown> | null} [artifact]
  * @property {string} [parseError]
+ * @property {boolean} [reasonCodeRejected]
  */
 
 /**
@@ -80,9 +101,8 @@ const OUTCOME_KIND_SET = new Set(POETIC_OUTCOME_KINDS);
  * @returns {Omit<ParsedInvokeResult, 'valid' | 'artifact' | 'parseError'>}
  */
 export function mapOutcomeKind(kind, reasonCode = null) {
-  const code = reasonCode != null && String(reasonCode).trim() !== ''
-    ? String(reasonCode)
-    : null;
+  // Only bounded identifiers may appear as reasonCode on ordinary records.
+  const code = sanitizeAdapterReasonCode(reasonCode);
   const detail = code ? `${kind}: ${code}` : kind;
 
   switch (kind) {
@@ -230,10 +250,14 @@ export function parseInvokeResult(artifact) {
   }
 
   const kind = String(o.kind).trim();
-  const reasonCode =
+  // Parse-boundary validation: free-form reasonCode never enters ordinary records.
+  const rawReason =
     o.reasonCode != null && String(o.reasonCode).trim() !== ''
-      ? String(o.reasonCode)
+      ? String(o.reasonCode).trim()
       : null;
+  const reasonCodeRejected =
+    rawReason != null && sanitizeAdapterReasonCode(rawReason) == null;
+  const reasonCode = sanitizeAdapterReasonCode(rawReason);
 
   if (!OUTCOME_KIND_SET.has(kind)) {
     const mapped = mapOutcomeKind(kind, reasonCode);
@@ -241,11 +265,14 @@ export function parseInvokeResult(artifact) {
       valid: false,
       ...mapped,
       success: false,
+      reasonCode, // sanitized only (null if free-form)
+      reasonCodeRejected,
       infraFailure:
         mapped.infraFailure ??
         `unknown adapter outcome kind (${kind})`,
       parseError: 'unknown-kind',
-      artifact: rec,
+      // Strip free-form reason from artifact copy used on ordinary records
+      artifact: sanitizeArtifactReasonCode(rec),
     };
   }
 
@@ -253,8 +280,33 @@ export function parseInvokeResult(artifact) {
   return {
     valid: true,
     ...mapped,
-    artifact: rec,
+    reasonCode,
+    reasonCodeRejected,
+    artifact: sanitizeArtifactReasonCode(rec),
   };
+}
+
+/**
+ * Return a shallow copy of the result artifact with outcome.reasonCode
+ * sanitized (or removed when free-form) so free-form never flows downstream.
+ * @param {Record<string, unknown>} rec
+ * @returns {Record<string, unknown>}
+ */
+function sanitizeArtifactReasonCode(rec) {
+  const out = { ...rec };
+  if (out.outcome != null && typeof out.outcome === 'object' && !Array.isArray(out.outcome)) {
+    const outcome = { .../** @type {Record<string, unknown>} */ (out.outcome) };
+    if ('reasonCode' in outcome) {
+      const s = sanitizeAdapterReasonCode(outcome.reasonCode);
+      if (s == null) {
+        delete outcome.reasonCode;
+      } else {
+        outcome.reasonCode = s;
+      }
+    }
+    out.outcome = outcome;
+  }
+  return out;
 }
 
 /**
@@ -468,6 +520,8 @@ export function bindInvokeResultToRequestId(parsed, expectedRequestId) {
  * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | null} [opts.env] harness-controlled only
  * @param {number} [opts.timeoutMs]
  * @param {unknown} [opts.request] if provided, written as JSON to requestPath before spawn
+ * @param {string} opts.campaignDir - campaign control tree hidden from provider via OS confinement
+ * @param {import('./provider-confine.js').ProviderConfinementInfo} [opts.confinement]
  * @returns {Promise<InvokerResult>}
  */
 export async function invokePoeticAdapter({
@@ -478,7 +532,23 @@ export async function invokePoeticAdapter({
   env,
   timeoutMs,
   request,
+  campaignDir,
+  confinement,
 }) {
+  if (campaignDir == null || String(campaignDir).trim() === '') {
+    return {
+      exitCode: null,
+      timedOut: false,
+      stdout: '',
+      stderr: '',
+      outputPath: outputPath ?? '',
+      success: false,
+      outcomeKind: null,
+      reasonCode: null,
+      infraFailure:
+        'campaignDir is required for provider confinement (fail closed; unconfined refused)',
+    };
+  }
   if (poeticBin == null || String(poeticBin).trim() === '') {
     return {
       exitCode: null,
@@ -569,12 +639,21 @@ export async function invokePoeticAdapter({
     String(outputPath),
   ];
 
+  // Fail-closed OS confinement: campaign tree inaccessible while provider is alive.
+  // Nested Poetic sandboxes (if any) run inside this outer restriction.
   const result = await spawnControlled({
     command: String(poeticBin),
     args,
     cwd,
     env,
     timeoutMs,
+    campaignDir: String(campaignDir),
+    confine: true,
+    confinement,
+    extraBindPaths: [
+      path.dirname(String(requestPath)),
+      path.dirname(String(outputPath)),
+    ],
   });
 
   /** @type {InvokerResult} */
