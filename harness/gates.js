@@ -5,13 +5,15 @@
  * policy cannot be constructed — never run gate command strings bare.
  * Command strings are passed as exact literals to `/bin/sh -c` under confinement only.
  *
- * Oracle contract (commandless):
+ * Oracle contract (commandless XOR declared command — never both):
  *   gate.oraclePath is relative to the suite oracles/ root only (path-contained).
  *   Harness builds a controlled argv command string from the script extension:
  *     .js/.mjs/.cjs → `node <absOraclePath>`
  *     .sh/.bash     → `bash <absOraclePath>`
  *   cwd = workspace; WORKSPACE_DIR is set to the absolute workspace path.
- *   Task-declared `command` (when present) is never rewritten — it runs as-is.
+ *   Task-declared `command` (when present alone) is never rewritten — it runs as-is.
+ *   Setting both command and oraclePath fails closed (execution_unavailable / INFRA_FAIL).
+ *   Result oraclePath is set only when that exclusive path was executed under confinement.
  *
  * macOS: deny-default seatbelt — process-exec; reads only workspace/private-tmp/system
  *        toolchain roots (+ oracle path roots when executing oracles); writes only
@@ -134,7 +136,8 @@ export const SYSTEM_TOOLCHAIN_ROOTS = Object.freeze([
  * @property {string} [infraFailure]
  * @property {'PASS' | 'FAIL' | 'INFRA_FAIL' | 'TIMEOUT' | null} classificationSignal
  * @property {string} [check]
- * @property {string} [oraclePath] relative path under suite oracles/ when oracle gate
+ * @property {string} [oraclePath] exclusive oracle path executed under confinement
+ * @property {boolean} [oracleExecuted] true only when oraclePath was the exclusive executed source
  */
 
 /**
@@ -162,12 +165,96 @@ function isSafeEnvName(name) {
 }
 
 /**
- * Credential / capability-like environment variable names that must never be
- * admitted into task **gate** processes via envAllowlist (even if an arm asks).
+ * Fixed non-sensitive names that envAllowlist may add beyond the base set.
+ * Primary policy is this safe-name whitelist — not a credential denylist.
+ */
+export const GATE_SAFE_ALLOWLIST_NAMES = Object.freeze([
+  'NODE_ENV',
+  'CI',
+  'FORCE_COLOR',
+  'NO_COLOR',
+  'TZ',
+  'LANG',
+  'LC_ALL',
+]);
+
+const GATE_SAFE_ALLOWLIST_SET = new Set(GATE_SAFE_ALLOWLIST_NAMES);
+
+/** Constrained config vars: AICB_GATE_CFG_[A-Z0-9_]+ with safe value contract. */
+export const GATE_CFG_NAME_RE = /^AICB_GATE_CFG_[A-Z0-9_]+$/;
+/** Safe values for AICB_GATE_CFG_* (no URI schemes, cookies, shell metachar, spaces). */
+export const GATE_CFG_VALUE_RE = /^[A-Za-z0-9._+/-]+$/;
+export const GATE_CFG_VALUE_MAX_LEN = 128;
+
+/**
+ * Bounded identifier syntax for adapter reasonCode / outcome fields in ordinary
+ * and exported records. Free-form text must not use this path (quarantine only).
+ * @type {RegExp}
+ */
+export const BOUNDED_IDENTIFIER_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isBoundedIdentifier(value) {
+  return typeof value === 'string' && BOUNDED_IDENTIFIER_RE.test(value);
+}
+
+/**
+ * Keep only bounded identifiers; free-form strings become null (fail closed).
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function sanitizeBoundedIdentifier(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  if (s === '') return null;
+  return isBoundedIdentifier(s) ? s : null;
+}
+
+/**
+ * @param {unknown} name
+ * @returns {boolean}
+ */
+export function isGateCfgEnvName(name) {
+  return typeof name === 'string' && GATE_CFG_NAME_RE.test(name);
+}
+
+/**
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isSafeGateCfgValue(value) {
+  if (value == null) return false;
+  const s = String(value);
+  if (s.length === 0 || s.length > GATE_CFG_VALUE_MAX_LEN) return false;
+  if (!GATE_CFG_VALUE_RE.test(s)) return false;
+  // Reject JWT-shaped values even though base64url fits the charset.
+  if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(s)) return false;
+  return true;
+}
+
+/**
+ * Primary allowlist: name is either a fixed safe name or AICB_GATE_CFG_*.
+ * @param {unknown} name
+ * @returns {boolean}
+ */
+export function isAllowlistedGateEnvName(name) {
+  if (typeof name !== 'string' || !isSafeEnvName(name)) return false;
+  if (GATE_SAFE_ALLOWLIST_SET.has(name)) return true;
+  if (isGateCfgEnvName(name)) return true;
+  return false;
+}
+
+/**
+ * Secondary denylist: credential / capability-like names (defense in depth).
+ * Primary admission is isAllowlistedGateEnvName — this never admits new names.
  *
  * Covers: API keys, tokens, secrets, passwords/passphrases, credentials,
- * private/access/secret keys, authorization/bearer, SSH_AUTH_SOCK, and common
- * cloud/GitHub credential names. Provider invoker env is unaffected (gates only).
+ * private/access/secret keys, authorization/bearer, SSH_AUTH_SOCK, DB URLs,
+ * cookies, JWTs, and common cloud/GitHub credential names.
+ * Provider invoker env is unaffected (gates only).
  *
  * @param {unknown} name
  * @returns {boolean}
@@ -176,7 +263,7 @@ export function isCredentialLikeEnvKey(name) {
   if (typeof name !== 'string' || name.trim() === '') return false;
   const n = name.trim().toUpperCase();
 
-  // Exact known credential / agent capability names
+  // Exact known credential / agent capability / connection-string names
   const EXACT = new Set([
     'SSH_AUTH_SOCK',
     'SSH_AGENT_PID',
@@ -208,6 +295,20 @@ export function isCredentialLikeEnvKey(name) {
     'SECRET',
     'CREDENTIALS',
     'CREDENTIAL',
+    'DATABASE_URL',
+    'DB_URL',
+    'DSN',
+    'CONNECTION_STRING',
+    'MONGO_URL',
+    'MONGODB_URI',
+    'REDIS_URL',
+    'COOKIE',
+    'COOKIES',
+    'HTTP_COOKIE',
+    'JWT',
+    'ID_TOKEN',
+    'ACCESS_TOKEN',
+    'REFRESH_TOKEN',
   ]);
   if (EXACT.has(n)) return true;
 
@@ -229,6 +330,15 @@ export function isCredentialLikeEnvKey(name) {
   if (/(?:^|_)APIKEY(?:_|$)/.test(n)) {
     return true;
   }
+  // DB / DSN / connection-string vocabulary
+  if (
+    /(?:^|_)(?:DATABASE_URL|DB_URL|DSN|CONNECTION_STRING|JDBC_URL|MONGO(?:DB)?_URL|REDIS_URL)(?:_|$)/.test(
+      n,
+    )
+  ) {
+    return true;
+  }
+  if (/(?:^|_)(?:COOKIE|JWT)(?:_|$)/.test(n)) return true;
   // Sentinel / harness test secrets and anything with SECRET in the name
   if (n.includes('SECRET')) return true;
   if (n.includes('PASSWORD') || n.includes('PASSPHRASE')) return true;
@@ -238,9 +348,11 @@ export function isCredentialLikeEnvKey(name) {
 }
 
 /**
- * Normalize envAllowlist to an ordered unique list of safe **non-credential** names.
- * Accepts array of names or object keys (values ignored — only names allowed).
- * Fail closed if any name is credential-like.
+ * Normalize envAllowlist to an ordered unique list under the **safe-name whitelist**.
+ * Accepts array of names or object keys (values ignored — only names admitted).
+ *
+ * Primary policy: only GATE_SAFE_ALLOWLIST_NAMES or AICB_GATE_CFG_[A-Z0-9_]+.
+ * Secondary: credential-like names still fail closed (defense in depth).
  *
  * @param {string[] | Record<string, unknown> | null | undefined} envAllowlist
  * @returns {string[]}
@@ -262,7 +374,20 @@ export function normalizeEnvAllowlist(envAllowlist) {
   /** @type {string[]} */
   const out = [];
   for (const n of names) {
-    if (!isSafeEnvName(n) || seen.has(n)) continue;
+    if (seen.has(n)) continue;
+    if (!isSafeEnvName(n)) {
+      throw new Error(
+        `buildGateEnv: envAllowlist name "${n}" is not a valid environment variable identifier`,
+      );
+    }
+    if (!isAllowlistedGateEnvName(n)) {
+      throw new Error(
+        `buildGateEnv: envAllowlist name "${n}" is not on the safe allowlist ` +
+          `(only ${GATE_SAFE_ALLOWLIST_NAMES.join(', ')}, or AICB_GATE_CFG_[A-Z0-9_]+); fail closed`,
+      );
+    }
+    // Secondary denylist — never admit credential/capability names even if
+    // they somehow matched a prefix pattern (e.g. AICB_GATE_CFG_*_SECRET).
     if (isCredentialLikeEnvKey(n)) {
       throw new Error(
         `buildGateEnv: envAllowlist must not include credential/capability variable "${n}" (gates never receive secrets even when an arm requests them)`,
@@ -279,11 +404,12 @@ export function normalizeEnvAllowlist(envAllowlist) {
  *
  * Never copies full process.env. Composes:
  * - explicit small base (PATH + platform-required vars when not restrictive)
- * - arm envAllowlist as allowlist of **names** whose values are taken from parent
+ * - arm envAllowlist under the **safe-name whitelist** contract only:
+ *     fixed safe names (NODE_ENV, CI, …) or AICB_GATE_CFG_* with value contract
  *
- * Credential-like names in envAllowlist are rejected (fail closed).
- * Task YAML must never contribute environment. Callers must not pass corpus task.env.
- * Provider invoker env is separate and not governed by this function.
+ * Fail closed for anything else (DB URLs, JWTs, cookies, cloud/SSH credentials)
+ * even when networkPolicy.allowed=true. Provider invoker env is separate.
+ * Task YAML must never contribute environment.
  *
  * @param {object} [opts]
  * @param {string[] | Record<string, unknown> | null | undefined} [opts.envAllowlist]
@@ -327,25 +453,38 @@ export function buildGateEnv(opts = {}) {
     }
   }
 
-  // Fail closed: normalizeEnvAllowlist throws on credential-like names.
+  // Fail closed: normalizeEnvAllowlist throws on non-allowlisted / credential names.
   const allowlist = normalizeEnvAllowlist(opts.envAllowlist);
   for (const name of allowlist) {
-    if (isCredentialLikeEnvKey(name)) {
+    if (!isAllowlistedGateEnvName(name) || isCredentialLikeEnvKey(name)) {
       throw new Error(
-        `buildGateEnv: refused credential-like envAllowlist name "${name}"`,
+        `buildGateEnv: refused non-allowlisted or credential-like envAllowlist name "${name}"`,
       );
     }
     if (
       Object.prototype.hasOwnProperty.call(parent, name) &&
       parent[name] != null
     ) {
-      out[name] = String(parent[name]);
+      const value = String(parent[name]);
+      if (isGateCfgEnvName(name) && !isSafeGateCfgValue(value)) {
+        throw new Error(
+          `buildGateEnv: value for "${name}" fails AICB_GATE_CFG safe-value contract ` +
+            `(max ${GATE_CFG_VALUE_MAX_LEN} chars, charset [A-Za-z0-9._+/-], no JWT-shaped values)`,
+        );
+      }
+      out[name] = value;
     }
   }
 
-  // Final belt-and-suspenders: never emit credential-like keys
+  // Final belt-and-suspenders: never emit credential-like keys; drop any
+  // non-base key that is not on the safe allowlist contract.
+  const baseKeySet = new Set(baseKeys);
   for (const key of Object.keys(out)) {
     if (isCredentialLikeEnvKey(key)) {
+      delete out[key];
+      continue;
+    }
+    if (!baseKeySet.has(key) && !isAllowlistedGateEnvName(key)) {
       delete out[key];
     }
   }
@@ -379,6 +518,7 @@ export function sanitizeGateResultsForStorage(gateResults) {
       classificationSignal,
       check,
       oraclePath,
+      oracleExecuted,
     } = /** @type {Record<string, unknown>} */ (g);
     /** @type {Record<string, unknown>} */
     const clean = {
@@ -397,8 +537,11 @@ export function sanitizeGateResultsForStorage(gateResults) {
     if (evidence != null) clean.evidence = evidence;
     if (infraFailure != null) clean.infraFailure = infraFailure;
     if (check != null) clean.check = check;
-    // oraclePath is a relative corpus path (not secret-bearing); keep for evidence binding
-    if (oraclePath != null) clean.oraclePath = oraclePath;
+    // oraclePath is execution evidence only when exclusive path was run under confinement
+    if (oraclePath != null && oracleExecuted === true) {
+      clean.oraclePath = oraclePath;
+      clean.oracleExecuted = true;
+    }
     return clean;
   });
 }
@@ -784,20 +927,38 @@ function findPriorGateByName(prior, gateName) {
 }
 
 /**
+ * True when a prior gate result may substantiate an oraclePath binding:
+ * exclusive oracle-path execution under confinement recorded oraclePath.
+ * Rejects mixed/claimed paths without oracleExecuted (fail closed).
+ *
+ * @param {Record<string, unknown> | null | undefined} g
+ * @param {string} oraclePathRel
+ * @returns {boolean}
+ */
+export function isExclusiveOraclePathEvidence(g, oraclePathRel) {
+  if (!g || typeof g !== 'object') return false;
+  if (typeof g.oraclePath !== 'string') return false;
+  const norm = String(oraclePathRel).replace(/\\/g, '/');
+  if (g.oraclePath.replace(/\\/g, '/') !== norm) return false;
+  // Require explicit exclusive-execution flag; unexecuted / mixed claims fail closed.
+  if (g.oracleExecuted !== true) return false;
+  return true;
+}
+
+/**
  * Find a prior oracle gate matching an explicit oraclePath metadata binding.
+ * Only exclusive executed oraclePath evidence qualifies.
  * @param {Array<Record<string, unknown>>} prior
  * @param {string} oraclePathRel
  * @returns {Record<string, unknown> | undefined}
  */
 function findPriorOracleByPath(prior, oraclePathRel) {
-  const norm = String(oraclePathRel).replace(/\\/g, '/');
-  return prior.find((g) => {
-    if (!g || String(g.gate) !== 'oracle') return false;
-    if (typeof g.oraclePath === 'string' && g.oraclePath.replace(/\\/g, '/') === norm) {
-      return true;
-    }
-    return false;
-  });
+  return prior.find(
+    (g) =>
+      g &&
+      String(g.gate) === 'oracle' &&
+      isExclusiveOraclePathEvidence(g, oraclePathRel),
+  );
 }
 
 /**
@@ -942,26 +1103,17 @@ export async function evaluateRequirements({
 
     if (itemOraclePath) {
       bound = findPriorOracleByPath(prior, itemOraclePath);
-      // Also accept a passed oracle gate when the run result carried oraclePath.
+      // Also accept a named gate only when it carries exclusive oracle execution evidence.
       if (!bound && explicitGate) {
         const byName = findPriorGateByName(prior, explicitGate);
-        if (
-          byName &&
-          typeof byName.oraclePath === 'string' &&
-          byName.oraclePath.replace(/\\/g, '/') ===
-            itemOraclePath.replace(/\\/g, '/')
-        ) {
+        if (byName && isExclusiveOraclePathEvidence(byName, itemOraclePath)) {
           bound = byName;
         }
       }
       if (!bound && !explicitGate) {
-        // Fall back: any prior oracle result that recorded this oraclePath.
-        bound = prior.find(
-          (g) =>
-            g &&
-            typeof g.oraclePath === 'string' &&
-            g.oraclePath.replace(/\\/g, '/') ===
-              itemOraclePath.replace(/\\/g, '/'),
+        // Fall back: any prior result with exclusive executed oraclePath evidence.
+        bound = prior.find((g) =>
+          isExclusiveOraclePathEvidence(g, itemOraclePath),
         );
       }
       bindLabel = `oraclePath=${itemOraclePath}`;
@@ -1097,7 +1249,12 @@ export async function resolveCommandlessOraclePath(oracleRoot, oraclePathRel) {
 }
 
 /**
- * Evaluate an oracle gate: task-declared command as-is, or commandless via oraclePath.
+ * Evaluate an oracle gate: task-declared command as-is, **or** commandless via
+ * oraclePath — never both.
+ *
+ * oraclePath is recorded on the result **only** when that exclusive path was
+ * the command source and was executed under confinement. Unexecuted / mixed
+ * gates never emit oraclePath as execution evidence.
  *
  * @param {object} opts
  * @param {string} opts.workspaceDir
@@ -1107,7 +1264,7 @@ export async function resolveCommandlessOraclePath(oracleRoot, oraclePathRel) {
  * @param {number} [opts.timeoutMs]
  * @param {NodeJS.ProcessEnv} opts.env - minimal env from buildGateEnv (never full process.env)
  * @param {boolean} [opts.networkAllowed]
- * @returns {Promise<GateResult & { oraclePath?: string }>}
+ * @returns {Promise<GateResult & { oraclePath?: string, oracleExecuted?: boolean }>}
  */
 export async function evaluateOracleGate({
   workspaceDir,
@@ -1133,10 +1290,31 @@ export async function evaluateOracleGate({
       ? gate.oraclePath.trim()
       : null;
 
+  // Fail closed: mixed command + oraclePath is never exclusive oracle execution.
+  // Do not run either, and never emit oraclePath as execution evidence.
+  if (declaredCommand != null && oraclePathRel != null) {
+    return {
+      gate: name,
+      order,
+      required,
+      command: null,
+      expectedExitCode,
+      status: 'execution_unavailable',
+      exitCode: null,
+      timedOut: false,
+      evidence:
+        'oracle gate sets both command and oraclePath; refuse mixed execution ' +
+        '(oraclePath is not evidence without exclusive oracle-path execution under confinement)',
+      infraFailure: 'oracle_command_oraclePath_conflict',
+      classificationSignal: 'INFRA_FAIL',
+      check,
+    };
+  }
+
   /** @type {string | null} */
   let effectiveCommand = declaredCommand;
-  /** @type {string | undefined} */
-  let resolvedOraclePath;
+  /** Exclusive oraclePath was the command source (not yet evidence of execution). */
+  let exclusiveOraclePath = false;
   /** @type {string[]} */
   let extraReadRoots = [];
 
@@ -1173,16 +1351,17 @@ export async function evaluateOracleGate({
         infraFailure: 'oracle_root_missing',
         classificationSignal: 'INFRA_FAIL',
         check,
-        oraclePath: oraclePathRel,
+        // Unexecuted: do not emit oraclePath as execution evidence
       };
     }
     try {
-      resolvedOraclePath = await resolveCommandlessOraclePath(
+      const resolvedOraclePath = await resolveCommandlessOraclePath(
         oracleRoot,
         oraclePathRel,
       );
       await access(resolvedOraclePath, constants.R_OK);
       effectiveCommand = buildOracleCommand(resolvedOraclePath);
+      exclusiveOraclePath = true;
       extraReadRoots = [
         path.dirname(resolvedOraclePath),
         path.resolve(oracleRoot),
@@ -1207,7 +1386,7 @@ export async function evaluateOracleGate({
           : 'oracle_unreadable',
         classificationSignal: 'INFRA_FAIL',
         check,
-        oraclePath: oraclePathRel,
+        // Unexecuted: do not emit oraclePath as execution evidence
       };
     }
   }
@@ -1226,7 +1405,7 @@ export async function evaluateOracleGate({
       infraFailure: 'execution_unavailable',
       classificationSignal: 'INFRA_FAIL',
       check,
-      oraclePath: oraclePathRel ?? undefined,
+      // Unexecuted: never set oraclePath as evidence of execution
     };
   }
 
@@ -1245,7 +1424,7 @@ export async function evaluateOracleGate({
       infraFailure: 'oracle_env_required',
       classificationSignal: 'INFRA_FAIL',
       check,
-      oraclePath: oraclePathRel ?? undefined,
+      // Unexecuted: never set oraclePath as evidence of execution
     };
   }
 
@@ -1269,6 +1448,14 @@ export async function evaluateOracleGate({
   const out = digestAndPreview(run.stdout);
   const err = digestAndPreview(run.stderr);
 
+  // oraclePath is execution evidence only for exclusive path-sourced runs that
+  // actually entered confinement (including timeout / run-time infra failure).
+  /** @type {{ oraclePath?: string, oracleExecuted?: boolean }} */
+  const executedOracleEvidence =
+    exclusiveOraclePath && oraclePathRel
+      ? { oraclePath: oraclePathRel, oracleExecuted: true }
+      : {};
+
   if (run.timedOut) {
     return {
       gate: name,
@@ -1285,7 +1472,7 @@ export async function evaluateOracleGate({
       infraFailure: run.infraFailure,
       classificationSignal: 'TIMEOUT',
       check,
-      oraclePath: oraclePathRel ?? undefined,
+      ...executedOracleEvidence,
     };
   }
 
@@ -1305,7 +1492,7 @@ export async function evaluateOracleGate({
       infraFailure: run.infraFailure,
       classificationSignal: 'INFRA_FAIL',
       check,
-      oraclePath: oraclePathRel ?? undefined,
+      ...executedOracleEvidence,
     };
   }
 
@@ -1326,7 +1513,7 @@ export async function evaluateOracleGate({
       : `oracle exit ${run.exitCode} != expected ${expectedExitCode}`,
     classificationSignal: passed ? 'PASS' : 'FAIL',
     check,
-    oraclePath: oraclePathRel ?? undefined,
+    ...executedOracleEvidence,
   };
 }
 

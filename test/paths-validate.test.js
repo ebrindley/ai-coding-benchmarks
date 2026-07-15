@@ -153,7 +153,9 @@ describe('paths + validate', () => {
         });
         assert.equal(results[0].status, 'execution_unavailable');
         assert.equal(results[0].classificationSignal, 'INFRA_FAIL');
-        assert.equal(results[0].oraclePath, gate.oraclePath);
+        // Unexecuted: oraclePath must not appear as execution evidence
+        assert.equal(results[0].oraclePath, undefined);
+        assert.equal(results[0].oracleExecuted, undefined);
       }
     } finally {
       await rm(ws, { recursive: true, force: true });

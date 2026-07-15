@@ -7,9 +7,14 @@
  * Bridge contract: CLI may exit 0 after writing an artifact. The harness MUST
  * parse `poetic.provider.invoke.result.v1` and map `outcome.kind` / `reasonCode`
  * into the invoker result. Non-success outcomes are never treated as success.
+ *
+ * Fresh result binding: before each invoke the harness securely clears
+ * `outputPath` (never following a symlink), then after spawn accepts success
+ * only when the artifact `requestId` exactly equals the current request's
+ * `requestId` (rejects stale/pre-planted success for another request).
  */
 
-import { writeFile, mkdir, readFile } from 'node:fs/promises';
+import { writeFile, mkdir, readFile, lstat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { spawnControlled } from './spawn-controlled.js';
 
@@ -254,10 +259,53 @@ export function parseInvokeResult(artifact) {
 
 /**
  * Read and parse the adapter output artifact at outputPath.
+ * Fail closed on symlink: never follow a symlink to read planted target content
+ * as if it were this run's output.
+ *
  * @param {string} outputPath
  * @returns {Promise<ParsedInvokeResult>}
  */
 async function readAndParseOutput(outputPath) {
+  try {
+    const st = await lstat(outputPath);
+    if (st.isSymbolicLink()) {
+      return {
+        valid: false,
+        success: false,
+        outcomeKind: null,
+        reasonCode: null,
+        timedOut: false,
+        infraFailure: `outputPath is a symlink after invoke (fail closed): ${outputPath}`,
+        parseError: 'output-symlink',
+        artifact: null,
+      };
+    }
+    if (st.isDirectory()) {
+      return {
+        valid: false,
+        success: false,
+        outcomeKind: null,
+        reasonCode: null,
+        timedOut: false,
+        infraFailure: `outputPath is a directory after invoke (fail closed): ${outputPath}`,
+        parseError: 'output-directory',
+        artifact: null,
+      };
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      valid: false,
+      success: false,
+      outcomeKind: null,
+      reasonCode: null,
+      timedOut: false,
+      infraFailure: `failed to lstat invoke result at ${outputPath}: ${message}`,
+      parseError: 'lstat-failed',
+      artifact: null,
+    };
+  }
+
   let text;
   try {
     text = await readFile(outputPath, 'utf8');
@@ -278,10 +326,139 @@ async function readAndParseOutput(outputPath) {
 }
 
 /**
+ * Securely prepare outputPath for a fresh adapter write.
+ *
+ * - If a regular file exists: unlink it (do not leave stale success artifacts).
+ * - If a symlink exists: fail closed (never follow / never write through it).
+ * - If a directory exists: fail closed.
+ * - Recreate parent dir 0700; create empty private file (0600) with O_EXCL.
+ *
+ * @param {string} outputPath
+ * @returns {Promise<{ ok: true } | { ok: false, infraFailure: string }>}
+ */
+export async function prepareFreshOutputPath(outputPath) {
+  const out = path.resolve(String(outputPath));
+  const parent = path.dirname(out);
+
+  try {
+    await mkdir(parent, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      infraFailure: `failed to create output parent dir: ${message}`,
+    };
+  }
+
+  try {
+    const st = await lstat(out);
+    if (st.isSymbolicLink()) {
+      return {
+        ok: false,
+        infraFailure: `outputPath is a symlink (fail closed): ${out}`,
+      };
+    }
+    if (st.isDirectory()) {
+      return {
+        ok: false,
+        infraFailure: `outputPath is a directory (fail closed): ${out}`,
+      };
+    }
+    // Regular file (or other non-dir non-link): remove without following.
+    await unlink(out);
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code !== 'ENOENT') {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        infraFailure: `failed to clear outputPath: ${message}`,
+      };
+    }
+  }
+
+  try {
+    // O_EXCL (flag wx): only this run may create; reject races.
+    await writeFile(out, '', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      infraFailure: `failed to create fresh empty outputPath: ${message}`,
+    };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Extract requestId from a request object or request JSON file.
+ * @param {unknown} request
+ * @param {string} requestPath
+ * @returns {Promise<string | null>}
+ */
+async function resolveExpectedRequestId(request, requestPath) {
+  if (request != null && typeof request === 'object' && !Array.isArray(request)) {
+    const id = /** @type {Record<string, unknown>} */ (request).requestId;
+    if (id != null && String(id).trim() !== '') {
+      return String(id);
+    }
+  }
+  try {
+    const text = await readFile(String(requestPath), 'utf8');
+    const obj = JSON.parse(text);
+    if (
+      obj != null &&
+      typeof obj === 'object' &&
+      !Array.isArray(obj) &&
+      obj.requestId != null &&
+      String(obj.requestId).trim() !== ''
+    ) {
+      return String(obj.requestId);
+    }
+  } catch {
+    /* fall through */
+  }
+  return null;
+}
+
+/**
+ * Bind a parsed invoke result to the expected requestId.
+ * Stale/pre-planted success for a different requestId is never accepted.
+ *
+ * @param {ParsedInvokeResult} parsed
+ * @param {string} expectedRequestId
+ * @returns {ParsedInvokeResult}
+ */
+export function bindInvokeResultToRequestId(parsed, expectedRequestId) {
+  const expected = String(expectedRequestId);
+  const artifact = parsed.artifact;
+  // No artifact to bind — preserve the original parse/read failure (cannot be success).
+  if (artifact == null || typeof artifact !== 'object' || Array.isArray(artifact)) {
+    return parsed;
+  }
+  const rawId = /** @type {Record<string, unknown>} */ (artifact).requestId;
+  const got = rawId != null && String(rawId).trim() !== '' ? String(rawId) : null;
+
+  if (got === expected) {
+    return parsed;
+  }
+
+  return {
+    ...parsed,
+    valid: false,
+    success: false,
+    infraFailure: `adapter result requestId mismatch: expected ${expected}, got ${got ?? '(missing)'}`,
+    parseError: 'requestId-mismatch',
+  };
+}
+
+/**
  * Invoke Poetic via the provider-adapter path.
  *
  * Always parses the result artifact after spawn. Bridge process exit 0 alone
- * is not success — only outcome.kind === 'success' yields success: true.
+ * is not success — only outcome.kind === 'success' with matching requestId
+ * yields success: true.
  *
  * @param {object} opts
  * @param {string} opts.poeticBin - path or name of poetic executable (injectable for tests)
@@ -351,20 +528,36 @@ export async function invokePoeticAdapter({
     });
   }
 
-  // Parent of output is private; pre-create output with 0600 so the path exists
-  // privately even if the child later truncates/overwrites in place.
-  await mkdir(path.dirname(outputPath), { recursive: true, mode: 0o700 }).catch(
-    () => {},
-  );
-  try {
-    await writeFile(String(outputPath), '', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  } catch (err) {
-    // EEXIST: already present (e.g. prior run); leave as-is. Other errors: ignore —
-    // bridge will create/overwrite; run.js also re-chmods after invoke.
-    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
-    if (code !== 'EEXIST') {
-      /* best-effort private pre-create */
-    }
+  // Fresh output binding: securely remove any prior artifact, then create empty.
+  // Never leave a pre-planted success file in place; never follow a symlink.
+  const prep = await prepareFreshOutputPath(String(outputPath));
+  if (!prep.ok) {
+    return {
+      exitCode: null,
+      timedOut: false,
+      stdout: '',
+      stderr: '',
+      outputPath: String(outputPath),
+      success: false,
+      outcomeKind: null,
+      reasonCode: null,
+      infraFailure: prep.infraFailure,
+    };
+  }
+
+  const expectedRequestId = await resolveExpectedRequestId(request, requestPath);
+  if (expectedRequestId == null) {
+    return {
+      exitCode: null,
+      timedOut: false,
+      stdout: '',
+      stderr: '',
+      outputPath: String(outputPath),
+      success: false,
+      outcomeKind: null,
+      reasonCode: null,
+      infraFailure: 'requestId is required for adapter result binding',
+    };
   }
 
   const args = [
@@ -399,7 +592,10 @@ export async function invokePoeticAdapter({
 
   // Spawn-level failure (not found, timeout kill, etc.) — still try to parse
   // any artifact the bridge may have written before dying.
-  const parsed = await readAndParseOutput(String(outputPath));
+  let parsed = await readAndParseOutput(String(outputPath));
+  // Accept only when artifact requestId exactly equals this invoke's requestId.
+  parsed = bindInvokeResultToRequestId(parsed, expectedRequestId);
+
   base.parsedOutput = parsed.artifact ?? null;
   base.outcomeKind = parsed.outcomeKind;
   base.reasonCode = parsed.reasonCode;
@@ -420,9 +616,8 @@ export async function invokePoeticAdapter({
     base.providerFailure = parsed.providerFailure;
   }
 
-  // Success only when spawn did not time out, exit is 0 (or null only if
-  // we still got a valid success artifact — fail closed: require exit 0),
-  // and outcome.kind is success.
+  // Success only when spawn did not time out, exit is 0,
+  // outcome.kind is success, and requestId matches.
   const exitOk = result.exitCode === 0;
   base.success =
     parsed.valid === true &&

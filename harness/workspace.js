@@ -3,6 +3,12 @@
  *
  * Copies the fixture tree without following symlinks that escape the fixture root,
  * initializes a fresh git repository, and never inherits harness-repo instruction files.
+ *
+ * Provider execution workspaces live under a private temporary root
+ * (`os.tmpdir()/aicb-exec/<campaignId>/…`), **not** under the campaign tree.
+ * That is filesystem-tree separation only (ancestor walks cannot reach
+ * campaign raw/manifest/locks/results via `..` from the provider cwd). It is
+ * **not** OS-level read isolation.
  */
 
 import { spawn } from 'node:child_process';
@@ -14,14 +20,17 @@ import {
   lstat,
   readlink,
   realpath,
+  rm,
   symlink,
+  unlink,
   utimes,
   writeFile,
+  chmod,
 } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { digestArtifactDir } from './digest.js';
+import { digestArtifactDir, isSkippedFixtureEntry } from './digest.js';
 import {
   assertInsideRoot,
   isPathInside,
@@ -29,9 +38,19 @@ import {
   resolveWorkspaceRoot,
 } from './paths.js';
 
-const HARNESS_TMP_PREFIX = 'aicb-harness';
+/**
+ * Private temporary prefix for provider execution workspaces (outside campaign).
+ * Campaign tree still holds artifacts, results, raw, manifest, locks.
+ */
+export const EXECUTION_TMP_PREFIX = 'aicb-exec';
 
-/** Instruction / VCS names that must never be inherited from the harness repo into a trial workspace. */
+/**
+ * Instruction / VCS names that must never be inherited from the harness repo
+ * into a trial workspace (root only).
+ * Note: `.git` and `node_modules` are also excluded at any depth via
+ * `isSkippedFixtureEntry` — identical policy to directory digests
+ * (`FIXTURE_SKIP_DIR_NAMES` in digest.js).
+ */
 const BLOCKED_ROOT_NAMES = new Set([
   '.git',
   'AGENTS.md',
@@ -49,6 +68,168 @@ const BLOCKED_ROOT_NAMES = new Set([
 export function sanitizeTrialId(trialId) {
   const raw = String(trialId ?? 'trial').trim() || 'trial';
   return raw.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80);
+}
+
+/**
+ * Resolve the private execution root for a campaign's provider workspaces.
+ * Always under `os.tmpdir()/aicb-exec/<campaignId-safe>/` (or baseTmp override),
+ * never under the campaign directory.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.campaignId]
+ * @param {string} [opts.baseTmp] - override tmp root (tests)
+ * @returns {string} absolute execution root
+ */
+export function resolveExecutionRoot(opts = {}) {
+  const base =
+    opts.baseTmp != null && String(opts.baseTmp).trim() !== ''
+      ? path.resolve(String(opts.baseTmp))
+      : os.tmpdir();
+  const campaignSeg =
+    opts.campaignId != null && String(opts.campaignId).trim() !== ''
+      ? sanitizeTrialId(opts.campaignId)
+      : 'campaign';
+  return path.join(base, EXECUTION_TMP_PREFIX, campaignSeg || 'campaign');
+}
+
+/**
+ * Canonicalize a path for ancestor checks (realpath when possible).
+ * @param {string} p
+ * @returns {Promise<string>}
+ */
+async function realpathOrResolve(p) {
+  const abs = path.resolve(String(p));
+  try {
+    return await realpath(abs);
+  } catch {
+    return abs;
+  }
+}
+
+/**
+ * True when `ancestor` is a strict filesystem ancestor of `descendant`
+ * (or equal). Uses realpath when available.
+ *
+ * @param {string} ancestorAbs
+ * @param {string} descendantAbs
+ * @returns {boolean}
+ */
+export function isStrictPathAncestor(ancestorAbs, descendantAbs) {
+  return isPathInside(path.resolve(ancestorAbs), path.resolve(descendantAbs));
+}
+
+/**
+ * Assert provider workspace is **not** under the campaign tree.
+ * Walks `..` from workspaceDir to filesystem root; campaignDir must never
+ * appear as an ancestor. Fail closed if it does.
+ *
+ * Honesty bound: this proves filesystem-tree separation only — not OS read isolation.
+ *
+ * @param {string} workspaceDir
+ * @param {string} campaignDir
+ * @returns {Promise<{ workspaceDir: string, campaignDir: string }>}
+ */
+export async function assertWorkspaceOutsideCampaign(workspaceDir, campaignDir) {
+  if (workspaceDir == null || String(workspaceDir).trim() === '') {
+    throw new PathEscapeError('assertWorkspaceOutsideCampaign: workspaceDir is required', {
+      code: 'WORKSPACE_REQUIRED',
+    });
+  }
+  if (campaignDir == null || String(campaignDir).trim() === '') {
+    throw new PathEscapeError('assertWorkspaceOutsideCampaign: campaignDir is required', {
+      code: 'CAMPAIGN_REQUIRED',
+    });
+  }
+
+  const ws = await realpathOrResolve(workspaceDir);
+  const camp = await realpathOrResolve(campaignDir);
+
+  if (isPathInside(camp, ws)) {
+    throw new PathEscapeError(
+      `execution workspace must not be under campaign tree: workspace "${ws}" is inside campaign "${camp}"`,
+      { root: camp, candidate: ws, code: 'WORKSPACE_UNDER_CAMPAIGN' },
+    );
+  }
+
+  // Walk ancestors of workspace; campaign path must never appear.
+  let cur = ws;
+  const root = path.parse(cur).root;
+  while (cur !== root) {
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    if (parent === camp || (await realpathOrResolve(parent)) === camp) {
+      throw new PathEscapeError(
+        `campaign is an ancestor of execution workspace (fail closed): campaign="${camp}" workspace="${ws}"`,
+        { root: camp, candidate: ws, code: 'CAMPAIGN_ANCESTOR' },
+      );
+    }
+    cur = parent;
+  }
+
+  return { workspaceDir: ws, campaignDir: camp };
+}
+
+/**
+ * Best-effort remove of an execution workspace created under the private root.
+ * Fail closed: refuses to remove paths outside the allowed execution root.
+ *
+ * @param {string} workspaceDir
+ * @param {object} [opts]
+ * @param {string} [opts.executionRoot] - must contain workspaceDir
+ * @returns {Promise<{ removed: boolean, reason?: string }>}
+ */
+export async function cleanupExecutionWorkspace(workspaceDir, opts = {}) {
+  if (workspaceDir == null || String(workspaceDir).trim() === '') {
+    return { removed: false, reason: 'missing-workspace' };
+  }
+
+  const abs = path.resolve(String(workspaceDir));
+  const allowedRoot =
+    opts.executionRoot != null && String(opts.executionRoot).trim() !== ''
+      ? path.resolve(String(opts.executionRoot))
+      : path.join(os.tmpdir(), EXECUTION_TMP_PREFIX);
+
+  // Never rm the execution root itself — only a trial workspace under it.
+  if (abs === path.resolve(allowedRoot)) {
+    return { removed: false, reason: 'refused-execution-root' };
+  }
+
+  try {
+    await assertInsideRoot(allowedRoot, abs);
+  } catch (err) {
+    return {
+      removed: false,
+      reason: `outside-execution-root: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  try {
+    const st = await lstat(abs);
+    if (st.isSymbolicLink()) {
+      // Unlink the link only — never follow into an unexpected target tree.
+      await unlink(abs);
+      return { removed: true, reason: 'unlinked-symlink' };
+    }
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code === 'ENOENT') {
+      return { removed: false, reason: 'absent' };
+    }
+    return {
+      removed: false,
+      reason: `lstat-failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  try {
+    await rm(abs, { recursive: true, force: true });
+    return { removed: true };
+  } catch (err) {
+    return {
+      removed: false,
+      reason: `rm-failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 /**
@@ -140,7 +321,12 @@ export async function copyFixtureTree(fixtureRoot, destRoot) {
     }
 
     for (const entry of entries) {
-      // Never pull harness instruction / VCS entries even if a fixture accidentally includes them.
+      // Exclusion policy aligned with digest.js: skip .git and node_modules at any depth
+      // (neither copied nor digested). Documented in FIXTURE_SKIP_DIR_NAMES.
+      if (isSkippedFixtureEntry(entry.name)) {
+        continue;
+      }
+      // Never pull harness instruction entries even if a fixture accidentally includes them.
       if (rel === '' && BLOCKED_ROOT_NAMES.has(entry.name)) {
         continue;
       }
@@ -281,16 +467,24 @@ export async function initWorkspaceGit(workspaceDir, opts = {}) {
 /**
  * Create an isolated trial workspace from a fixture directory.
  *
+ * Prefer an external `workspaceRoot` from {@link resolveExecutionRoot} so the
+ * provider cwd is not under the campaign tree. When `campaignDir` is provided,
+ * asserts the created workspace is outside that tree.
+ *
  * @param {object} opts
  * @param {string} opts.fixtureDir - absolute path to fixture root
- * @param {string} [opts.workspaceRoot] - parent directory for trial workspaces
+ * @param {string} [opts.workspaceRoot] - parent directory for trial workspaces (execution root)
+ * @param {string} [opts.campaignId] - used when defaulting workspaceRoot via resolveExecutionRoot
+ * @param {string} [opts.campaignDir] - when set, assert workspace is outside campaign tree
  * @param {string} opts.trialId - unique trial identifier
  * @param {(args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }>} [opts.gitSpawn]
- * @returns {Promise<{ workspaceDir: string, fixtureHash: string, branch: string }>}
+ * @returns {Promise<{ workspaceDir: string, fixtureHash: string, branch: string, executionRoot: string }>}
  */
 export async function createIsolatedWorkspace({
   fixtureDir,
   workspaceRoot,
+  campaignId,
+  campaignDir,
   trialId,
   gitSpawn,
 }) {
@@ -307,30 +501,47 @@ export async function createIsolatedWorkspace({
     throw new Error(`createIsolatedWorkspace: fixtureDir is not a directory: ${fixtureAbs}`);
   }
 
+  // Default parent is under aicb-exec (private tmp), not the campaign tree.
+  // Callers (runCampaign) should pass resolveExecutionRoot(...) explicitly.
   const parent =
     workspaceRoot != null && String(workspaceRoot).trim() !== ''
       ? resolveWorkspaceRoot(workspaceRoot)
-      : path.join(os.tmpdir(), HARNESS_TMP_PREFIX);
+      : resolveExecutionRoot({ campaignId: campaignId ?? trialId });
 
-  await mkdir(parent, { recursive: true });
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  try {
+    await chmod(parent, 0o700);
+  } catch {
+    /* best-effort private mode */
+  }
 
   const unique = `${sanitizeTrialId(trialId)}-${randomBytes(8).toString('hex')}`;
   const workspaceDir = path.join(parent, unique);
   await assertInsideRoot(parent, workspaceDir);
-  await mkdir(workspaceDir, { recursive: true });
+  await mkdir(workspaceDir, { recursive: true, mode: 0o700 });
 
-  const fixtureHash = await digestArtifactDir(fixtureAbs);
+  if (campaignDir != null && String(campaignDir).trim() !== '') {
+    await assertWorkspaceOutsideCampaign(workspaceDir, campaignDir);
+  }
 
+  // Copy first, then digest the exact effective tree used in execution
+  // (post-copy content: same exclusions as digests, before marker/git).
   await copyFixtureTree(fixtureAbs, workspaceDir);
+  const fixtureHash = await digestArtifactDir(workspaceDir);
 
   const branch = trialBranchName(trialId);
   await writeFile(
     path.join(workspaceDir, '.aicb-workspace'),
-    `trialId=${String(trialId)}\nfixtureHash=${fixtureHash}\nbranch=${branch}\n`,
+    `trialId=${String(trialId)}\nfixtureHash=${fixtureHash}\nbranch=${branch}\nexecutionRoot=${parent}\n`,
     'utf8',
   );
 
   const git = await initWorkspaceGit(workspaceDir, { trialId, gitSpawn });
 
-  return { workspaceDir, fixtureHash, branch: git.branch };
+  return {
+    workspaceDir,
+    fixtureHash,
+    branch: git.branch,
+    executionRoot: parent,
+  };
 }

@@ -8,7 +8,9 @@
  * - EXPORT_README.txt
  *
  * Never exports: raw/, prompt-bearing request/output (even nested),
- * workspaces, locks, tmp files, local usernames, absolute paths.
+ * workspaces, locks, tmp files, local usernames, absolute paths,
+ * free-form reason strings (quarantine only). Adapter reasonCode /
+ * outcome fields are constrained to bounded identifier syntax.
  */
 
 import {
@@ -19,6 +21,11 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+
+import {
+  isBoundedIdentifier,
+  sanitizeBoundedIdentifier,
+} from './gates.js';
 
 /** Top-level result keys allowed in sanitized export (whitelist). */
 const RESULT_WHITELIST_KEYS = new Set([
@@ -37,7 +44,10 @@ const RESULT_WHITELIST_KEYS = new Set([
   'postureFingerprint',
   'state',
   'classification',
+  // classificationReason is free-form — only exported when bounded identifier
   'classificationReason',
+  'reasonCode',
+  'outcomeKind',
   'hashes',
   'digests',
   'gateResults',
@@ -48,6 +58,19 @@ const RESULT_WHITELIST_KEYS = new Set([
   'error',
   'schemaVersion',
   'writtenAt',
+]);
+
+/**
+ * Keys whose values must match bounded identifier syntax when exported.
+ * Free-form text is dropped (belongs in quarantine raw, not sanitized export).
+ */
+const BOUNDED_IDENTIFIER_KEYS = new Set([
+  'reasonCode',
+  'outcomeKind',
+  'classificationReason',
+  'classification',
+  'infraFailure',
+  'providerFailure',
 ]);
 
 /** Nested keys that must never appear even inside whitelisted objects. */
@@ -70,6 +93,12 @@ const PROMPT_BEARING_KEYS = new Set([
   'artifactDir',
   'cwd',
   'stdin',
+  // Free-form narrative reasons never belong in sanitized export trees
+  'reason',
+  'message',
+  'detail',
+  'details',
+  'errorMessage',
 ]);
 
 /**
@@ -124,9 +153,34 @@ export function stripPromptBearing(value) {
     if (PROMPT_BEARING_KEYS.has(k)) continue;
     // Nested request.json-like payloads
     if (k === 'receivedRequest' || k === 'raw') continue;
+    // Bounded-identifier fields: drop free-form values
+    if (BOUNDED_IDENTIFIER_KEYS.has(k)) {
+      const bounded = sanitizeBoundedIdentifier(v);
+      if (bounded == null) continue;
+      out[k] = bounded;
+      continue;
+    }
     out[k] = stripPromptBearing(v);
   }
   return out;
+}
+
+/**
+ * Constrain a top-level or nested adapter/outcome field to bounded identifier
+ * syntax. Free-form text is excluded from sanitized export (quarantine only).
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function sanitizeExportReasonCode(value) {
+  return sanitizeBoundedIdentifier(value);
+}
+
+/**
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function isExportSafeReasonCode(value) {
+  return isBoundedIdentifier(value);
 }
 
 /**
@@ -140,11 +194,24 @@ function sanitizeResult(result, campaignDir) {
   /** @type {Record<string, unknown>} */
   const out = {};
   for (const key of RESULT_WHITELIST_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(result, key)) {
-      out[key] = result[key];
+    if (!Object.prototype.hasOwnProperty.call(result, key)) continue;
+    const value = result[key];
+    // Free-form / adapter reason fields: only bounded identifiers leave export
+    if (BOUNDED_IDENTIFIER_KEYS.has(key)) {
+      const bounded = sanitizeBoundedIdentifier(value);
+      if (bounded != null) out[key] = bounded;
+      continue;
     }
+    // error may contain free-form infra messages — drop free-form strings
+    if (key === 'error') {
+      const bounded = sanitizeBoundedIdentifier(value);
+      if (bounded != null) out[key] = bounded;
+      continue;
+    }
+    out[key] = value;
   }
   // gateResults: keep classification/status digests only — never previews
+  // or free-form evidence narratives (evidence may embed host paths/secrets).
   if (Array.isArray(out.gateResults)) {
     out.gateResults = out.gateResults.map((g) => {
       if (!g || typeof g !== 'object') return g;
@@ -156,13 +223,13 @@ function sanitizeResult(result, campaignDir) {
         exitCode,
         timedOut,
         classificationSignal,
-        evidence,
         stdoutDigest,
         stderrDigest,
         expectedExitCode,
         check,
         infraFailure,
         oraclePath,
+        oracleExecuted,
       } = g;
       /** @type {Record<string, unknown>} */
       const clean = {
@@ -173,15 +240,22 @@ function sanitizeResult(result, campaignDir) {
         exitCode,
         timedOut,
         classificationSignal,
-        evidence,
         stdoutDigest,
         stderrDigest,
         expectedExitCode,
         check,
       };
-      if (infraFailure != null) clean.infraFailure = infraFailure;
-      if (oraclePath != null) clean.oraclePath = oraclePath;
-      // Explicitly drop previews even if present on the source object
+      // infraFailure codes are harness-controlled identifiers; keep if bounded
+      if (infraFailure != null) {
+        const bounded = sanitizeBoundedIdentifier(infraFailure);
+        if (bounded != null) clean.infraFailure = bounded;
+      }
+      // oraclePath only when exclusive execution was recorded
+      if (oraclePath != null && oracleExecuted === true) {
+        clean.oraclePath = oraclePath;
+        clean.oracleExecuted = true;
+      }
+      // Explicitly drop previews / free-form evidence even if present
       return stripPromptBearing(clean);
     });
   }
@@ -200,6 +274,8 @@ export async function exportSanitizedBundle({
   campaignDir,
   outDir,
   includeRaw = false,
+  /** @type {boolean} [skipEvidenceVerify=false] */
+  skipEvidenceVerify = false,
 }) {
   if (!campaignDir) {
     throw new Error('exportSanitizedBundle: campaignDir is required');
@@ -213,6 +289,30 @@ export async function exportSanitizedBundle({
   /** @type {string[]} */
   const warnings = [];
   let filesCopied = 0;
+
+  // Before export: verify stored digests match on-disk raw/artifact bytes (fail closed).
+  if (!skipEvidenceVerify) {
+    const { verifyCampaignEvidenceDigests } = await import('./results.js');
+    /** @type {object[]} */
+    let trials = [];
+    try {
+      const manifest = JSON.parse(
+        await readFile(path.join(srcRoot, 'manifest.json'), 'utf8'),
+      );
+      trials = Array.isArray(manifest.trials) ? manifest.trials : [];
+    } catch {
+      trials = [];
+    }
+    if (trials.length > 0) {
+      const check = await verifyCampaignEvidenceDigests(srcRoot, trials);
+      if (!check.ok) {
+        throw new Error(
+          check.error ||
+            'exportSanitizedBundle: evidence digest verification failed (fail closed)',
+        );
+      }
+    }
+  }
 
   await mkdir(destRoot, { recursive: true });
 

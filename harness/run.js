@@ -10,7 +10,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { preflight } from './preflight.js';
 import { SCHEMA_VERSION } from './contracts.js';
-import { sha256Json, sha256Buffer } from './digest.js';
+import { sha256Json, sha256Buffer, digestArtifactDir } from './digest.js';
 import { computePostureFingerprint } from './posture.js';
 import {
   parseResolvedModelEvidence,
@@ -46,11 +46,24 @@ async function loadPeers() {
       computeCampaignInputDigests,
       compareInputDigests,
     },
-    { createIsolatedWorkspace },
+    {
+      createIsolatedWorkspace,
+      resolveExecutionRoot,
+      cleanupExecutionWorkspace,
+      assertWorkspaceOutsideCampaign,
+    },
     { getInvoker, buildInvocationRequest },
     { runGates, detectConfinement, sanitizeGateResultsForStorage },
     { classifyTrial },
-    { writeTrialResult, quarantineRawOutput, ensurePrivateDir, writePrivateFile },
+    {
+      writeTrialResult,
+      quarantineRawOutput,
+      ensurePrivateDir,
+      writePrivateFile,
+      buildTrialDigests,
+      computeArtifactDigest,
+      verifyCampaignEvidenceDigests,
+    },
     { buildReport, formatHumanSummary },
     {
       assertSafeTrialId,
@@ -89,6 +102,9 @@ async function loadPeers() {
     computeCampaignInputDigests,
     compareInputDigests,
     createIsolatedWorkspace,
+    resolveExecutionRoot,
+    cleanupExecutionWorkspace,
+    assertWorkspaceOutsideCampaign,
     getInvoker,
     buildInvocationRequest,
     runGates,
@@ -99,6 +115,9 @@ async function loadPeers() {
     quarantineRawOutput,
     ensurePrivateDir,
     writePrivateFile,
+    buildTrialDigests,
+    computeArtifactDigest,
+    verifyCampaignEvidenceDigests,
     buildReport,
     formatHumanSummary,
     assertSafeTrialId,
@@ -280,10 +299,10 @@ export async function runCampaign(opts) {
   }
 
   // Campaign tree is private (0700) — secrets may land under raw/artifacts/results.
+  // Provider execution workspaces live outside the campaign tree (see executionRoot).
   await peers.ensurePrivateDir(campaignDir);
   await peers.ensurePrivateDir(path.join(campaignDir, 'raw'));
   await peers.ensurePrivateDir(path.join(campaignDir, 'results'));
-  await peers.ensurePrivateDir(path.join(campaignDir, 'workspaces'));
   await peers.ensurePrivateDir(path.join(campaignDir, 'artifacts'));
 
   const ownerId = `aicb-${process.pid}-${Date.now()}`;
@@ -403,7 +422,18 @@ export async function runCampaign(opts) {
       harnessRoot,
     });
 
-    const workspaceRoot = path.join(campaignDir, 'workspaces');
+    // Execution workspaces are outside the campaign tree so provider cwd
+    // ancestor walks cannot reach raw/manifest/locks/results.
+    // (Filesystem-tree separation only — not OS read isolation.)
+    const safeCampaignIdForExec = peers.assertSafeCampaignId(
+      manifest?.campaignId || experiment.id,
+    );
+    const executionRoot = peers.resolveExecutionRoot({
+      campaignId: safeCampaignIdForExec,
+    });
+    await peers.ensurePrivateDir(executionRoot);
+    // workspaceRoot on the manifest records the external execution root.
+    const workspaceRoot = executionRoot;
     const artifactRoot = path.join(campaignDir, 'artifacts');
 
     if (!manifest) {
@@ -519,6 +549,8 @@ export async function runCampaign(opts) {
 
       /** @type {Record<string, unknown>} */
       let trialUpdate = {};
+      /** @type {string | null} */
+      let trialWorkspaceDir = null;
       try {
         // Prefer already-validated/canonical fixture dir from corpus loading.
         // Fall back only when absent, still contained under suite fixtures/.
@@ -536,20 +568,32 @@ export async function runCampaign(opts) {
           );
         }
 
+        // Always create under the external execution root (never campaign/workspaces).
+        // On resume, re-create outside campaign even if an older manifest recorded
+        // a campaign-relative workspaceRoot.
         const workspace = fixtureDir
           ? await peers.createIsolatedWorkspace({
               fixtureDir,
-              workspaceRoot,
+              workspaceRoot: executionRoot,
+              campaignId: safeCampaignIdForExec,
+              campaignDir,
               trialId: trial.id,
             })
           : {
-              workspaceDir: await peers.trialPathUnder(workspaceRoot, trial.id),
+              workspaceDir: await peers.trialPathUnder(executionRoot, trial.id),
               fixtureHash: null,
+              executionRoot,
             };
 
         if (!fixtureDir) {
-          await mkdir(workspace.workspaceDir, { recursive: true });
+          await mkdir(workspace.workspaceDir, { recursive: true, mode: 0o700 });
+          await peers.assertWorkspaceOutsideCampaign(
+            workspace.workspaceDir,
+            campaignDir,
+          );
         }
+
+        trialWorkspaceDir = workspace.workspaceDir;
 
         const invoker = peers.getInvoker(arm.invocationPath);
         const timeoutMs = experiment.timeoutMs;
@@ -566,6 +610,7 @@ export async function runCampaign(opts) {
         const outputPath = path.join(artifactDir, 'output.json');
 
         // Prompt-bearing request written privately (0600) even under permissive umask.
+        // Adapter invoker re-preps outputPath (unlink + fresh bind by requestId).
         await peers.writePrivateFile(
           requestPath,
           `${JSON.stringify(request, null, 2)}\n`,
@@ -576,6 +621,7 @@ export async function runCampaign(opts) {
           requestPath,
           outputPath,
           // request already written privately; still pass for invokers that re-write
+          // and for requestId result binding
           request,
           cwd: workspace.workspaceDir,
           timeoutMs,
@@ -599,11 +645,15 @@ export async function runCampaign(opts) {
           /* output may be absent on infra failure */
         }
 
-        await peers.quarantineRawOutput(campaignDir, trial.id, {
-          stdout: invokerResult.stdout,
-          stderr: invokerResult.stderr,
-          outputPath: invokerResult.outputPath || outputPath,
-        });
+        const rawQuarantine = await peers.quarantineRawOutput(
+          campaignDir,
+          trial.id,
+          {
+            stdout: invokerResult.stdout,
+            stderr: invokerResult.stderr,
+            outputPath: invokerResult.outputPath || outputPath,
+          },
+        );
 
         const modelEv = await resolveModelEvidence(
           arm.invocationPath,
@@ -688,23 +738,33 @@ export async function runCampaign(opts) {
           finishedAt,
           durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
           workspaceDir: workspace.workspaceDir,
+          executionRoot,
           artifactDir,
         };
+
+        // Exact on-disk raw bytes + artifact tree digests (not lengths alone).
+        const artifactDigest =
+          typeof peers.computeArtifactDigest === 'function'
+            ? await peers.computeArtifactDigest(artifactDir)
+            : await digestArtifactDir(artifactDir);
+        const digests = peers.buildTrialDigests({
+          resultDigest: sha256Json({
+            classification: classified.classification,
+            gateResults: safeGateResults,
+            exitCode: invokerResult.exitCode,
+          }),
+          artifactDigest,
+          fixtureDigest: workspace.fixtureHash,
+          rawOutputDigest: rawQuarantine.digests?.rawOutputDigest,
+          rawStdoutSha256: rawQuarantine.digests?.rawStdoutSha256,
+          rawStderrSha256: rawQuarantine.digests?.rawStderrSha256,
+          rawOutputFileSha256: rawQuarantine.digests?.rawOutputFileSha256,
+        });
 
         await peers.writeTrialResult(campaignDir, trial.id, {
           ...trial,
           ...trialUpdate,
-          digests: {
-            resultDigest: sha256Json({
-              classification: classified.classification,
-              gateResults: safeGateResults,
-              exitCode: invokerResult.exitCode,
-            }),
-            rawOutputDigest: sha256Json({
-              stdoutLen: (invokerResult.stdout || '').length,
-              stderrLen: (invokerResult.stderr || '').length,
-            }),
-          },
+          digests,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -717,6 +777,9 @@ export async function runCampaign(opts) {
           resolvedModelAvailable: false,
           finishedAt: new Date().toISOString(),
           startedAt,
+          ...(trialWorkspaceDir
+            ? { workspaceDir: trialWorkspaceDir, executionRoot }
+            : { executionRoot }),
         };
         try {
           await peers.writeTrialResult(campaignDir, trial.id, {
@@ -725,6 +788,15 @@ export async function runCampaign(opts) {
           });
         } catch {
           /* best effort */
+        }
+      } finally {
+        // Remove external execution workspace after trial when possible.
+        if (trialWorkspaceDir) {
+          await peers
+            .cleanupExecutionWorkspace(trialWorkspaceDir, {
+              executionRoot,
+            })
+            .catch(() => {});
         }
       }
 
@@ -745,6 +817,27 @@ export async function runCampaign(opts) {
           trialResults.push(t);
         }
       }
+    }
+
+    // Before report/summary: verify stored digests match on-disk raw/artifact bytes.
+    // Fail closed on mismatch (tamper or partial write).
+    const evidenceCheck = await peers.verifyCampaignEvidenceDigests(
+      campaignDir,
+      manifest.trials,
+      trialResults,
+    );
+    if (!evidenceCheck.ok) {
+      return {
+        ok: false,
+        stage: 'evidence',
+        campaignDir,
+        manifest,
+        executed,
+        remaining: manifest.trials.filter((t) => t.state === 'pending').length,
+        errors: [evidenceCheck.error || 'evidence digest verification failed'],
+        failures: evidenceCheck.failures,
+        schemaVersion: SCHEMA_VERSION,
+      };
     }
 
     const report = peers.buildReport(manifest, trialResults);

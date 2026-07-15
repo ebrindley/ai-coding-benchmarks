@@ -5,14 +5,40 @@
  *
  * Directory walks never follow symlinks for content: symlink entries are
  * recorded by link-text metadata only so external targets are never read.
+ *
+ * Exclusion policy (identical for fixture digests and fixture copy):
+ * - `.git` and `node_modules` are skipped at any depth (neither copied nor digested).
+ * See FIXTURE_SKIP_DIR_NAMES / isSkippedFixtureEntry.
  */
 
 import { createHash } from 'node:crypto';
 import { readdir, readFile, lstat, readlink } from 'node:fs/promises';
 import path from 'node:path';
 
-/** Directory basenames skipped while walking trees for digests. */
-const SKIP_DIR_NAMES = new Set(['.git', 'node_modules']);
+/**
+ * Directory basenames excluded from both fixture copy and directory digests.
+ * Policy is identical in workspace.copyFixtureTree and collectDirEntries:
+ * neither copy nor digest includes these trees.
+ */
+export const FIXTURE_SKIP_DIR_NAMES = new Set(['.git', 'node_modules']);
+
+/**
+ * True when a basename is excluded from fixture copy and digests.
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function isSkippedFixtureEntry(name) {
+  return FIXTURE_SKIP_DIR_NAMES.has(String(name));
+}
+
+/**
+ * Portable permission bits (owner/group/other rwx).
+ * @param {number} mode
+ * @returns {number}
+ */
+export function portableModeBits(mode) {
+  return Number(mode) & 0o777;
+}
 
 /**
  * Recursively canonicalize a value for stable JSON serialization.
@@ -86,23 +112,26 @@ function toPosixRel(rel) {
 }
 
 /**
+ * @typedef {{ type: 'file', path: string, sha256: string, size: number, mode: number }} FileEntry
+ * @typedef {{ type: 'dir', path: string, mode: number }} DirEntry
+ * @typedef {{ type: 'symlink', path: string, target: string, mode: number }} SymlinkEntry
+ * @typedef {FileEntry | DirEntry | SymlinkEntry} DirDigestEntry
+ */
+
+/**
  * Walk a directory and collect digest entries without following symlinks.
- * Symlink entries record only `{ type, path, target }` (link text).
- * Regular files record content hash + size. Directories are walked in
- * locale-sorted name order. `.git` and `node_modules` are skipped.
+ * Symlink entries record only `{ type, path, target, mode }` (link text).
+ * Regular files record content hash + size + portable mode bits.
+ * Directories (including empty ones) record path + portable mode bits.
+ * Walk order is locale-sorted by name. `.git` and `node_modules` are skipped
+ * at any depth — same policy as fixture copy (FIXTURE_SKIP_DIR_NAMES).
  *
  * @param {string} dir absolute or relative root to walk
  * @param {string} [relBase=''] relative path prefix for entries
- * @returns {Promise<Array<
- *   | { type: 'file', path: string, sha256: string, size: number }
- *   | { type: 'symlink', path: string, target: string }
- * >>}
+ * @returns {Promise<DirDigestEntry[]>}
  */
 export async function collectDirEntries(dir, relBase = '') {
-  /** @type {Array<
-   *   | { type: 'file', path: string, sha256: string, size: number }
-   *   | { type: 'symlink', path: string, target: string }
-   * >} */
+  /** @type {DirDigestEntry[]} */
   const entries = [];
 
   /**
@@ -122,7 +151,7 @@ export async function collectDirEntries(dir, relBase = '') {
     }
     dirents.sort((a, b) => a.name.localeCompare(b.name));
     for (const dirent of dirents) {
-      if (SKIP_DIR_NAMES.has(dirent.name)) {
+      if (isSkippedFixtureEntry(dirent.name)) {
         continue;
       }
       const abs = path.join(current, dirent.name);
@@ -137,6 +166,8 @@ export async function collectDirEntries(dir, relBase = '') {
         continue;
       }
 
+      const mode = portableModeBits(st.mode);
+
       if (st.isSymbolicLink()) {
         let target;
         try {
@@ -145,11 +176,18 @@ export async function collectDirEntries(dir, relBase = '') {
           // Unreadable symlink: fail closed with a stable sentinel target.
           target = '';
         }
-        entries.push({ type: 'symlink', path: posixRel, target: String(target) });
+        entries.push({
+          type: 'symlink',
+          path: posixRel,
+          target: String(target),
+          mode,
+        });
         continue;
       }
 
       if (st.isDirectory()) {
+        // Record every directory (including empty) so structure binds the digest.
+        entries.push({ type: 'dir', path: posixRel, mode });
         await walk(abs, childRel);
         continue;
       }
@@ -161,6 +199,7 @@ export async function collectDirEntries(dir, relBase = '') {
           path: posixRel,
           sha256: sha256Buffer(buf),
           size: st.size,
+          mode,
         });
       }
       // Skip sockets, devices, FIFOs — not meaningful digest content.
@@ -173,8 +212,12 @@ export async function collectDirEntries(dir, relBase = '') {
 
 /**
  * Digest a directory of trial/result/fixture artifacts.
- * Walks files in stable relative-path order and hashes path+content pairs.
- * Never follows symlinks: symlink entries contribute only link-text metadata.
+ * Walks files/dirs/symlinks in stable relative-path order and hashes
+ * path+content+mode tuples. Never follows symlinks: symlink entries
+ * contribute only link-text metadata.
+ *
+ * Includes empty directories and portable mode bits (schema artifact-dir-v3).
+ * Excludes `.git` and `node_modules` (aligned with fixture copy).
  *
  * @param {string} dir
  * @returns {Promise<string>} sha256 hex
@@ -183,7 +226,28 @@ export async function digestArtifactDir(dir) {
   const files = await collectDirEntries(dir, '');
   // Stable order is already walk-order (sorted names); sort by path as belt+suspenders.
   files.sort((a, b) => a.path.localeCompare(b.path));
-  return sha256Json({ files, schema: 'artifact-dir-v2' });
+  return sha256Json({ files, schema: 'artifact-dir-v3' });
+}
+
+/**
+ * Digest of raw provider output bytes (stdout/stderr/output file).
+ * Hashes exact bytes, not lengths.
+ *
+ * @param {{ stdout?: Buffer | Uint8Array | string | null, stderr?: Buffer | Uint8Array | string | null, output?: Buffer | Uint8Array | string | null }} parts
+ * @returns {string} sha256 hex of canonical digest envelope
+ */
+export function digestRawOutputBytes(parts = {}) {
+  /** @type {Record<string, string | null>} */
+  const body = {
+    schema: 'raw-output-bytes-v1',
+    stdoutSha256:
+      parts.stdout != null ? sha256Buffer(parts.stdout) : null,
+    stderrSha256:
+      parts.stderr != null ? sha256Buffer(parts.stderr) : null,
+    outputSha256:
+      parts.output != null ? sha256Buffer(parts.output) : null,
+  };
+  return sha256Json(body);
 }
 
 /**
@@ -205,10 +269,7 @@ export async function digestHarnessContent(root) {
   }
 
   const resolved = path.resolve(root);
-  /** @type {Array<
-   *   | { type: 'file', path: string, sha256: string, size: number }
-   *   | { type: 'symlink', path: string, target: string }
-   * >} */
+  /** @type {DirDigestEntry[]} */
   const entries = [];
 
   // Scoped includes only — never whole-repo walk.
@@ -236,7 +297,12 @@ export async function digestHarnessContent(root) {
       } catch {
         target = '';
       }
-      entries.push({ type: 'symlink', path: name, target: String(target) });
+      entries.push({
+        type: 'symlink',
+        path: name,
+        target: String(target),
+        mode: portableModeBits(st.mode),
+      });
       continue;
     }
     if (st.isFile()) {
@@ -246,6 +312,7 @@ export async function digestHarnessContent(root) {
         path: name,
         sha256: sha256Buffer(buf),
         size: st.size,
+        mode: portableModeBits(st.mode),
       });
     }
   }

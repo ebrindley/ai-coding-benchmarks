@@ -180,6 +180,8 @@ export {
   invokePoeticAdapter,
   parseInvokeResult,
   mapOutcomeKind,
+  prepareFreshOutputPath,
+  bindInvokeResultToRequestId,
   POETIC_INVOKE_RESULT_SCHEMA,
   POETIC_OUTCOME_KINDS,
 } from './poetic-adapter.js';

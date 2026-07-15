@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://ai-coding-benchmarks.local/schemas/trial.schema.json",
   "title": "Trial",
-  "description": "Single trial execution record within a campaign.",
+  "description": "Single trial execution record within a campaign. Written by writeTrialResult to results/<trialId>/result.json. Always includes schemaVersion and writtenAt. resolvedModel is never invented from requestedModel; when unavailable, resolvedModel is null and resolvedModelAvailable is false.",
   "type": "object",
   "required": [
     "id",
@@ -13,7 +13,9 @@
     "scheduleSeed",
     "invocationPath",
     "requestedModel",
-    "state"
+    "state",
+    "schemaVersion",
+    "writtenAt"
   ],
   "additionalProperties": false,
   "properties": {
@@ -49,12 +51,21 @@
       "enum": ["poetic-adapter", "native-cli", "poetic-system"]
     },
     "requestedModel": {
-      "type": "string",
-      "minLength": 1
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Model id requested on the arm; null only when arm had no model (writeTrialResult default)"
     },
     "resolvedModel": {
       "type": ["string", "null"],
-      "description": "Model id actually used after resolution, if known"
+      "description": "Model id actually used after resolution, if known; never invented from requestedModel"
+    },
+    "resolvedModelAvailable": {
+      "type": "boolean",
+      "description": "True only when resolvedModel was obtained from invoker/adapter evidence"
+    },
+    "resolvedModelSource": {
+      "type": "string",
+      "description": "Evidence source for resolvedModel (e.g. model.resolved.value, invoker-explicit, unavailable, absent)"
     },
     "postureFingerprint": {
       "type": ["string", "null"],
@@ -84,17 +95,23 @@
     "digests": {
       "type": "object",
       "additionalProperties": false,
+      "description": "Evidence binding digests: exact raw stdout/stderr/output bytes, artifact tree, fixture tree, and result envelope",
       "properties": {
-        "resultDigest": { "type": "string" },
-        "artifactDigest": { "type": "string" },
-        "rawOutputDigest": { "type": "string" }
+        "resultDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "artifactDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "fixtureDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "rawOutputDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "rawStdoutSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "rawStderrSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "rawOutputFileSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
       }
     },
     "gateResults": {
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": true
+        "additionalProperties": true,
+        "description": "Gate evidence after stripGatePreviews (no stdout/stderr previews)"
       }
     },
     "changedFileCount": {
@@ -121,6 +138,16 @@
     },
     "artifactDir": {
       "type": ["string", "null"]
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Always stamped by writeTrialResult from SCHEMA_VERSION"
+    },
+    "writtenAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Always stamped by writeTrialResult at write time"
     }
   }
 }
