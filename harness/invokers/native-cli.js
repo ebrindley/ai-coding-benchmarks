@@ -81,6 +81,9 @@ function assertHarnessEnv(env, opts = {}) {
  * @param {string} [opts.promptFile] - legacy: if set and no prompt/stdin, file → stdin
  * @param {string | Buffer} [opts.stdin]
  * @param {unknown} [opts.taskEnv] - REJECTED if present (smuggling guard)
+ * @param {string} opts.campaignDir - campaign control tree hidden via OS confinement
+ * @param {string} [opts.scratchDir] - preferred temp dir under execution workspace for prompt-file
+ * @param {import('./provider-confine.js').ProviderConfinementInfo} [opts.confinement]
  * @returns {Promise<InvokerResult>}
  */
 export async function invokeNativeCli({
@@ -94,9 +97,12 @@ export async function invokeNativeCli({
   promptFile,
   stdin,
   taskEnv,
+  campaignDir,
+  scratchDir,
+  confinement,
   ...rest
 }) {
-  // Refuse credential/env smuggling from task YAML
+  // Refuse credential/env smuggling from task YAML (before confinement setup)
   if (taskEnv !== undefined) {
     return {
       exitCode: null,
@@ -113,6 +119,16 @@ export async function invokeNativeCli({
       stdout: '',
       stderr: '',
       infraFailure: 'refusing task object: pass only harness-controlled command/args/env',
+    };
+  }
+  if (campaignDir == null || String(campaignDir).trim() === '') {
+    return {
+      exitCode: null,
+      timedOut: false,
+      stdout: '',
+      stderr: '',
+      infraFailure:
+        'campaignDir is required for provider confinement (fail closed; unconfined refused)',
     };
   }
 
@@ -194,7 +210,14 @@ export async function invokeNativeCli({
       };
     }
     try {
-      promptTempDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-prompt-'));
+      // Prompt scratch under execution workspace when provided (never campaign).
+      const base =
+        scratchDir != null && String(scratchDir).trim() !== ''
+          ? String(scratchDir)
+          : cwd != null && String(cwd).trim() !== ''
+            ? String(cwd)
+            : os.tmpdir();
+      promptTempDir = await mkdtemp(path.join(base, 'aicb-prompt-'));
       writtenPromptPath = path.join(promptTempDir, 'prompt.txt');
       await writeFile(writtenPromptPath, String(prompt), {
         encoding: 'utf8',
@@ -249,6 +272,13 @@ export async function invokeNativeCli({
       env,
       timeoutMs,
       stdin: stdinData,
+      campaignDir: String(campaignDir),
+      confine: true,
+      confinement,
+      extraBindPaths: [
+        ...(scratchDir ? [String(scratchDir)] : []),
+        ...(promptTempDir ? [promptTempDir] : []),
+      ],
     });
 
     return {
@@ -259,6 +289,9 @@ export async function invokeNativeCli({
       promptTransport: transport,
       // Do not return the now-stale absolute prompt path after cleanup.
       ...(promptTempDir ? { promptFileUsed: true } : {}),
+      ...(result.executionUnavailable
+        ? { executionUnavailable: true }
+        : {}),
       ...(result.infraFailure ? { infraFailure: result.infraFailure } : {}),
       ...(result.signal ? { signal: result.signal } : {}),
     };

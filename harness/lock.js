@@ -8,6 +8,11 @@
  * Stale-lock recovery is serialized by a separate atomic recovery guard
  * (`campaign.lock.recover` with `wx`) so two reclaimers cannot delete a
  * newly acquired live lock (compare-then-unlink race).
+ *
+ * Recovery guards themselves carry PID/host/time identity. A dead same-host
+ * guard holder (crashed reclaimer) can be reclaimed safely after age so a
+ * reclaimer crash does not wedge resume forever. Live/ambiguous guards are
+ * never stolen.
  */
 
 import { readFile, unlink, writeFile } from 'node:fs/promises';
@@ -22,6 +27,12 @@ export const LOCK_RECOVER_FILENAME = 'campaign.lock.recover';
  * metadata. Conservative default: 30 seconds.
  */
 export const DEAD_LOCK_MIN_AGE_MS = 30_000;
+
+/**
+ * Minimum age before a dead-pid recovery guard may be reclaimed.
+ * Same conservative default as dead locks.
+ */
+export const DEAD_GUARD_MIN_AGE_MS = DEAD_LOCK_MIN_AGE_MS;
 
 /**
  * @param {string} campaignDir
@@ -83,14 +94,14 @@ export function ownerMatchesPid(owner, pid) {
 }
 
 /**
- * Parse lock age from acquiredAt ISO timestamp.
- * @param {unknown} acquiredAt
+ * Parse age from an ISO timestamp field.
+ * @param {unknown} iso
  * @param {number} [nowMs]
  * @returns {number | null} age in ms, or null if unparseable
  */
-export function lockAgeMs(acquiredAt, nowMs = Date.now()) {
-  if (acquiredAt == null || acquiredAt === '') return null;
-  const t = Date.parse(String(acquiredAt));
+export function lockAgeMs(iso, nowMs = Date.now()) {
+  if (iso == null || iso === '') return null;
+  const t = Date.parse(String(iso));
   if (!Number.isFinite(t)) return null;
   return Math.max(0, nowMs - t);
 }
@@ -166,6 +177,72 @@ export function canRecoverDeadLock(lock, opts = {}) {
 }
 
 /**
+ * Decide whether a recovery guard is safely reclaimable (dead holder).
+ * Requires validated PID + host + time identity. Never steals live/ambiguous.
+ *
+ * @param {object | null | undefined} guard
+ * @param {{ nowMs?: number, minAgeMs?: number, hostname?: string }} [opts]
+ * @returns {{ recoverable: boolean, reason: string }}
+ */
+export function canRecoverDeadGuard(guard, opts = {}) {
+  if (!guard || typeof guard !== 'object') {
+    return { recoverable: false, reason: 'no guard metadata' };
+  }
+
+  const pid = guard.pid;
+  if (pid == null) {
+    return { recoverable: false, reason: 'guard pid missing (ambiguous)' };
+  }
+
+  const expectedHost = opts.hostname ?? os.hostname();
+  const guardHost = guard.hostname ?? guard.host ?? null;
+  if (guardHost == null) {
+    return {
+      recoverable: false,
+      reason: 'guard hostname missing (ambiguous)',
+    };
+  }
+  if (String(guardHost) !== String(expectedHost)) {
+    return {
+      recoverable: false,
+      reason: `guard host "${guardHost}" != current host "${expectedHost}" (ambiguous)`,
+    };
+  }
+
+  const alive = isPidAlive(pid);
+  if (alive === true) {
+    return { recoverable: false, reason: `guard pid ${pid} is alive` };
+  }
+  if (alive === null) {
+    return {
+      recoverable: false,
+      reason: `guard pid ${pid} liveness ambiguous`,
+    };
+  }
+
+  const minAgeMs = opts.minAgeMs ?? DEAD_GUARD_MIN_AGE_MS;
+  // Prefer startedAt; accept acquiredAt for symmetry with lock payloads.
+  const age = lockAgeMs(guard.startedAt ?? guard.acquiredAt, opts.nowMs);
+  if (age == null) {
+    return {
+      recoverable: false,
+      reason: 'guard startedAt/acquiredAt missing or unparseable (ambiguous)',
+    };
+  }
+  if (age < minAgeMs) {
+    return {
+      recoverable: false,
+      reason: `guard age ${age}ms < ${minAgeMs}ms (refuse early reclaim)`,
+    };
+  }
+
+  return {
+    recoverable: true,
+    reason: `dead guard pid ${pid}, age ${age}ms >= ${minAgeMs}ms`,
+  };
+}
+
+/**
  * Read lock metadata if present.
  * @param {string} campaignDir
  * @returns {Promise<object | null>}
@@ -193,6 +270,34 @@ export async function readLock(campaignDir) {
 }
 
 /**
+ * Read recovery guard metadata if present.
+ * @param {string} campaignDir
+ * @returns {Promise<object | null>}
+ */
+export async function readRecoveryGuard(campaignDir) {
+  const p = lockRecoverPath(campaignDir);
+  try {
+    const text = await readFile(p, 'utf8');
+    const data = JSON.parse(text);
+    return {
+      owner: data.owner ?? null,
+      pid: data.pid ?? null,
+      hostname: data.hostname ?? data.host ?? null,
+      startedAt: data.startedAt ?? data.acquiredAt ?? null,
+      path: p,
+      ...data,
+    };
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code === 'ENOENT') {
+      return null;
+    }
+    // Corrupt guard: treat as unreadable/ambiguous for reclaim decisions.
+    throw err;
+  }
+}
+
+/**
  * Build lock file payload for the current process.
  * @param {string} ownerId
  * @returns {{ owner: string, acquiredAt: string, pid: number, hostname: string }}
@@ -203,6 +308,22 @@ function buildLockPayload(ownerId) {
     acquiredAt: new Date().toISOString(),
     pid: process.pid,
     hostname: os.hostname(),
+  };
+}
+
+/**
+ * Build recovery guard payload with PID/host/time identity.
+ * @param {object} lockPayload - new owner payload
+ * @param {object | null} existing - lock snapshot being recovered
+ * @returns {object}
+ */
+function buildGuardPayload(lockPayload, existing) {
+  return {
+    owner: lockPayload.owner,
+    pid: lockPayload.pid,
+    hostname: lockPayload.hostname,
+    startedAt: new Date().toISOString(),
+    target: lockIdentity(existing),
   };
 }
 
@@ -271,6 +392,21 @@ function lockIdentity(lock) {
 }
 
 /**
+ * Stable identity fingerprint of a recovery guard.
+ * @param {object | null} guard
+ * @returns {string}
+ */
+function guardIdentity(guard) {
+  if (!guard || typeof guard !== 'object') return '';
+  return JSON.stringify({
+    owner: guard.owner ?? null,
+    pid: guard.pid ?? null,
+    startedAt: guard.startedAt ?? guard.acquiredAt ?? null,
+    hostname: guard.hostname ?? guard.host ?? null,
+  });
+}
+
+/**
  * Best-effort unlink; ignore ENOENT.
  * @param {string} p
  */
@@ -281,6 +417,127 @@ async function unlinkIfExists(p) {
     const code = /** @type {NodeJS.ErrnoException} */ (err).code;
     if (code !== 'ENOENT') throw err;
   }
+}
+
+/**
+ * Acquire the recovery guard, reclaiming a dead/stale guard when safe.
+ * Never steals a live or ambiguous guard. Two concurrent reclaimers of a
+ * dead guard: only one wins the post-unlink `wx`; the other fails closed.
+ *
+ * @param {string} campaignDir
+ * @param {object} guardPayload
+ * @param {{ minAgeMs?: number, nowMs?: number }} opts
+ * @returns {Promise<{ ok: true, recovered?: boolean } | { ok: false, error: string, guard?: object|null }>}
+ */
+async function acquireRecoveryGuard(campaignDir, guardPayload, opts) {
+  const recoverPath = lockRecoverPath(campaignDir);
+  const body = `${JSON.stringify(guardPayload, null, 2)}\n`;
+
+  const first = await tryCreateExclusive(recoverPath, body);
+  if (first.ok) {
+    return { ok: true, recovered: false };
+  }
+  if (first.code !== 'EEXIST') {
+    return {
+      ok: false,
+      error: `failed to acquire lock recovery guard: ${first.error}`,
+    };
+  }
+
+  // Guard held — try stale reclaim only when holder is proven dead.
+  let existing;
+  try {
+    existing = await readRecoveryGuard(campaignDir);
+  } catch (readErr) {
+    return {
+      ok: false,
+      error: `recovery guard unreadable (fail closed): ${readErr instanceof Error ? readErr.message : String(readErr)}`,
+      guard: null,
+    };
+  }
+
+  const decision = canRecoverDeadGuard(existing, {
+    minAgeMs: opts.minAgeMs ?? DEAD_GUARD_MIN_AGE_MS,
+    nowMs: opts.nowMs,
+  });
+  if (!decision.recoverable) {
+    return {
+      ok: false,
+      error: `campaign lock recovery already in progress (fail closed; ${decision.reason})`,
+      guard: existing,
+    };
+  }
+
+  // Serialized stale-guard reclamation: re-check identity, unlink, re-create wx.
+  // Two reclaimers both seeing a dead guard: only one wins wx after unlink.
+  const snapshotId = guardIdentity(existing);
+  let current;
+  try {
+    current = await readRecoveryGuard(campaignDir);
+  } catch (readErr) {
+    return {
+      ok: false,
+      error: `recovery guard unreadable during reclaim (fail closed): ${readErr instanceof Error ? readErr.message : String(readErr)}`,
+      guard: existing,
+    };
+  }
+
+  if (current == null) {
+    // Vanished between checks — try clean create.
+    const again = await tryCreateExclusive(recoverPath, body);
+    if (again.ok) return { ok: true, recovered: true };
+    return {
+      ok: false,
+      error: 'campaign lock recovery already in progress (fail closed; guard claimed after vanish)',
+      guard: null,
+    };
+  }
+
+  if (guardIdentity(current) !== snapshotId) {
+    return {
+      ok: false,
+      error:
+        'campaign lock recovery already in progress (fail closed; guard identity changed)',
+      guard: current,
+    };
+  }
+
+  const recheck = canRecoverDeadGuard(current, {
+    minAgeMs: opts.minAgeMs ?? DEAD_GUARD_MIN_AGE_MS,
+    nowMs: opts.nowMs,
+  });
+  if (!recheck.recoverable) {
+    return {
+      ok: false,
+      error: `campaign lock recovery already in progress (fail closed; ${recheck.reason})`,
+      guard: current,
+    };
+  }
+
+  try {
+    await unlink(recoverPath);
+  } catch (unlinkErr) {
+    const code = /** @type {NodeJS.ErrnoException} */ (unlinkErr).code;
+    if (code !== 'ENOENT') {
+      return {
+        ok: false,
+        error: `failed to reclaim stale recovery guard: ${unlinkErr instanceof Error ? unlinkErr.message : String(unlinkErr)}`,
+        guard: current,
+      };
+    }
+  }
+
+  const second = await tryCreateExclusive(recoverPath, body);
+  if (second.ok) {
+    return { ok: true, recovered: true };
+  }
+  // Another reclaimer won the race — fail closed (never double-own the guard).
+  return {
+    ok: false,
+    error:
+      'campaign lock recovery already in progress (fail closed; concurrent guard reclaim)',
+    guard: current,
+  };
 }
 
 /**
@@ -296,30 +553,19 @@ async function unlinkIfExists(p) {
  * @returns {Promise<{ ok: boolean, acquired: boolean, path?: string, owner?: string, acquiredAt?: string, pid?: number, hostname?: string, recovered?: boolean, error?: string, lock?: object|null }>}
  */
 async function recoverDeadLock(campaignDir, p, payload, existing, opts) {
-  const recoverPath = lockRecoverPath(campaignDir);
-  const guardBody = `${JSON.stringify({
-    owner: payload.owner,
-    pid: payload.pid,
-    hostname: payload.hostname,
-    startedAt: new Date().toISOString(),
-    target: lockIdentity(existing),
-  }, null, 2)}\n`;
-
-  const guard = await tryCreateExclusive(recoverPath, guardBody);
+  const guardPayload = buildGuardPayload(payload, existing);
+  const guard = await acquireRecoveryGuard(campaignDir, guardPayload, opts);
   if (!guard.ok) {
-    // Another reclaimer holds the guard, or recovery is ambiguous — fail closed.
     return {
       ok: false,
       acquired: false,
-      error:
-        guard.code === 'EEXIST'
-          ? 'campaign lock recovery already in progress (fail closed)'
-          : `failed to acquire lock recovery guard: ${guard.error}`,
+      error: guard.error,
       lock: existing,
       path: p,
     };
   }
 
+  const recoverPath = lockRecoverPath(campaignDir);
   try {
     // Re-read under the guard and re-validate identity + recoverability.
     let current = null;

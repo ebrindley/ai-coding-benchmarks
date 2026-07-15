@@ -6,6 +6,8 @@
  * with directory mode 0700 and file mode 0600.
  *
  * Write boundaries validate trial ids and constrain paths under campaign roots.
+ * Stored digests bind results to on-disk raw/artifact bytes; verify before
+ * report/summary/export (fail closed on mismatch).
  */
 
 import {
@@ -13,12 +15,19 @@ import {
   readFile,
   rename,
   writeFile,
-  copyFile,
   chmod,
+  access,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { SCHEMA_VERSION } from './contracts.js';
 import { assertSafeTrialId, trialPathUnder } from './paths.js';
+import {
+  sha256Buffer,
+  sha256Json,
+  digestArtifactDir,
+  digestRawOutputBytes,
+} from './digest.js';
+import { copyFileNoFollow, UnsafePathError } from './safe-fs.js';
 
 /**
  * Lexical result dir (sync helper). Prefer resolveTrialResultDir at write boundaries.
@@ -182,16 +191,84 @@ export async function readTrialResult(campaignDir, trialId) {
 }
 
 /**
+ * Read a private raw file if present; return null when absent.
+ * @param {string} filePath
+ * @returns {Promise<Buffer | null>}
+ */
+async function readOptionalBuffer(filePath) {
+  try {
+    return await readFile(filePath);
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/**
+ * Compute sha256 digests of on-disk raw provider output bytes under raw/<trialId>/.
+ * Hashes exact file bytes (not lengths).
+ *
+ * @param {string} campaignDir
+ * @param {string} trialId
+ * @returns {Promise<{
+ *   rawStdoutSha256: string | null,
+ *   rawStderrSha256: string | null,
+ *   rawOutputFileSha256: string | null,
+ *   rawOutputDigest: string,
+ *   hasStdout: boolean,
+ *   hasStderr: boolean,
+ *   hasOutput: boolean,
+ * }>}
+ */
+export async function computeRawOutputDigests(campaignDir, trialId) {
+  const dir = await resolveTrialRawDir(campaignDir, trialId);
+  const stdoutBuf = await readOptionalBuffer(path.join(dir, 'stdout.txt'));
+  const stderrBuf = await readOptionalBuffer(path.join(dir, 'stderr.txt'));
+  // Prefer output.json; if missing, no output file digest.
+  const outputBuf = await readOptionalBuffer(path.join(dir, 'output.json'));
+
+  const rawStdoutSha256 = stdoutBuf != null ? sha256Buffer(stdoutBuf) : null;
+  const rawStderrSha256 = stderrBuf != null ? sha256Buffer(stderrBuf) : null;
+  const rawOutputFileSha256 = outputBuf != null ? sha256Buffer(outputBuf) : null;
+
+  const rawOutputDigest = digestRawOutputBytes({
+    stdout: stdoutBuf,
+    stderr: stderrBuf,
+    output: outputBuf,
+  });
+
+  return {
+    rawStdoutSha256,
+    rawStderrSha256,
+    rawOutputFileSha256,
+    rawOutputDigest,
+    hasStdout: stdoutBuf != null,
+    hasStderr: stderrBuf != null,
+    hasOutput: outputBuf != null,
+  };
+}
+
+/**
  * Quarantine raw provider output under campaign/raw/<trialId>/ (0700 / 0600).
+ * Returns digests of the exact on-disk bytes written.
  *
  * @param {string} campaignDir
  * @param {string} trialId
  * @param {object} raw
- * @param {string} [raw.stdout]
- * @param {string} [raw.stderr]
+ * @param {string | Buffer} [raw.stdout]
+ * @param {string | Buffer} [raw.stderr]
  * @param {string} [raw.outputPath]
  * @param {unknown} [raw.meta]
- * @returns {Promise<{ path: string }>}
+ * @returns {Promise<{
+ *   path: string,
+ *   digests: {
+ *     rawStdoutSha256: string | null,
+ *     rawStderrSha256: string | null,
+ *     rawOutputFileSha256: string | null,
+ *     rawOutputDigest: string,
+ *   },
+ * }>}
  */
 export async function quarantineRawOutput(campaignDir, trialId, raw = {}) {
   if (!campaignDir) throw new Error('quarantineRawOutput: campaignDir is required');
@@ -205,34 +282,58 @@ export async function quarantineRawOutput(campaignDir, trialId, raw = {}) {
   const dir = await resolveTrialRawDir(campaignDir, safeId);
   await ensurePrivateDir(dir);
 
-  if (raw.stdout != null) {
-    await writePrivateFile(path.join(dir, 'stdout.txt'), String(raw.stdout));
+  // Always materialize stdout/stderr files (empty allowed) so digests are complete.
+  {
+    const data =
+      raw.stdout == null
+        ? ''
+        : typeof raw.stdout === 'string' || Buffer.isBuffer(raw.stdout)
+          ? raw.stdout
+          : String(raw.stdout);
+    await writePrivateFile(path.join(dir, 'stdout.txt'), data);
   }
-  if (raw.stderr != null) {
-    await writePrivateFile(path.join(dir, 'stderr.txt'), String(raw.stderr));
+  {
+    const data =
+      raw.stderr == null
+        ? ''
+        : typeof raw.stderr === 'string' || Buffer.isBuffer(raw.stderr)
+          ? raw.stderr
+          : String(raw.stderr);
+    await writePrivateFile(path.join(dir, 'stderr.txt'), data);
   }
 
   if (raw.outputPath) {
     try {
       const dest = path.join(dir, 'output.json');
-      await copyFile(raw.outputPath, dest);
+      // Never follow a provider-swapped symlink to host content.
+      await copyFileNoFollow(String(raw.outputPath), dest);
       await tryChmod(dest, 0o600);
-    } catch {
-      await writePrivateFile(
-        path.join(dir, 'output-missing.txt'),
-        'source not copied (path omitted from quarantine metadata)\n',
-      );
+    } catch (err) {
+      const note =
+        err instanceof UnsafePathError
+          ? `source refused (unsafe path / symlink): ${err.code}\n`
+          : 'source not copied (path omitted from quarantine metadata)\n';
+      await writePrivateFile(path.join(dir, 'output-missing.txt'), note);
     }
   }
+
+  // Digests of exact on-disk bytes (not lengths, not in-memory strings alone).
+  const digests = await computeRawOutputDigests(campaignDir, safeId);
 
   const meta = {
     trialId: String(safeId),
     quarantinedAt: new Date().toISOString(),
     warning:
       'SECRET-BEARING: raw provider output. Do not commit or include in sanitized export by default.',
-    hasStdout: raw.stdout != null,
-    hasStderr: raw.stderr != null,
+    hasStdout: digests.hasStdout,
+    hasStderr: digests.hasStderr,
     hasOutputPath: Boolean(raw.outputPath),
+    digests: {
+      rawStdoutSha256: digests.rawStdoutSha256,
+      rawStderrSha256: digests.rawStderrSha256,
+      rawOutputFileSha256: digests.rawOutputFileSha256,
+      rawOutputDigest: digests.rawOutputDigest,
+    },
     // Do not embed absolute source paths
     ...(raw.meta && typeof raw.meta === 'object' && !('path' in /** @type {object} */ (raw.meta))
       ? { extra: raw.meta }
@@ -243,5 +344,407 @@ export async function quarantineRawOutput(campaignDir, trialId, raw = {}) {
     `${JSON.stringify(meta, null, 2)}\n`,
   );
 
-  return { path: dir };
+  return {
+    path: dir,
+    digests: {
+      rawStdoutSha256: digests.rawStdoutSha256,
+      rawStderrSha256: digests.rawStderrSha256,
+      rawOutputFileSha256: digests.rawOutputFileSha256,
+      rawOutputDigest: digests.rawOutputDigest,
+    },
+  };
 }
+
+/**
+ * Recompute artifact-dir digest when the directory exists.
+ * @param {string} artifactDir
+ * @returns {Promise<string | null>}
+ */
+export async function computeArtifactDigest(artifactDir) {
+  if (artifactDir == null || String(artifactDir).trim() === '') return null;
+  try {
+    await access(artifactDir);
+  } catch {
+    return null;
+  }
+  return digestArtifactDir(artifactDir);
+}
+
+/**
+ * Verify stored trial digests match on-disk raw (and optional artifact) bytes.
+ * Fail closed on mismatch — never trust tampered evidence.
+ *
+ * @param {string} campaignDir
+ * @param {string} trialId
+ * @param {object} [storedResult] - result object with digests; loaded if omitted
+ * @param {{ artifactDir?: string | null }} [opts]
+ * @returns {Promise<{
+ *   ok: boolean,
+ *   trialId: string,
+ *   mismatches: string[],
+ *   error?: string,
+ *   recomputed?: object,
+ * }>}
+ */
+/**
+ * Exact resultDigest envelope used by run.js (must stay in lockstep).
+ * @param {object} parts
+ * @param {unknown} [parts.classification]
+ * @param {unknown} [parts.gateResults]
+ * @param {unknown} [parts.exitCode]
+ * @returns {string}
+ */
+export function computeResultDigest({ classification, gateResults, exitCode }) {
+  return sha256Json({
+    classification: classification ?? null,
+    gateResults: gateResults ?? [],
+    exitCode: exitCode ?? null,
+  });
+}
+
+/**
+ * Whether a stored result is an explicit infra-failure without raw artifacts.
+ * Such records are "unavailable" for reportability — never silently verified.
+ *
+ * @param {object} result
+ * @returns {boolean}
+ */
+export function isInfraFailureWithoutRawEvidence(result) {
+  if (!result || typeof result !== 'object') return false;
+  if (result.classification !== 'INFRA_FAIL') return false;
+  const d = result.digests;
+  if (!d || typeof d !== 'object') return false;
+  return d.rawEvidenceUnavailable === true;
+}
+
+export async function verifyTrialEvidenceDigests(
+  campaignDir,
+  trialId,
+  storedResult,
+  opts = {},
+) {
+  const safeId = assertSafeTrialId(trialId);
+  /** @type {object} */
+  let result = storedResult;
+  if (result == null) {
+    try {
+      result = await readTrialResult(campaignDir, safeId);
+    } catch (err) {
+      return {
+        ok: false,
+        trialId: safeId,
+        mismatches: ['result'],
+        unavailable: false,
+        error: `result unreadable for evidence verify: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  if (!result.digests || typeof result.digests !== 'object') {
+    return {
+      ok: false,
+      trialId: safeId,
+      mismatches: ['digests'],
+      unavailable: false,
+      error: 'missing digests object (fail closed)',
+    };
+  }
+
+  const stored = /** @type {Record<string, unknown>} */ (result.digests);
+
+  /** @type {string[]} */
+  const mismatches = [];
+  /** @type {Record<string, unknown>} */
+  const recomputed = {};
+
+  // Always recompute resultDigest envelope and compare when present (or required).
+  const expectedResultDigest = computeResultDigest({
+    classification: result.classification,
+    gateResults: result.gateResults,
+    exitCode: result.exitCode ?? result.invokerExitCode ?? null,
+  });
+  recomputed.resultDigest = expectedResultDigest;
+  if (stored.resultDigest == null || stored.resultDigest === '') {
+    mismatches.push('resultDigest-missing');
+  } else if (String(stored.resultDigest) !== expectedResultDigest) {
+    mismatches.push('resultDigest');
+  }
+
+  // Explicit infra-without-raw path: must not count as verified/reportable.
+  if (isInfraFailureWithoutRawEvidence(result)) {
+    if (mismatches.length > 0) {
+      return {
+        ok: false,
+        trialId: safeId,
+        mismatches,
+        unavailable: false,
+        recomputed,
+        error: `infra-failure evidence integrity failed (fail closed): ${mismatches.join(', ')}`,
+      };
+    }
+    return {
+      ok: false,
+      trialId: safeId,
+      mismatches: [],
+      unavailable: true,
+      recomputed,
+      error:
+        'infra-failure without raw artifacts (unavailable; not verified/reportable)',
+    };
+  }
+
+  // Reportable completed/failed trials require full result + raw + artifact bindings.
+  for (const key of [
+    'rawOutputDigest',
+    'rawStdoutSha256',
+    'rawStderrSha256',
+    'artifactDigest',
+  ]) {
+    if (stored[key] == null || stored[key] === '') {
+      mismatches.push(`${key}-missing`);
+    }
+  }
+
+  // Raw output bytes under campaign/raw/<trialId>/
+  let rawDigests;
+  try {
+    rawDigests = await computeRawOutputDigests(campaignDir, safeId);
+  } catch (err) {
+    return {
+      ok: false,
+      trialId: safeId,
+      mismatches: [...mismatches, 'raw'],
+      unavailable: false,
+      error: `raw digests unreadable: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  recomputed.rawOutputDigest = rawDigests.rawOutputDigest;
+  recomputed.rawStdoutSha256 = rawDigests.rawStdoutSha256;
+  recomputed.rawStderrSha256 = rawDigests.rawStderrSha256;
+  recomputed.rawOutputFileSha256 = rawDigests.rawOutputFileSha256;
+
+  if (
+    stored.rawOutputDigest != null &&
+    stored.rawOutputDigest !== rawDigests.rawOutputDigest
+  ) {
+    mismatches.push('rawOutputDigest');
+  }
+  if (
+    stored.rawStdoutSha256 != null &&
+    stored.rawStdoutSha256 !== rawDigests.rawStdoutSha256
+  ) {
+    mismatches.push('rawStdoutSha256');
+  }
+  if (
+    stored.rawStderrSha256 != null &&
+    stored.rawStderrSha256 !== rawDigests.rawStderrSha256
+  ) {
+    mismatches.push('rawStderrSha256');
+  }
+  if (
+    stored.rawOutputFileSha256 != null &&
+    stored.rawOutputFileSha256 !== rawDigests.rawOutputFileSha256
+  ) {
+    mismatches.push('rawOutputFileSha256');
+  }
+
+  // Artifact digest is required for reportable trials (cannot skip by deleting key).
+  const artifactDir =
+    opts.artifactDir ??
+    (typeof result.artifactDir === 'string' ? result.artifactDir : null);
+  if (!artifactDir) {
+    mismatches.push('artifactDir-missing');
+  } else {
+    try {
+      const art = await computeArtifactDigest(artifactDir);
+      recomputed.artifactDigest = art;
+      if (art == null) {
+        mismatches.push('artifactDigest-unavailable');
+      } else if (
+        stored.artifactDigest != null &&
+        stored.artifactDigest !== art
+      ) {
+        mismatches.push('artifactDigest');
+      } else if (stored.artifactDigest == null || stored.artifactDigest === '') {
+        mismatches.push('artifactDigest-missing');
+      }
+    } catch (err) {
+      mismatches.push('artifactDigest');
+      recomputed.artifactDigestError =
+        err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  if (mismatches.length > 0) {
+    return {
+      ok: false,
+      trialId: safeId,
+      mismatches,
+      unavailable: false,
+      recomputed,
+      error: `evidence digest mismatch (fail closed): ${mismatches.join(', ')}`,
+    };
+  }
+
+  return {
+    ok: true,
+    trialId: safeId,
+    mismatches: [],
+    unavailable: false,
+    recomputed,
+  };
+}
+
+/**
+ * Verify evidence digests for all completed/failed trials before report/export.
+ * Fail closed on the first mismatch or unreadable evidence when digests present.
+ *
+ * @param {string} campaignDir
+ * @param {object[]} trials - manifest trials (need id + state)
+ * @param {object[]} [trialResults] - optional preloaded results
+ * @returns {Promise<{
+ *   ok: boolean,
+ *   verified: number,
+ *   skipped: number,
+ *   failures: Array<{ trialId: string, error: string, mismatches: string[] }>,
+ *   error?: string,
+ * }>}
+ */
+export async function verifyCampaignEvidenceDigests(
+  campaignDir,
+  trials,
+  trialResults,
+) {
+  if (!campaignDir) {
+    return {
+      ok: false,
+      verified: 0,
+      skipped: 0,
+      unavailable: 0,
+      failures: [],
+      error: 'campaignDir is required for evidence verify',
+    };
+  }
+
+  /** @type {Map<string, object>} */
+  const byId = new Map();
+  if (Array.isArray(trialResults)) {
+    for (const r of trialResults) {
+      if (r && typeof r === 'object' && r.id != null) {
+        byId.set(String(r.id), r);
+      }
+    }
+  }
+
+  let verified = 0;
+  let skipped = 0;
+  let unavailable = 0;
+  /** @type {Array<{ trialId: string, error: string, mismatches: string[] }>} */
+  const failures = [];
+
+  for (const t of trials || []) {
+    if (!t || typeof t !== 'object') continue;
+    const state = t.state;
+    if (state !== 'completed' && state !== 'failed') {
+      skipped += 1;
+      continue;
+    }
+    const id = String(t.id);
+    let result = byId.get(id);
+    if (!result) {
+      try {
+        result = await readTrialResult(campaignDir, id);
+      } catch {
+        // Completed/failed without a result file: fail closed (not silent skip).
+        failures.push({
+          trialId: id,
+          error: 'missing result file for completed/failed trial (fail closed)',
+          mismatches: ['result'],
+        });
+        continue;
+      }
+    }
+
+    const digests = result.digests;
+    if (!digests || typeof digests !== 'object') {
+      failures.push({
+        trialId: id,
+        error: 'missing digests for completed/failed trial (fail closed)',
+        mismatches: ['digests'],
+      });
+      continue;
+    }
+
+    const v = await verifyTrialEvidenceDigests(campaignDir, id, result);
+    if (v.unavailable) {
+      // Explicit INFRA_FAIL without raw — not verified, not silently reportable.
+      unavailable += 1;
+      continue;
+    }
+    if (!v.ok) {
+      failures.push({
+        trialId: id,
+        error: v.error || 'evidence mismatch',
+        mismatches: v.mismatches,
+      });
+      continue;
+    }
+    verified += 1;
+  }
+
+  if (failures.length > 0) {
+    return {
+      ok: false,
+      verified,
+      skipped,
+      unavailable,
+      failures,
+      error: `evidence integrity failed for ${failures.length} trial(s): ${failures
+        .map((f) => `${f.trialId}(${f.mismatches.join(',')})`)
+        .join('; ')}`,
+    };
+  }
+
+  // Unavailable infra records do not block campaign-level ok (they are not
+  // counted as verified/reportable). Callers must not treat unavailable as pass.
+  return { ok: true, verified, skipped, unavailable, failures: [] };
+}
+
+/**
+ * Build trial digests object from components (canonical field names).
+ *
+ * @param {object} parts
+ * @param {string} [parts.resultDigest]
+ * @param {string | null} [parts.artifactDigest]
+ * @param {string | null} [parts.fixtureDigest]
+ * @param {string | null} [parts.rawOutputDigest]
+ * @param {string | null} [parts.rawStdoutSha256]
+ * @param {string | null} [parts.rawStderrSha256]
+ * @param {string | null} [parts.rawOutputFileSha256]
+ * @returns {Record<string, string>}
+ */
+export function buildTrialDigests(parts = {}) {
+  /** @type {Record<string, string | boolean>} */
+  const out = {};
+  for (const key of [
+    'resultDigest',
+    'artifactDigest',
+    'fixtureDigest',
+    'rawOutputDigest',
+    'rawStdoutSha256',
+    'rawStderrSha256',
+    'rawOutputFileSha256',
+  ]) {
+    const v = /** @type {Record<string, unknown>} */ (parts)[key];
+    if (v != null && v !== '') {
+      out[key] = String(v);
+    }
+  }
+  if (parts.rawEvidenceUnavailable === true) {
+    out.rawEvidenceUnavailable = true;
+  }
+  return out;
+}
+
+// Re-export helpers used by run for resultDigest construction convenience.
+export { sha256Json, sha256Buffer };

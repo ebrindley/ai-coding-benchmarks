@@ -269,4 +269,116 @@ describe('posture + digest', () => {
       await rm(tmp, { recursive: true, force: true });
     }
   });
+
+  it('directory digest includes empty directories and portable mode bits', async () => {
+    const {
+      digestArtifactDir,
+      collectDirEntries,
+      portableModeBits,
+    } = await import('../harness/digest.js');
+    const { chmod } = await import('node:fs/promises');
+
+    const root = await mkdtemp(path.join(os.tmpdir(), 'aicb-empty-mode-'));
+    try {
+      await mkdir(path.join(root, 'empty-dir'), { recursive: true });
+      await writeFile(path.join(root, 'a.txt'), 'hello\n', 'utf8');
+      if (process.platform !== 'win32') {
+        await chmod(path.join(root, 'a.txt'), 0o640);
+      }
+
+      const entries = await collectDirEntries(root, '');
+      const empty = entries.find((e) => e.path === 'empty-dir');
+      assert.ok(empty, 'empty directory must be recorded');
+      assert.equal(empty.type, 'dir');
+      assert.equal(typeof empty.mode, 'number');
+
+      const file = entries.find((e) => e.path === 'a.txt');
+      assert.ok(file);
+      assert.equal(file.type, 'file');
+      assert.equal(typeof file.mode, 'number');
+      if (process.platform !== 'win32') {
+        assert.equal(file.mode, portableModeBits(0o640));
+      }
+
+      const d1 = await digestArtifactDir(root);
+      // Adding another empty dir changes the digest
+      await mkdir(path.join(root, 'empty-2'), { recursive: true });
+      const d2 = await digestArtifactDir(root);
+      assert.notEqual(d1, d2, 'empty directory must affect digest');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('skips .git and node_modules in digests (aligned with fixture copy)', async () => {
+    const {
+      digestArtifactDir,
+      collectDirEntries,
+      isSkippedFixtureEntry,
+      FIXTURE_SKIP_DIR_NAMES,
+    } = await import('../harness/digest.js');
+    const { copyFixtureTree } = await import('../harness/workspace.js');
+
+    assert.equal(isSkippedFixtureEntry('.git'), true);
+    assert.equal(isSkippedFixtureEntry('node_modules'), true);
+    assert.ok(FIXTURE_SKIP_DIR_NAMES.has('.git'));
+    assert.ok(FIXTURE_SKIP_DIR_NAMES.has('node_modules'));
+
+    const tmp = await mkdtemp(path.join(os.tmpdir(), 'aicb-skip-align-'));
+    try {
+      const src = path.join(tmp, 'src');
+      const dst = path.join(tmp, 'dst');
+      await mkdir(path.join(src, 'node_modules', 'pkg'), { recursive: true });
+      await mkdir(path.join(src, '.git'), { recursive: true });
+      await mkdir(path.join(src, 'nested', 'node_modules'), { recursive: true });
+      await writeFile(path.join(src, 'keep.txt'), 'keep\n', 'utf8');
+      await writeFile(
+        path.join(src, 'node_modules', 'pkg', 'index.js'),
+        'secret\n',
+        'utf8',
+      );
+      await writeFile(path.join(src, '.git', 'HEAD'), 'ref: x\n', 'utf8');
+      await writeFile(
+        path.join(src, 'nested', 'node_modules', 'x.js'),
+        'x\n',
+        'utf8',
+      );
+      await mkdir(path.join(src, 'nested', 'ok'), { recursive: true });
+      await writeFile(path.join(src, 'nested', 'ok', 'y.txt'), 'y\n', 'utf8');
+
+      const entries = await collectDirEntries(src, '');
+      assert.ok(entries.every((e) => !e.path.includes('node_modules')));
+      assert.ok(entries.every((e) => !e.path.includes('.git')));
+      assert.ok(entries.some((e) => e.path === 'keep.txt'));
+      assert.ok(entries.some((e) => e.path === 'nested/ok/y.txt'));
+
+      await copyFixtureTree(src, dst);
+      // Copy must not include skipped trees either
+      const { access } = await import('node:fs/promises');
+      await assert.rejects(() => access(path.join(dst, 'node_modules')));
+      await assert.rejects(() => access(path.join(dst, '.git')));
+      await access(path.join(dst, 'keep.txt'));
+      await access(path.join(dst, 'nested', 'ok', 'y.txt'));
+
+      // Shared exclusion: path sets match; digests match when modes preserved.
+      const pathsSrc = (await collectDirEntries(src, ''))
+        .map((e) => e.path)
+        .sort();
+      const pathsDst = (await collectDirEntries(dst, ''))
+        .map((e) => e.path)
+        .sort();
+      assert.deepEqual(pathsSrc, pathsDst);
+      if (process.platform !== 'win32') {
+        const dSrc = await digestArtifactDir(src);
+        const dDst = await digestArtifactDir(dst);
+        assert.equal(
+          dSrc,
+          dDst,
+          'source and post-copy digests match under shared skip/mode policy',
+        );
+      }
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
 });

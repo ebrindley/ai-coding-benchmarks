@@ -3,11 +3,16 @@
  * Never uses a shell. Only harness-controlled env may be passed.
  * Corpus task YAML must never contribute env.
  *
+ * Provider invocations must pass `campaignDir` so the process tree is wrapped
+ * in OS confinement that denies read/write of the campaign control tree.
+ * Unconfined provider spawn is refused (fail closed).
+ *
  * Captured stdout/stderr are bounded. On timeout, the process group/tree is
  * terminated where the platform supports detached process groups.
  */
 
 import { spawn } from 'node:child_process';
+import { wrapProviderCommand } from './provider-confine.js';
 
 /** Default max chars retained per stream (rest discarded, length recorded). */
 export const DEFAULT_CAPTURE_LIMIT = 256 * 1024;
@@ -22,6 +27,9 @@ export const DEFAULT_CAPTURE_LIMIT = 256 * 1024;
  * @property {string} [signal]
  * @property {number} [stdoutTruncatedChars]
  * @property {number} [stderrTruncatedChars]
+ * @property {boolean} [executionUnavailable]
+ * @property {string[]} [confinedArgv]
+ * @property {string} [confinedCommand]
  */
 
 /**
@@ -74,7 +82,6 @@ function appendBounded(buf, chunk, limit) {
 function killTree(child, signal) {
   if (child.pid == null) return;
   try {
-    // When detached with new process group, -pid signals the whole group.
     process.kill(-child.pid, signal);
     return;
   } catch {
@@ -88,7 +95,7 @@ function killTree(child, signal) {
 }
 
 /**
- * Spawn a process without a shell.
+ * Low-level spawn without shell. Prefer spawnControlled for invokers.
  *
  * @param {object} opts
  * @param {string} opts.command
@@ -97,10 +104,10 @@ function killTree(child, signal) {
  * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | null} [opts.env]
  * @param {number} [opts.timeoutMs]
  * @param {string | Buffer} [opts.stdin]
- * @param {number} [opts.captureLimit] max stdout/stderr chars retained
+ * @param {number} [opts.captureLimit]
  * @returns {Promise<SpawnResult>}
  */
-export function spawnControlled({
+export function spawnRaw({
   command,
   args,
   cwd,
@@ -154,7 +161,6 @@ export function spawnControlled({
         cwd: cwd || undefined,
         env: resolvedEnv,
         shell: false,
-        // New process group so timeout can signal the whole tree on POSIX.
         detached: process.platform !== 'win32',
         stdio: useStdin ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
       });
@@ -238,7 +244,7 @@ export function spawnControlled({
 
     if (useStdin && child.stdin) {
       child.stdin.on('error', () => {
-        /* ignore EPIPE if process exits early */
+        /* ignore EPIPE */
       });
       child.stdin.end(stdin);
     }
@@ -257,5 +263,120 @@ export function spawnControlled({
       }, timeoutMs);
       timer.unref?.();
     }
+  });
+}
+
+/**
+ * Spawn a process without a shell.
+ *
+ * For provider invokers, pass `campaignDir` (and typically `confine: true`) so
+ * the process is wrapped to deny campaign tree access. Set `confine: false`
+ * only for trusted harness helpers (e.g. git status in the workspace).
+ *
+ * @param {object} opts
+ * @param {string} opts.command
+ * @param {string[]} opts.args
+ * @param {string} [opts.cwd]
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | null} [opts.env]
+ * @param {number} [opts.timeoutMs]
+ * @param {string | Buffer} [opts.stdin]
+ * @param {number} [opts.captureLimit]
+ * @param {string} [opts.campaignDir] - campaign control tree to hide from provider
+ * @param {boolean} [opts.confine] - default true when campaignDir set; false = raw (trusted)
+ * @param {string[]} [opts.extraBindPaths] - extra rw binds for bwrap
+ * @param {import('./provider-confine.js').ProviderConfinementInfo} [opts.confinement]
+ * @returns {Promise<SpawnResult>}
+ */
+export async function spawnControlled(opts) {
+  const {
+    command,
+    args,
+    cwd,
+    env,
+    timeoutMs,
+    stdin,
+    captureLimit,
+    campaignDir,
+    confine,
+    extraBindPaths,
+    confinement,
+  } = opts;
+
+  const mustConfine =
+    confine === true ||
+    (confine !== false && campaignDir != null && String(campaignDir).trim() !== '');
+
+  if (mustConfine) {
+    if (campaignDir == null || String(campaignDir).trim() === '') {
+      return {
+        exitCode: null,
+        timedOut: false,
+        stdout: '',
+        stderr: '',
+        executionUnavailable: true,
+        infraFailure:
+          'provider spawn requires campaignDir for confinement (fail closed; unconfined refused)',
+      };
+    }
+    if (cwd == null || String(cwd).trim() === '') {
+      return {
+        exitCode: null,
+        timedOut: false,
+        stdout: '',
+        stderr: '',
+        executionUnavailable: true,
+        infraFailure: 'provider spawn requires cwd (workspace) under confinement',
+      };
+    }
+
+    const wrapped = await wrapProviderCommand({
+      command: String(command),
+      args: Array.isArray(args) ? args : [],
+      cwd: String(cwd),
+      campaignDir: String(campaignDir),
+      extraBindPaths,
+      confinement,
+    });
+
+    if (!wrapped.ok) {
+      return {
+        exitCode: null,
+        timedOut: false,
+        stdout: '',
+        stderr: '',
+        executionUnavailable: true,
+        infraFailure: wrapped.infraFailure,
+      };
+    }
+
+    try {
+      const result = await spawnRaw({
+        command: wrapped.command,
+        args: wrapped.args,
+        cwd,
+        env,
+        timeoutMs,
+        stdin,
+        captureLimit,
+      });
+      return {
+        ...result,
+        confinedCommand: wrapped.command,
+        confinedArgv: wrapped.args,
+      };
+    } finally {
+      await wrapped.cleanup();
+    }
+  }
+
+  // Trusted harness helpers only (git status, etc.) — never providers.
+  return spawnRaw({
+    command,
+    args,
+    cwd,
+    env,
+    timeoutMs,
+    stdin,
+    captureLimit,
   });
 }

@@ -180,18 +180,23 @@ describe('lock + atomic resume', () => {
         'utf8',
       );
 
-      // Hold the recovery guard exclusively so a concurrent reclaimer must fail closed
+      // Hold the recovery guard with live identity so concurrent reclaimer fail closed
       // rather than unlinking a lock that may already be live.
       await writeFile(
         lockRecoverPath(dir),
-        `${JSON.stringify({ owner: 'guard-holder' }, null, 2)}\n`,
+        `${JSON.stringify({
+          owner: 'guard-holder',
+          pid: process.pid,
+          hostname: os.hostname(),
+          startedAt: new Date().toISOString(),
+        }, null, 2)}\n`,
         { flag: 'wx' },
       );
 
       const blocked = await acquireLock(dir, 'racer-a', { minAgeMs: 30_000 });
       assert.equal(blocked.ok, false);
       assert.equal(blocked.acquired, false);
-      assert.match(String(blocked.error), /recovery already in progress|fail closed/i);
+      assert.match(String(blocked.error), /recovery already in progress|fail closed|alive/i);
 
       // Original dead lock still present (blocked reclaimer must not have unlinked).
       const stillThere = JSON.parse(await readFile(lockPath(dir), 'utf8'));
@@ -213,6 +218,187 @@ describe('lock + atomic resume', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('refuses to steal a live recovery guard', async () => {
+    const {
+      acquireLock,
+      lockPath,
+      lockRecoverPath,
+      isPidAlive,
+      canRecoverDeadGuard,
+    } = await import('../harness/lock.js');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-live-guard-'));
+    try {
+      let deadPid = spawnSync(process.execPath, ['-e', 'process.exit(0)'], {
+        encoding: 'utf8',
+      }).pid;
+      if (deadPid == null || isPidAlive(deadPid) !== false) {
+        deadPid = 2147483644;
+        if (isPidAlive(deadPid) !== false) {
+          assert.fail('need a dead pid');
+        }
+      }
+
+      // Dead main lock so recovery path is taken.
+      await writeFile(
+        lockPath(dir),
+        `${JSON.stringify({
+          owner: `aicb-${deadPid}-lg`,
+          acquiredAt: new Date(Date.now() - 120_000).toISOString(),
+          pid: deadPid,
+          hostname: os.hostname(),
+        }, null, 2)}\n`,
+        'utf8',
+      );
+
+      const liveGuard = {
+        owner: 'live-reclaimer',
+        pid: process.pid,
+        hostname: os.hostname(),
+        startedAt: new Date(Date.now() - 120_000).toISOString(),
+      };
+      assert.equal(isPidAlive(process.pid), true);
+      assert.equal(
+        canRecoverDeadGuard(liveGuard, { minAgeMs: 0 }).recoverable,
+        false,
+      );
+      await writeFile(
+        lockRecoverPath(dir),
+        `${JSON.stringify(liveGuard, null, 2)}\n`,
+        { flag: 'wx' },
+      );
+
+      const steal = await acquireLock(dir, 'thief', { minAgeMs: 0 });
+      assert.equal(steal.ok, false);
+      assert.match(String(steal.error), /recovery already in progress|alive|fail closed/i);
+
+      // Main lock must remain the original dead owner (not unlinked).
+      const still = JSON.parse(await readFile(lockPath(dir), 'utf8'));
+      assert.equal(still.pid, deadPid);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reclaims a crashed/stale recovery guard (dead pid + age)', async () => {
+    const {
+      acquireLock,
+      releaseLock,
+      lockPath,
+      lockRecoverPath,
+      isPidAlive,
+      canRecoverDeadGuard,
+      readRecoveryGuard,
+    } = await import('../harness/lock.js');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-stale-guard-'));
+    try {
+      let deadPid = spawnSync(process.execPath, ['-e', 'process.exit(0)'], {
+        encoding: 'utf8',
+      }).pid;
+      if (deadPid == null || isPidAlive(deadPid) !== false) {
+        deadPid = 2147483643;
+        if (isPidAlive(deadPid) !== false) {
+          assert.fail('need a dead pid');
+        }
+      }
+
+      // Dead main lock
+      await writeFile(
+        lockPath(dir),
+        `${JSON.stringify({
+          owner: `aicb-${deadPid}-main`,
+          acquiredAt: new Date(Date.now() - 180_000).toISOString(),
+          pid: deadPid,
+          hostname: os.hostname(),
+        }, null, 2)}\n`,
+        'utf8',
+      );
+
+      // Stale guard left by crashed reclaimer (different dead pid)
+      let guardDeadPid = spawnSync(process.execPath, ['-e', 'process.exit(0)'], {
+        encoding: 'utf8',
+      }).pid;
+      if (guardDeadPid == null || isPidAlive(guardDeadPid) !== false) {
+        guardDeadPid = deadPid; // same dead pid is fine for liveness
+      }
+      const staleGuard = {
+        owner: 'crashed-reclaimer',
+        pid: guardDeadPid,
+        hostname: os.hostname(),
+        startedAt: new Date(Date.now() - 180_000).toISOString(),
+      };
+      assert.equal(
+        canRecoverDeadGuard(staleGuard, { minAgeMs: 30_000 }).recoverable,
+        true,
+      );
+      await writeFile(
+        lockRecoverPath(dir),
+        `${JSON.stringify(staleGuard, null, 2)}\n`,
+        { flag: 'wx' },
+      );
+
+      const recovered = await acquireLock(dir, 'new-owner', {
+        minAgeMs: 30_000,
+      });
+      assert.equal(recovered.ok, true);
+      assert.equal(recovered.acquired, true);
+      assert.equal(recovered.recovered, true);
+      assert.equal(recovered.owner, 'new-owner');
+
+      // Guard must be released after successful reclaim.
+      const guardAfter = await readRecoveryGuard(dir);
+      assert.equal(guardAfter, null);
+
+      await releaseLock(dir, 'new-owner');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not reclaim ambiguous recovery guards', async () => {
+    const { canRecoverDeadGuard } = await import('../harness/lock.js');
+    // Missing pid
+    assert.equal(
+      canRecoverDeadGuard({
+        owner: 'x',
+        hostname: os.hostname(),
+        startedAt: new Date(0).toISOString(),
+      }).recoverable,
+      false,
+    );
+    // Foreign host
+    assert.equal(
+      canRecoverDeadGuard({
+        owner: 'x',
+        pid: 2147483642,
+        hostname: 'other-host-not-this-machine',
+        startedAt: new Date(0).toISOString(),
+      }).recoverable,
+      false,
+    );
+    // Missing hostname
+    assert.equal(
+      canRecoverDeadGuard({
+        owner: 'x',
+        pid: 2147483642,
+        startedAt: new Date(0).toISOString(),
+      }).recoverable,
+      false,
+    );
+    // Too young
+    assert.equal(
+      canRecoverDeadGuard(
+        {
+          owner: 'x',
+          pid: 2147483642,
+          hostname: os.hostname(),
+          startedAt: new Date().toISOString(),
+        },
+        { minAgeMs: 30_000 },
+      ).recoverable,
+      false,
+    );
   });
 
   it('rejects unsafe campaign ids (traversal/absolute/overlong)', async () => {

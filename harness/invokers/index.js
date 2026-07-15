@@ -180,8 +180,21 @@ export {
   invokePoeticAdapter,
   parseInvokeResult,
   mapOutcomeKind,
+  prepareFreshOutputPath,
+  bindInvokeResultToRequestId,
+  sanitizeAdapterReasonCode,
   POETIC_INVOKE_RESULT_SCHEMA,
   POETIC_OUTCOME_KINDS,
+  REASON_CODE_RE,
 } from './poetic-adapter.js';
 export { invokeNativeCli, PROMPT_TRANSPORTS } from './native-cli.js';
 export { invokePoeticSystem } from './poetic-system.js';
+export {
+  detectProviderConfinement,
+  buildProviderSeatbeltProfile,
+  buildProviderConfinedArgv,
+  wrapProviderCommand,
+  campaignDenyPaths,
+  escapeSeatbeltPath,
+  assertPathOutsideCampaign,
+} from './provider-confine.js';

@@ -121,8 +121,10 @@ process.stdout.write('done');
       assert.equal('trialId' in request, false);
       assert.equal('workspace' in request, false);
 
-      // Nested private parent dirs for request/output.
+      // Nested private parent dirs for request/output (execution scratch; campaign separate).
       const artDir = path.join(dir, 'artifacts', 't1');
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const requestPath = path.join(artDir, 'req.json');
       const outputPath = path.join(artDir, 'out.json');
       const result = await invokePoeticAdapter({
@@ -131,6 +133,8 @@ process.stdout.write('done');
         outputPath,
         request,
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: workspaceDir,
       });
       assert.equal(result.exitCode, 0);
       assert.equal(result.success, true);
@@ -209,6 +213,8 @@ process.exit(0);
 
         const requestPath = path.join(dir, `req-${kind}.json`);
         const outputPath = path.join(dir, `out-${kind}.json`);
+        const campaignDir = path.join(dir, `_campaign_${kind}`);
+        await mkdir(campaignDir, { recursive: true, mode: 0o700 });
         const result = await invokePoeticAdapter({
           poeticBin: bin,
           requestPath,
@@ -222,6 +228,8 @@ process.exit(0);
             timeoutMs: 1000,
           },
           timeoutMs: 10_000,
+          campaignDir,
+          cwd: dir,
         });
 
         const exp = expectByKind[kind];
@@ -278,12 +286,16 @@ process.exit(0);
         'utf8',
       );
       await chmod(badBin, 0o755);
+      const badCampaign = path.join(dir, '_campaign_bad');
+      await mkdir(badCampaign, { recursive: true, mode: 0o700 });
       const badResult = await invokePoeticAdapter({
         poeticBin: badBin,
         requestPath: path.join(dir, 'req-bad.json'),
         outputPath: path.join(dir, 'out-bad.json'),
         request: { schema: 'x', requestId: 'b', provider: 'p', prompt: 'p', workingDirectory: dir, timeoutMs: 1 },
         timeoutMs: 10_000,
+        campaignDir: badCampaign,
+        cwd: dir,
       });
       assert.equal(badResult.exitCode, 0);
       assert.equal(badResult.success, false);
@@ -347,6 +359,8 @@ process.exit(0);
         '2',
       ]);
 
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const result = await invokePoeticSystem({
         poeticBin: bin,
         prompt: 'fix the bug',
@@ -354,6 +368,7 @@ process.exit(0);
         model: 'claude-x',
         timeoutMs: 90_000,
         cwd: dir,
+        campaignDir,
         env: { ...process.env, AICB_ARGV_OUT: argvOut },
       });
       assert.equal(result.exitCode, 0);
@@ -429,6 +444,8 @@ process.exit(0);
     try {
       const bin = path.join(dir, 'fake-cli');
       const capture = path.join(dir, 'stdin.txt');
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -457,6 +474,8 @@ process.stdin.on('end', () => {
         // default promptTransport is stdin
         env: { ...process.env, AICB_CAPTURE: capture },
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
       });
       assert.equal(result.exitCode, 0);
       assert.equal(result.promptTransport, 'stdin');
@@ -471,6 +490,10 @@ process.stdin.on('end', () => {
     try {
       const bin = path.join(dir, 'fake-cli');
       const capture = path.join(dir, 'from-file.txt');
+      const campaignDir = path.join(dir, '_campaign');
+      const scratchDir = path.join(dir, 'scratch');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
+      await mkdir(scratchDir, { recursive: true, mode: 0o700 });
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -502,6 +525,9 @@ process.exit(0);
           AICB_PATH_CAPTURE: pathCap,
         },
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
+        scratchDir,
       });
       assert.equal(result.exitCode, 0);
       assert.equal(result.promptTransport, 'prompt-file');
@@ -524,11 +550,10 @@ process.exit(0);
       const { invokeNativeCli } = await import(
         '../harness/invokers/native-cli.js'
       );
-      // Capture temp path by wrapping a missing binary: child fails but prompt
-      // file is still created first. Use a spy-like command that records argv
-      // then exits via a wrapper that fails after reading path… simpler: use
-      // a script that writes the path then the harness cleans up after spawn
-      // returns (even with non-zero). Also test missing command infraFailure.
+      const campaignDir = path.join(dir, '_campaign');
+      const scratchDir = path.join(dir, 'scratch');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
+      await mkdir(scratchDir, { recursive: true, mode: 0o700 });
       const bin = path.join(dir, 'record-and-fail');
       const pathCap = path.join(dir, 'path.txt');
       await writeFile(
@@ -550,6 +575,9 @@ process.exit(1);
         promptTransport: 'prompt-file',
         env: { ...process.env, AICB_PATH_CAPTURE: pathCap },
         timeoutMs: 10_000,
+        campaignDir,
+        cwd: dir,
+        scratchDir,
       });
       assert.equal(result.exitCode, 1);
       assert.equal(result.promptFileUsed, true);
@@ -557,14 +585,15 @@ process.exit(1);
       const usedPath = await readFile(pathCap, 'utf8');
       await assert.rejects(() => readFile(usedPath, 'utf8'), /ENOENT/);
 
-      // Spawn of non-existent command also cleans up (prompt written before spawn).
-      // Use a path that cannot exist; prompt-file still creates temp then finally removes it.
       const missing = await invokeNativeCli({
         command: path.join(dir, 'definitely-missing-binary-xyz'),
         args: [],
         prompt: 'cleanup-on-spawn-fail',
         promptTransport: 'prompt-file',
         timeoutMs: 5_000,
+        campaignDir,
+        cwd: dir,
+        scratchDir,
       });
       assert.ok(missing.infraFailure || missing.exitCode !== 0);
       assert.equal(missing.promptFileUsed, true);
@@ -583,6 +612,7 @@ process.exit(1);
       args: [],
       prompt: 'x',
       promptTransport: 'shell-template',
+      campaignDir: path.join(os.tmpdir(), 'aicb-camp-dummy'),
     });
     assert.ok(badTransport.infraFailure);
     assert.match(badTransport.infraFailure, /promptTransport/i);
@@ -590,6 +620,7 @@ process.exit(1);
     const badEnv = await invokeNativeCli({
       command: 'true',
       args: [],
+      campaignDir: path.join(os.tmpdir(), 'aicb-camp-dummy2'),
       env: Object.assign(Object.create(null), {
         PATH: '/usr/bin',
         __source: 'task-yaml',
@@ -624,13 +655,16 @@ process.exit(1);
     }
   });
 
-  it('buildGateEnv is minimal; credential allowlist names fail closed', async () => {
+  it('buildGateEnv is minimal; safe-name whitelist (not denylist) fails closed', async () => {
     const {
       buildGateEnv,
       normalizeEnvAllowlist,
       isCredentialLikeEnvKey,
+      isAllowlistedGateEnvName,
       isRestrictiveSandboxMode,
       sanitizeGateResultsForStorage,
+      isSafeGateCfgValue,
+      GATE_SAFE_ALLOWLIST_NAMES,
     } = await import('../harness/gates.js');
 
     assert.equal(isCredentialLikeEnvKey('AICB_SENTINEL_SECRET'), true);
@@ -638,8 +672,12 @@ process.exit(1);
     assert.equal(isCredentialLikeEnvKey('OPENAI_API_KEY'), true);
     assert.equal(isCredentialLikeEnvKey('GITHUB_TOKEN'), true);
     assert.equal(isCredentialLikeEnvKey('SSH_AUTH_SOCK'), true);
-    assert.equal(isCredentialLikeEnvKey('ALLOWED_TOOL_FLAG'), false);
-    assert.equal(isCredentialLikeEnvKey('CFLAGS'), false);
+    assert.equal(isCredentialLikeEnvKey('DATABASE_URL'), true);
+    assert.equal(isAllowlistedGateEnvName('ALLOWED_TOOL_FLAG'), false);
+    assert.equal(isAllowlistedGateEnvName('CFLAGS'), false);
+    assert.equal(isAllowlistedGateEnvName('NODE_ENV'), true);
+    assert.equal(isAllowlistedGateEnvName('AICB_GATE_CFG_FLAG'), true);
+    assert.ok(GATE_SAFE_ALLOWLIST_NAMES.includes('CI'));
 
     const parent = {
       PATH: '/usr/bin:/bin',
@@ -652,7 +690,9 @@ process.exit(1);
       OPENAI_API_KEY: 'sk-test',
       GITHUB_TOKEN: 'ghp_test',
       NODE_OPTIONS: 'should-not-leak',
-      ALLOWED_TOOL_FLAG: 'ok-when-allowlisted',
+      NODE_ENV: 'test',
+      AICB_GATE_CFG_FLAG: 'ok-when-allowlisted',
+      DATABASE_URL: 'dsn-value-must-not-leak',
     };
 
     const minimal = buildGateEnv({
@@ -666,23 +706,25 @@ process.exit(1);
     assert.equal(minimal.AWS_SECRET_ACCESS_KEY, undefined);
     assert.equal(minimal.OPENAI_API_KEY, undefined);
     assert.equal(minimal.NODE_OPTIONS, undefined);
-    assert.equal(minimal.ALLOWED_TOOL_FLAG, undefined);
+    assert.equal(minimal.AICB_GATE_CFG_FLAG, undefined);
+    assert.equal(minimal.DATABASE_URL, undefined);
     assert.equal(minimal.LANG, undefined); // restrictive drops optional platform keys
     assert.ok(isRestrictiveSandboxMode('restrictive'));
     assert.ok(isRestrictiveSandboxMode('strict'));
 
-    // Ordinary non-secret build flags may be allowlisted
+    // Fixed safe names and AICB_GATE_CFG_* may be allowlisted
     const withAllow = buildGateEnv({
-      envAllowlist: ['ALLOWED_TOOL_FLAG'],
+      envAllowlist: ['NODE_ENV', 'AICB_GATE_CFG_FLAG'],
       sandboxMode: null,
       parentEnv: parent,
     });
-    assert.equal(withAllow.ALLOWED_TOOL_FLAG, 'ok-when-allowlisted');
+    assert.equal(withAllow.NODE_ENV, 'test');
+    assert.equal(withAllow.AICB_GATE_CFG_FLAG, 'ok-when-allowlisted');
     assert.equal(withAllow.AICB_SENTINEL_SECRET, undefined);
     assert.equal(withAllow.AWS_SECRET_ACCESS_KEY, undefined);
     assert.equal(withAllow.LANG, 'C');
 
-    // Credential-like names in envAllowlist fail closed (even if arm asks)
+    // Non-allowlisted / credential / connection-string names fail closed
     for (const bad of [
       'AICB_SENTINEL_SECRET',
       'AWS_SECRET_ACCESS_KEY',
@@ -694,34 +736,60 @@ process.exit(1);
       'AUTHORIZATION',
       'MY_PASSWORD',
       'BEARER_TOKEN',
+      'DATABASE_URL',
+      'COOKIE',
+      'JWT',
+      'ALLOWED_TOOL_FLAG',
+      'CFLAGS',
+      'NODE_OPTIONS',
     ]) {
       assert.throws(
         () => normalizeEnvAllowlist([bad]),
-        /credential|capability|envAllowlist/i,
+        /allowlist|credential|capability|envAllowlist|safe/i,
       );
       assert.throws(
         () =>
           buildGateEnv({
-            envAllowlist: ['ALLOWED_TOOL_FLAG', bad],
+            envAllowlist: ['NODE_ENV', bad],
             parentEnv: parent,
           }),
-        /credential|capability|envAllowlist/i,
+        /allowlist|credential|capability|envAllowlist|safe/i,
       );
     }
 
-    // Object-form allowlist uses keys only (non-secret)
+    // Object-form allowlist uses keys only (safe names)
     const objAllow = buildGateEnv({
-      envAllowlist: { ALLOWED_TOOL_FLAG: 'ignored-value' },
+      envAllowlist: { NODE_ENV: 'ignored-value', AICB_GATE_CFG_FLAG: 'ignored' },
       parentEnv: parent,
     });
-    assert.equal(objAllow.ALLOWED_TOOL_FLAG, 'ok-when-allowlisted');
+    assert.equal(objAllow.NODE_ENV, 'test');
+    assert.equal(objAllow.AICB_GATE_CFG_FLAG, 'ok-when-allowlisted');
     assert.throws(
       () =>
         buildGateEnv({
           envAllowlist: { AWS_SECRET_ACCESS_KEY: 'x' },
           parentEnv: parent,
         }),
-      /credential|capability|envAllowlist/i,
+      /allowlist|credential|capability|envAllowlist|safe/i,
+    );
+
+    // AICB_GATE_CFG value contract rejects URLs / JWTs / overlong values
+    assert.equal(isSafeGateCfgValue('ok-flag'), true);
+    assert.equal(isSafeGateCfgValue('host:5432/db'), false); // colon not allowed
+    assert.equal(
+      isSafeGateCfgValue('eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig'),
+      false,
+    );
+    assert.throws(
+      () =>
+        buildGateEnv({
+          envAllowlist: ['AICB_GATE_CFG_DSN'],
+          parentEnv: {
+            PATH: '/usr/bin',
+            AICB_GATE_CFG_DSN: 'host:5432/db',
+          },
+        }),
+      /safe-value|AICB_GATE_CFG/i,
     );
 
     // sanitize strips previews
@@ -788,6 +856,7 @@ process.exit(1);
       buildGateEnv,
       normalizeEnvAllowlist,
       isCredentialLikeEnvKey,
+      isAllowlistedGateEnvName,
     } = await import('../harness/gates.js');
     const SENTINEL = `aicb-sentinel-${Date.now()}-secret-value`;
     const parent = {
@@ -801,56 +870,85 @@ process.exit(1);
       OPENAI_API_KEY: 'sk-leaked-if-present',
       GITHUB_TOKEN: 'ghp-leaked-if-present',
       SSH_AUTH_SOCK: '/tmp/ssh-agent.sock',
-      ALLOWED_TOOL_FLAG: 'build-flag-ok',
+      DATABASE_URL: 'dsn-leaked-if-present',
+      JWT: 'eyJ.xx.yy',
+      COOKIE: 'session=leaked',
+      NODE_ENV: 'test',
+      AICB_GATE_CFG_FLAG: 'build-flag-ok',
     };
 
-    // Even when an arm requests credential names, fail closed — never admit them
+    // Even when an arm requests credential / non-allowlisted names, fail closed
     for (const bad of [
       'AICB_SENTINEL_SECRET',
       'AWS_SECRET_ACCESS_KEY',
       'OPENAI_API_KEY',
       'GITHUB_TOKEN',
       'SSH_AUTH_SOCK',
+      'DATABASE_URL',
+      'JWT',
+      'COOKIE',
+      'ALLOWED_TOOL_FLAG',
     ]) {
-      assert.equal(isCredentialLikeEnvKey(bad), true);
+      if (
+        [
+          'AICB_SENTINEL_SECRET',
+          'AWS_SECRET_ACCESS_KEY',
+          'OPENAI_API_KEY',
+          'GITHUB_TOKEN',
+          'SSH_AUTH_SOCK',
+          'DATABASE_URL',
+          'JWT',
+          'COOKIE',
+        ].includes(bad)
+      ) {
+        assert.equal(isCredentialLikeEnvKey(bad), true);
+      }
+      assert.equal(isAllowlistedGateEnvName(bad), false);
       assert.throws(
         () =>
           buildGateEnv({
             envAllowlist: [bad],
             parentEnv: parent,
           }),
-        /credential|capability|envAllowlist/i,
+        /allowlist|credential|capability|envAllowlist|safe/i,
       );
-      assert.throws(() => normalizeEnvAllowlist([bad]), /credential|capability/i);
+      assert.throws(
+        () => normalizeEnvAllowlist([bad]),
+        /allowlist|credential|capability|safe/i,
+      );
     }
 
-    // Non-secret allowlist still works
+    // Safe allowlist still works; secrets still excluded
     const okEnv = buildGateEnv({
-      envAllowlist: ['ALLOWED_TOOL_FLAG'],
+      envAllowlist: ['NODE_ENV', 'AICB_GATE_CFG_FLAG'],
       sandboxMode: 'restrictive',
       parentEnv: parent,
     });
-    assert.equal(okEnv.ALLOWED_TOOL_FLAG, 'build-flag-ok');
+    assert.equal(okEnv.NODE_ENV, 'test');
+    assert.equal(okEnv.AICB_GATE_CFG_FLAG, 'build-flag-ok');
     assert.equal(okEnv.AICB_SENTINEL_SECRET, undefined);
     assert.equal(okEnv.AWS_SECRET_ACCESS_KEY, undefined);
     assert.equal(okEnv.OPENAI_API_KEY, undefined);
     assert.equal(okEnv.GITHUB_TOKEN, undefined);
     assert.equal(okEnv.SSH_AUTH_SOCK, undefined);
+    assert.equal(okEnv.DATABASE_URL, undefined);
     assert.ok(!JSON.stringify(okEnv).includes(SENTINEL));
     assert.ok(!JSON.stringify(okEnv).includes('aws-leaked'));
     assert.ok(!JSON.stringify(okEnv).includes('sk-leaked'));
     assert.ok(!JSON.stringify(okEnv).includes('ghp-leaked'));
+    assert.ok(!JSON.stringify(okEnv).includes('dsn-leaked-if-present'));
 
     // network-allowed posture uses the same fail-closed builder
     const netEnv = buildGateEnv({
-      envAllowlist: ['ALLOWED_TOOL_FLAG'],
+      envAllowlist: ['NODE_ENV', 'AICB_GATE_CFG_FLAG'],
       sandboxMode: 'restrictive',
       parentEnv: parent,
     });
     assert.equal(netEnv.AICB_SENTINEL_SECRET, undefined);
+    assert.equal(netEnv.DATABASE_URL, undefined);
     assert.ok(!JSON.stringify(netEnv).includes(SENTINEL));
 
-    // runGates must not accept credential allowlist (throws before gate run)
+    // runGates must not accept credential / non-allowlisted names (throws)
     const dirThrow = await mkdtemp(path.join(os.tmpdir(), 'aicb-gate-cred-'));
     try {
       await assert.rejects(
@@ -871,7 +969,28 @@ process.exit(1);
             parentEnv: parent,
             task: { networkPolicy: { allowed: true } },
           }),
-        /credential|capability|envAllowlist/i,
+        /allowlist|credential|capability|envAllowlist|safe/i,
+      );
+      // network-allowed still fail closed for DATABASE_URL
+      await assert.rejects(
+        () =>
+          runGates({
+            gates: [
+              {
+                gate: 'tests',
+                command: 'true',
+                expectedExitCode: 0,
+                order: 1,
+                required: true,
+              },
+            ],
+            workspaceDir: dirThrow,
+            confinement: { available: false, reason: 'forced' },
+            envAllowlist: ['DATABASE_URL'],
+            parentEnv: parent,
+            task: { networkPolicy: { allowed: true } },
+          }),
+        /allowlist|credential|capability|envAllowlist|safe/i,
       );
     } finally {
       await rm(dirThrow, { recursive: true, force: true });
@@ -890,7 +1009,7 @@ process.exit(1);
           {
             gate: 'tests',
             command:
-              'case "${AICB_SENTINEL_SECRET+set}${AWS_SECRET_ACCESS_KEY+set}${OPENAI_API_KEY+set}${GITHUB_TOKEN+set}${SSH_AUTH_SOCK+set}" in *set*) exit 1;; *) exit 0;; esac',
+              'case "${AICB_SENTINEL_SECRET+set}${AWS_SECRET_ACCESS_KEY+set}${OPENAI_API_KEY+set}${GITHUB_TOKEN+set}${SSH_AUTH_SOCK+set}${DATABASE_URL+set}" in *set*) exit 1;; *) exit 0;; esac',
             expectedExitCode: 0,
             order: 1,
             required: true,
@@ -898,7 +1017,7 @@ process.exit(1);
         ],
         workspaceDir: dir,
         confinement,
-        envAllowlist: ['ALLOWED_TOOL_FLAG'],
+        envAllowlist: ['NODE_ENV', 'AICB_GATE_CFG_FLAG'],
         sandboxMode: 'restrictive',
         parentEnv: parent,
         task: { networkPolicy: { allowed: true } },
@@ -927,6 +1046,7 @@ process.exit(1);
       assert.ok(!serialized.includes('sk-leaked'));
       assert.ok(!serialized.includes('ghp-leaked'));
       assert.ok(!serialized.includes('/tmp/ssh-agent.sock'));
+      assert.ok(!serialized.includes('dsn-leaked-if-present'));
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -1187,7 +1307,7 @@ process.exit(1);
     // Must NOT silently pass via substring match on "static-linter"
     assert.notEqual(noSilentTests.status, 'passed');
 
-    // PASS via oraclePath explicit binding
+    // PASS via oraclePath only with exclusive executed evidence (oracleExecuted)
     const oracleBind = await evaluateRequirements({
       gate: reqGate,
       task: {
@@ -1210,10 +1330,41 @@ process.exit(1);
           status: 'passed',
           classificationSignal: 'PASS',
           oraclePath: 'task-x/check.js',
+          oracleExecuted: true,
         },
       ],
     });
     assert.equal(oracleBind.status, 'passed');
+
+    // Claimed oraclePath without exclusive execution cannot substantiate
+    const claimedOnly = await evaluateRequirements({
+      gate: reqGate,
+      task: {
+        expectedOutcome: {
+          mustHave: [
+            {
+              id: 'consumer',
+              description: 'oracle',
+              substantiation: 'static',
+              oraclePath: 'task-x/check.js',
+            },
+          ],
+        },
+      },
+      priorGateResults: [
+        {
+          gate: 'oracle',
+          required: true,
+          status: 'passed',
+          classificationSignal: 'PASS',
+          // Mixed/claim: has oraclePath but never exclusive-executed
+          command: 'true',
+          oraclePath: 'task-x/check.js',
+        },
+      ],
+    });
+    assert.equal(claimedOnly.status, 'execution_unavailable');
+    assert.notEqual(claimedOnly.status, 'passed');
   });
 
   it('commandless oracle path resolves under oracleRoot; confinement unavailable fails closed', async () => {
@@ -1265,6 +1416,7 @@ process.exit(1);
       );
 
       // Confinement unavailable → execution_unavailable (never silent PASS)
+      // Unexecuted: must NOT emit oraclePath as execution evidence
       const results = await runGates({
         gates: [
           {
@@ -1282,7 +1434,8 @@ process.exit(1);
       assert.equal(results.length, 1);
       assert.equal(results[0].status, 'execution_unavailable');
       assert.equal(results[0].classificationSignal, 'INFRA_FAIL');
-      assert.equal(results[0].oraclePath, scriptRel);
+      assert.equal(results[0].oraclePath, undefined);
+      assert.equal(results[0].oracleExecuted, undefined);
       assert.match(String(results[0].command), /node/);
 
       // Missing oraclePath commandless → unavailable
@@ -1296,7 +1449,7 @@ process.exit(1);
       assert.equal(missing.status, 'execution_unavailable');
       assert.match(String(missing.evidence), /oraclePath/);
 
-      // Path escape via evaluateOracleGate
+      // Path escape via evaluateOracleGate — unexecuted, no oraclePath evidence
       const escaped = await evaluateOracleGate({
         workspaceDir: workspace,
         gate: {
@@ -1311,6 +1464,48 @@ process.exit(1);
       });
       assert.equal(escaped.status, 'execution_unavailable');
       assert.match(String(escaped.infraFailure), /oracle_path/);
+      assert.equal(escaped.oraclePath, undefined);
+
+      // Mixed command + oraclePath: fail closed, no execution evidence
+      const mixed = await evaluateOracleGate({
+        workspaceDir: workspace,
+        gate: {
+          gate: 'oracle',
+          command: 'true',
+          oraclePath: scriptRel,
+          order: 1,
+          required: true,
+        },
+        oracleRoot,
+        confinement: { available: true, kind: 'sandbox-exec', binary: '/usr/bin/sandbox-exec' },
+        env: buildGateEnv({ parentEnv: { PATH: '/usr/bin:/bin' } }),
+      });
+      assert.equal(mixed.status, 'execution_unavailable');
+      assert.equal(mixed.classificationSignal, 'INFRA_FAIL');
+      assert.equal(mixed.infraFailure, 'oracle_command_oraclePath_conflict');
+      assert.equal(mixed.oraclePath, undefined);
+      assert.equal(mixed.oracleExecuted, undefined);
+      assert.equal(mixed.command, null);
+      assert.match(String(mixed.evidence), /both command and oraclePath|mixed/i);
+
+      // Requirements cannot be substantiated by a mixed claim
+      const { evaluateRequirements } = await import('../harness/gates.js');
+      const mixedBind = await evaluateRequirements({
+        gate: { gate: 'requirements', order: 2, required: true },
+        task: {
+          expectedOutcome: {
+            mustHave: [
+              {
+                id: 'consumer',
+                substantiation: 'static',
+                oraclePath: scriptRel,
+              },
+            ],
+          },
+        },
+        priorGateResults: [mixed],
+      });
+      assert.equal(mixedBind.status, 'execution_unavailable');
     } finally {
       await rm(oracleRoot, { recursive: true, force: true });
       await rm(workspace, { recursive: true, force: true });

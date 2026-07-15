@@ -156,6 +156,8 @@ describe('export + quarantine + cli', () => {
         campaignDir: campaign,
         outDir: out,
         includeRaw: false,
+        // Sanitization-only fixture; evidence binding covered in digest-evidence tests
+        skipEvidenceVerify: true,
       });
 
       await assert.rejects(() => access(path.join(out, 'raw', 't1', 'stdout.txt')));
@@ -191,6 +193,109 @@ describe('export + quarantine + cli', () => {
 
       const readme = await readFile(path.join(out, 'EXPORT_README.txt'), 'utf8');
       assert.ok(!readme.includes(campaign));
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+      await rm(out, { recursive: true, force: true });
+    }
+  });
+
+  it('export strips free-form reason strings; keeps bounded reasonCode only', async () => {
+    const {
+      exportSanitizedBundle,
+      sanitizeExportReasonCode,
+      isExportSafeReasonCode,
+    } = await import('../harness/export.js');
+    const {
+      isBoundedIdentifier,
+      sanitizeBoundedIdentifier,
+    } = await import('../harness/gates.js');
+
+    assert.equal(isBoundedIdentifier('provider_timeout'), true);
+    assert.equal(isExportSafeReasonCode('provider_timeout'), true);
+    assert.equal(sanitizeExportReasonCode('provider_timeout'), 'provider_timeout');
+    assert.equal(
+      sanitizeBoundedIdentifier('free form reason with spaces and secrets'),
+      null,
+    );
+    assert.equal(
+      sanitizeExportReasonCode('Authorization: Bearer sk-leaked'),
+      null,
+    );
+
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-camp-rc-'));
+    const out = await mkdtemp(path.join(os.tmpdir(), 'aicb-out-rc-'));
+    try {
+      await mkdir(path.join(campaign, 'results', 't1'), { recursive: true });
+      await writeFile(
+        path.join(campaign, 'results', 't1', 'result.json'),
+        JSON.stringify({
+          id: 't1',
+          classification: 'INFRA_FAIL',
+          classificationReason:
+            'invoker infra failure: provider said Authorization: Bearer redacted-token and DATABASE_URL=dsn-must-not-export',
+          reasonCode: 'provider_timeout',
+          outcomeKind: 'timeout',
+          // free-form adversarial reasonCode must not survive
+          error: 'Connection refused at 10.0.0.1 with cookie=session',
+          gateResults: [
+            {
+              gate: 'oracle',
+              status: 'passed',
+              oraclePath: 'task/x.js',
+              oracleExecuted: true,
+              evidence:
+                'oracle exit 0 matches expected 0 with secret=should-not-export',
+              infraFailure: 'oracle_command_oraclePath_conflict',
+            },
+            {
+              gate: 'oracle',
+              status: 'passed',
+              // claimed path without exclusive execution — not exported as evidence
+              oraclePath: 'task/claimed.js',
+              command: 'true',
+            },
+          ],
+        }),
+        'utf8',
+      );
+
+      await exportSanitizedBundle({
+        campaignDir: campaign,
+        outDir: out,
+        includeRaw: false,
+        // Sanitization-only fixture; evidence binding covered in digest-evidence tests
+        skipEvidenceVerify: true,
+      });
+
+      const result = await readFile(
+        path.join(out, 'results', 't1', 'result.json'),
+        'utf8',
+      );
+      const parsed = JSON.parse(result);
+
+      // Bounded identifiers retained
+      assert.equal(parsed.reasonCode, 'provider_timeout');
+      assert.equal(parsed.outcomeKind, 'timeout');
+      assert.equal(parsed.classification, 'INFRA_FAIL');
+
+      // Free-form classificationReason / error stripped
+      assert.equal(parsed.classificationReason, undefined);
+      assert.equal(parsed.error, undefined);
+      assert.ok(!result.includes('Bearer'));
+      assert.ok(!result.includes('sk-secret'));
+      assert.ok(!result.includes('DATABASE_URL'));
+      assert.ok(!result.includes('dsn-must-not-export'));
+      assert.ok(!result.includes('redacted-token'));
+      assert.ok(!result.includes('cookie=session'));
+      assert.ok(!result.includes('secret=should-not-export'));
+      assert.ok(!result.includes('should-not-export'));
+
+      // gate free-form evidence dropped; exclusive oraclePath kept
+      assert.equal(parsed.gateResults[0].oraclePath, 'task/x.js');
+      assert.equal(parsed.gateResults[0].oracleExecuted, true);
+      assert.equal(parsed.gateResults[0].evidence, undefined);
+      // claimed (non-executed) oraclePath not exported
+      assert.equal(parsed.gateResults[1].oraclePath, undefined);
     } finally {
       await rm(campaign, { recursive: true, force: true });
       await rm(out, { recursive: true, force: true });

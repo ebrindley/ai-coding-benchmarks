@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://ai-coding-benchmarks.local/schemas/report.schema.json",
   "title": "SummaryReport",
-  "description": "Summary report contract. Aggregation keys MUST NOT mix distinct invocationPath, resolvedModel, or postureFingerprint values into a single cell. Each stats cell is keyed by a homogeneous (arm, taskId, invocationPath, model, postureFingerprint) slice.",
+  "description": "Summary report contract emitted by buildReport. Aggregation keys MUST NOT mix distinct invocationPath, resolvedModel, requestedModel, or postureFingerprint values into a single cell. Each stats cell is keyed by a homogeneous (arm, taskId, invocationPath, requestedModel, resolvedModel, postureFingerprint) slice. Global totals may count n/completed but leave passRate null when the set is heterogeneous.",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -11,7 +11,9 @@
     "totals",
     "byArm",
     "byTask",
-    "cells"
+    "cells",
+    "refusals",
+    "classifications"
   ],
   "additionalProperties": false,
   "properties": {
@@ -50,7 +52,7 @@
             "type": "string",
             "enum": ["poetic-adapter", "native-cli", "poetic-system"]
           },
-          "requestedModel": { "type": "string" },
+          "requestedModel": { "type": ["string", "null"] },
           "resolvedModel": { "type": ["string", "null"] },
           "postureFingerprint": { "type": ["string", "null"] },
           "stats": { "$ref": "#/definitions/statsBlock" }
@@ -78,6 +80,7 @@
                   "type": "string",
                   "enum": ["poetic-adapter", "native-cli", "poetic-system"]
                 },
+                "requestedModel": { "type": ["string", "null"] },
                 "resolvedModel": { "type": ["string", "null"] },
                 "postureFingerprint": { "type": ["string", "null"] },
                 "stats": { "$ref": "#/definitions/statsBlock" }
@@ -94,7 +97,7 @@
     },
     "refusals": {
       "type": "array",
-      "description": "Recorded attempts to aggregate across incompatible dimensions",
+      "description": "Recorded attempts to aggregate across incompatible dimensions (always present; may be empty)",
       "items": {
         "type": "object",
         "required": ["reason", "dimensions"],
@@ -127,7 +130,7 @@
   "definitions": {
     "statsBlock": {
       "type": "object",
-      "required": ["n", "completed"],
+      "required": ["n", "completed", "pass", "fail", "noOp", "infraFail", "timeout", "passRate", "meanDurationMs"],
       "additionalProperties": false,
       "properties": {
         "n": { "type": "integer", "minimum": 0 },
@@ -164,7 +167,7 @@
           "type": "string",
           "enum": ["poetic-adapter", "native-cli", "poetic-system"]
         },
-        "requestedModel": { "type": "string" },
+        "requestedModel": { "type": ["string", "null"] },
         "resolvedModel": { "type": ["string", "null"] },
         "postureFingerprint": { "type": ["string", "null"] },
         "provider": { "type": "string" },
