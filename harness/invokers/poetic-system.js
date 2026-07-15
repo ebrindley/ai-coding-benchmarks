@@ -21,6 +21,9 @@ import { spawnControlled } from './spawn-controlled.js';
  * @property {string} [signal]
  * @property {string[]} [argv]
  * @property {null} [resolvedModel]
+ * @property {number} [stdoutTruncatedChars] - chars discarded above capture limit
+ * @property {number} [stderrTruncatedChars] - chars discarded above capture limit
+ * @property {boolean} [rawTruncated] - true when either stream was truncated
  */
 
 /**
@@ -85,6 +88,7 @@ export function buildPoeticSystemArgv({ prompt, provider, model, timeoutMs }) {
  * @param {unknown} [opts.systemPromptPath]
  * @param {string} opts.campaignDir - campaign control tree hidden via OS confinement
  * @param {import('./provider-confine.js').ProviderConfinementInfo} [opts.confinement]
+ * @param {number} [opts.captureLimit] - optional override for test injection only; production omits (DEFAULT_CAPTURE_LIMIT)
  * @returns {Promise<InvokerResult>}
  */
 export async function invokePoeticSystem({
@@ -100,6 +104,7 @@ export async function invokePoeticSystem({
   systemPromptPath,
   campaignDir,
   confinement,
+  captureLimit,
   ...rest
 }) {
   if (campaignDir == null || String(campaignDir).trim() === '') {
@@ -191,7 +196,22 @@ export async function invokePoeticSystem({
     campaignDir: String(campaignDir),
     confine: true,
     confinement,
+    // Test-only injection; production callers never pass captureLimit.
+    ...(captureLimit != null ? { captureLimit } : {}),
   });
+
+  const stdoutTruncatedChars =
+    typeof result.stdoutTruncatedChars === 'number' &&
+    result.stdoutTruncatedChars > 0
+      ? result.stdoutTruncatedChars
+      : undefined;
+  const stderrTruncatedChars =
+    typeof result.stderrTruncatedChars === 'number' &&
+    result.stderrTruncatedChars > 0
+      ? result.stderrTruncatedChars
+      : undefined;
+  const rawTruncated =
+    stdoutTruncatedChars != null || stderrTruncatedChars != null;
 
   return {
     exitCode: result.exitCode,
@@ -206,5 +226,9 @@ export async function invokePoeticSystem({
       : {}),
     ...(result.infraFailure ? { infraFailure: result.infraFailure } : {}),
     ...(result.signal ? { signal: result.signal } : {}),
+    // Propagate capture truncation so digests fail closed on incomplete raw.
+    ...(stdoutTruncatedChars != null ? { stdoutTruncatedChars } : {}),
+    ...(stderrTruncatedChars != null ? { stderrTruncatedChars } : {}),
+    ...(rawTruncated ? { rawTruncated: true } : {}),
   };
 }

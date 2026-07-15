@@ -330,6 +330,18 @@ export function isRawEvidenceUnavailable(invocationPath, invokerResult) {
   const stderr = r.stderr == null ? '' : String(r.stderr);
   const hasStreamEvidence = stdout.length > 0 || stderr.length > 0;
 
+  // Capture truncation: retained prefixes are incomplete raw. Fail closed so
+  // digests are marked rawEvidenceUnavailable (never reportable as complete).
+  const outTrunc = Number(r.stdoutTruncatedChars);
+  const errTrunc = Number(r.stderrTruncatedChars);
+  if (
+    r.rawTruncated === true ||
+    (Number.isFinite(outTrunc) && outTrunc > 0) ||
+    (Number.isFinite(errTrunc) && errTrunc > 0)
+  ) {
+    return true;
+  }
+
   // poetic-adapter: only fully ingested provider raw is reportable evidence.
   // Missing raw, bind failure, or non-actual marker → unavailable (never empty
   // quiet-CLI bytes as verified digests).

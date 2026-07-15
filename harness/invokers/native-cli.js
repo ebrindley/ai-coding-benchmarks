@@ -58,6 +58,9 @@ function assertHarnessEnv(env, opts = {}) {
  * @property {string} [signal]
  * @property {string} [promptTransport]
  * @property {boolean} [promptFileUsed] - true when prompt-file transport was used (path not returned; cleaned up)
+ * @property {number} [stdoutTruncatedChars] - chars discarded above capture limit
+ * @property {number} [stderrTruncatedChars] - chars discarded above capture limit
+ * @property {boolean} [rawTruncated] - true when either stream was truncated
  */
 
 /**
@@ -84,6 +87,7 @@ function assertHarnessEnv(env, opts = {}) {
  * @param {string} opts.campaignDir - campaign control tree hidden via OS confinement
  * @param {string} [opts.scratchDir] - preferred temp dir under execution workspace for prompt-file
  * @param {import('./provider-confine.js').ProviderConfinementInfo} [opts.confinement]
+ * @param {number} [opts.captureLimit] - optional override for test injection only; production omits (DEFAULT_CAPTURE_LIMIT)
  * @returns {Promise<InvokerResult>}
  */
 export async function invokeNativeCli({
@@ -100,6 +104,7 @@ export async function invokeNativeCli({
   campaignDir,
   scratchDir,
   confinement,
+  captureLimit,
   ...rest
 }) {
   // Refuse credential/env smuggling from task YAML (before confinement setup)
@@ -279,7 +284,22 @@ export async function invokeNativeCli({
         ...(scratchDir ? [String(scratchDir)] : []),
         ...(promptTempDir ? [promptTempDir] : []),
       ],
+      // Test-only injection; production callers never pass captureLimit.
+      ...(captureLimit != null ? { captureLimit } : {}),
     });
+
+    const stdoutTruncatedChars =
+      typeof result.stdoutTruncatedChars === 'number' &&
+      result.stdoutTruncatedChars > 0
+        ? result.stdoutTruncatedChars
+        : undefined;
+    const stderrTruncatedChars =
+      typeof result.stderrTruncatedChars === 'number' &&
+      result.stderrTruncatedChars > 0
+        ? result.stderrTruncatedChars
+        : undefined;
+    const rawTruncated =
+      stdoutTruncatedChars != null || stderrTruncatedChars != null;
 
     return {
       exitCode: result.exitCode,
@@ -294,6 +314,10 @@ export async function invokeNativeCli({
         : {}),
       ...(result.infraFailure ? { infraFailure: result.infraFailure } : {}),
       ...(result.signal ? { signal: result.signal } : {}),
+      // Propagate capture truncation so digests fail closed on incomplete raw.
+      ...(stdoutTruncatedChars != null ? { stdoutTruncatedChars } : {}),
+      ...(stderrTruncatedChars != null ? { stderrTruncatedChars } : {}),
+      ...(rawTruncated ? { rawTruncated: true } : {}),
     };
   } finally {
     // Always remove temporary prompt directory/file after child completes or fails.

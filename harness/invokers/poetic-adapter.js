@@ -9,9 +9,10 @@
  * into the invoker result. Non-success outcomes are never treated as success.
  *
  * Fresh result binding: before each invoke the harness securely clears
- * `outputPath` (never following a symlink), then after spawn accepts success
- * only when the artifact `requestId` exactly equals the current request's
- * `requestId` (rejects stale/pre-planted success for another request).
+ * `outputPath` (never following a symlink), then after spawn accepts the
+ * result only when the artifact is fully schema-valid and identity-bound to
+ * the frozen request (requestId + provider + requested model). Stale or
+ * mismatched provider/model evidence is never treated as fullyBound.
  */
 
 import { writeFile, mkdir, readFile, lstat, unlink } from 'node:fs/promises';
@@ -125,6 +126,127 @@ export function sanitizeAdapterReasonCode(value) {
  */
 
 /**
+ * @typedef {object} ExpectedInvokeIdentity
+ * @property {string} requestId
+ * @property {string} provider
+ * @property {string | null | undefined} [requestedModel]
+ */
+
+/**
+ * Normalize requested-model identity for bind comparison.
+ * Absent / null / empty → null (request did not pin a model).
+ * Non-empty string → that string.
+ *
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function normalizeRequestedModelIdentity(value) {
+  if (value == null) return null;
+  if (typeof value !== 'string') return null;
+  const s = value.trim();
+  return s === '' ? null : s;
+}
+
+/**
+ * Fail-closed invalid ParsedInvokeResult helper.
+ * @param {string} infraFailure
+ * @param {string} parseError
+ * @param {Partial<ParsedInvokeResult>} [extra]
+ * @returns {ParsedInvokeResult}
+ */
+function invalidParse(infraFailure, parseError, extra = {}) {
+  return {
+    valid: false,
+    success: false,
+    outcomeKind: null,
+    reasonCode: null,
+    timedOut: false,
+    infraFailure,
+    parseError,
+    artifact: null,
+    ...extra,
+  };
+}
+
+/**
+ * Type-check model.resolved under poetic.provider.invoke.result.v1.
+ * - availability: "available" requires non-empty string value
+ * - availability: "unavailable" may include optional reason (string if present)
+ *
+ * @param {unknown} resolved
+ * @returns {{ ok: true } | { ok: false, error: string, parseError: string }}
+ */
+function validateModelResolved(resolved) {
+  if (resolved == null || typeof resolved !== 'object' || Array.isArray(resolved)) {
+    return {
+      ok: false,
+      error: 'invoke result model.resolved must be an object',
+      parseError: 'invalid-model-resolved',
+    };
+  }
+  const r = /** @type {Record<string, unknown>} */ (resolved);
+  const availability =
+    r.availability != null ? String(r.availability).trim() : '';
+  if (availability === 'available') {
+    if (typeof r.value !== 'string' || r.value.trim() === '') {
+      return {
+        ok: false,
+        error:
+          'invoke result model.resolved.availability is available but value is missing or not a non-empty string',
+        parseError: 'model-resolved-available-missing-value',
+      };
+    }
+    return { ok: true };
+  }
+  if (availability === 'unavailable') {
+    if (r.reason != null && typeof r.reason !== 'string') {
+      return {
+        ok: false,
+        error: 'invoke result model.resolved.reason must be a string when present',
+        parseError: 'invalid-model-resolved-reason',
+      };
+    }
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    error: `invoke result model.resolved.availability must be "available" or "unavailable", got ${availability || '(missing)'}`,
+    parseError: 'invalid-model-resolved-availability',
+  };
+}
+
+/**
+ * Type-check model object under poetic.provider.invoke.result.v1.
+ *
+ * model.requested contract:
+ * - optional at parse time (string or null/absent)
+ * - non-string non-null is invalid
+ * - identity consistency with the frozen request is enforced by
+ *   bindInvokeResultToRequest (not parse alone)
+ *
+ * @param {unknown} model
+ * @returns {{ ok: true } | { ok: false, error: string, parseError: string }}
+ */
+function validateModelObject(model) {
+  if (model == null || typeof model !== 'object' || Array.isArray(model)) {
+    return {
+      ok: false,
+      error: 'invoke result missing model object',
+      parseError: 'missing-model',
+    };
+  }
+  const m = /** @type {Record<string, unknown>} */ (model);
+  if ('requested' in m && m.requested != null && typeof m.requested !== 'string') {
+    return {
+      ok: false,
+      error: 'invoke result model.requested must be a string or null/absent',
+      parseError: 'invalid-model-requested',
+    };
+  }
+  return validateModelResolved(m.resolved);
+}
+
+/**
  * @typedef {object} InvokerResult
  * @property {number | null} exitCode
  * @property {boolean} timedOut
@@ -216,7 +338,19 @@ export function mapOutcomeKind(kind, reasonCode = null) {
 
 /**
  * Parse and validate a poetic.provider.invoke.result.v1 artifact.
- * Fail closed: missing schema, missing outcome, or unknown kind → invalid.
+ *
+ * Strict contract (fail closed — invalid never retains model/artifact evidence):
+ * - schema === poetic.provider.invoke.result.v1
+ * - requestId: non-empty string
+ * - provider: non-empty string
+ * - model: object with:
+ *     requested?: string | null (identity match deferred to bind)
+ *     resolved: { availability: "available"|"unavailable", value?|reason? }
+ * - outcome: { kind ∈ POETIC_OUTCOME_KINDS, reasonCode?: sanitized }
+ * - process / evidence / artifact: if present, must be plain objects
+ *
+ * Non-success outcome kinds remain valid when the rest of the schema is sound;
+ * identity binding (requestId/provider/model.requested) is separate.
  *
  * @param {unknown} artifact - parsed JSON or JSON string from poetic --output
  * @returns {ParsedInvokeResult}
@@ -228,74 +362,68 @@ export function parseInvokeResult(artifact) {
       obj = JSON.parse(artifact);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return {
-        valid: false,
-        success: false,
-        outcomeKind: null,
-        reasonCode: null,
-        timedOut: false,
-        infraFailure: `unparseable invoke result: ${message}`,
-        parseError: message,
-        artifact: null,
-      };
+      return invalidParse(`unparseable invoke result: ${message}`, message);
     }
   }
 
   if (obj == null || typeof obj !== 'object' || Array.isArray(obj)) {
-    return {
-      valid: false,
-      success: false,
-      outcomeKind: null,
-      reasonCode: null,
-      timedOut: false,
-      infraFailure: 'invoke result is not a JSON object',
-      parseError: 'not-object',
-      artifact: null,
-    };
+    return invalidParse('invoke result is not a JSON object', 'not-object');
   }
 
   const rec = /** @type {Record<string, unknown>} */ (obj);
   const schema = rec.schema != null ? String(rec.schema) : '';
   if (schema !== POETIC_INVOKE_RESULT_SCHEMA) {
-    return {
-      valid: false,
-      success: false,
-      outcomeKind: null,
-      reasonCode: null,
-      timedOut: false,
-      infraFailure: `invoke result schema mismatch: expected ${POETIC_INVOKE_RESULT_SCHEMA}, got ${schema || '(missing)'}`,
-      parseError: 'schema-mismatch',
-      // Fail closed: invalid parse never retains model/artifact evidence
-      artifact: null,
-    };
+    return invalidParse(
+      `invoke result schema mismatch: expected ${POETIC_INVOKE_RESULT_SCHEMA}, got ${schema || '(missing)'}`,
+      'schema-mismatch',
+    );
+  }
+
+  // Required identity fields on the result itself (bind still checks vs request).
+  if (typeof rec.requestId !== 'string' || rec.requestId.trim() === '') {
+    return invalidParse(
+      'invoke result requestId must be a non-empty string',
+      'missing-requestId',
+    );
+  }
+  if (typeof rec.provider !== 'string' || rec.provider.trim() === '') {
+    return invalidParse(
+      'invoke result provider must be a non-empty string',
+      'missing-provider',
+    );
+  }
+
+  const modelCheck = validateModelObject(rec.model);
+  if (!modelCheck.ok) {
+    return invalidParse(modelCheck.error, modelCheck.parseError);
+  }
+
+  // Optional envelope fields: type-check when present (never accept arrays / scalars).
+  for (const key of /** @type {const} */ (['process', 'evidence', 'artifact'])) {
+    if (key in rec && rec[key] != null) {
+      if (typeof rec[key] !== 'object' || Array.isArray(rec[key])) {
+        return invalidParse(
+          `invoke result ${key} must be an object when present`,
+          `invalid-${key}`,
+        );
+      }
+    }
   }
 
   const outcome = rec.outcome;
   if (outcome == null || typeof outcome !== 'object' || Array.isArray(outcome)) {
-    return {
-      valid: false,
-      success: false,
-      outcomeKind: null,
-      reasonCode: null,
-      timedOut: false,
-      infraFailure: 'invoke result missing outcome object',
-      parseError: 'missing-outcome',
-      artifact: null,
-    };
+    return invalidParse(
+      'invoke result missing outcome object',
+      'missing-outcome',
+    );
   }
 
   const o = /** @type {Record<string, unknown>} */ (outcome);
   if (o.kind == null || String(o.kind).trim() === '') {
-    return {
-      valid: false,
-      success: false,
-      outcomeKind: null,
-      reasonCode: null,
-      timedOut: false,
-      infraFailure: 'invoke result outcome.kind is missing',
-      parseError: 'missing-kind',
-      artifact: null,
-    };
+    return invalidParse(
+      'invoke result outcome.kind is missing',
+      'missing-kind',
+    );
   }
 
   const kind = String(o.kind).trim();
@@ -506,38 +634,150 @@ export async function prepareFreshOutputPath(outputPath) {
 }
 
 /**
- * Extract requestId from a request object or request JSON file.
+ * Load request identity fields from an in-memory request or request JSON file.
  * @param {unknown} request
  * @param {string} requestPath
- * @returns {Promise<string | null>}
+ * @returns {Promise<{
+ *   requestId: string | null,
+ *   provider: string | null,
+ *   requestedModel: string | null,
+ * }>}
  */
-async function resolveExpectedRequestId(request, requestPath) {
+async function resolveExpectedIdentity(request, requestPath) {
+  /** @type {Record<string, unknown> | null} */
+  let rec = null;
   if (request != null && typeof request === 'object' && !Array.isArray(request)) {
-    const id = /** @type {Record<string, unknown>} */ (request).requestId;
-    if (id != null && String(id).trim() !== '') {
-      return String(id);
+    rec = /** @type {Record<string, unknown>} */ (request);
+  } else {
+    try {
+      const text = await readFile(String(requestPath), 'utf8');
+      const obj = JSON.parse(text);
+      if (obj != null && typeof obj === 'object' && !Array.isArray(obj)) {
+        rec = /** @type {Record<string, unknown>} */ (obj);
+      }
+    } catch {
+      /* fall through */
     }
   }
-  try {
-    const text = await readFile(String(requestPath), 'utf8');
-    const obj = JSON.parse(text);
-    if (
-      obj != null &&
-      typeof obj === 'object' &&
-      !Array.isArray(obj) &&
-      obj.requestId != null &&
-      String(obj.requestId).trim() !== ''
-    ) {
-      return String(obj.requestId);
-    }
-  } catch {
-    /* fall through */
+  if (rec == null) {
+    return { requestId: null, provider: null, requestedModel: null };
   }
-  return null;
+  const requestId =
+    rec.requestId != null && String(rec.requestId).trim() !== ''
+      ? String(rec.requestId)
+      : null;
+  const provider =
+    rec.provider != null && String(rec.provider).trim() !== ''
+      ? String(rec.provider)
+      : null;
+  const requestedModel = normalizeRequestedModelIdentity(rec.model);
+  return { requestId, provider, requestedModel };
 }
 
 /**
- * Bind a parsed invoke result to the expected requestId.
+ * Bind a schema-valid parse to the frozen request identity.
+ *
+ * Before fullyBound / success / model evidence is allowed:
+ * - result.requestId must exactly equal expected.requestId
+ * - result.provider must exactly equal expected.provider
+ * - requested model identity must match, including null/absence:
+ *     - if the request has no model / null / empty, the result must not claim
+ *       a different non-null model.requested
+ *     - if the request has a model string, result.model.requested must equal it
+ *
+ * On any mismatch: valid=false, success=false, artifact=null (no model evidence).
+ * Non-success outcome kinds are preserved when schema is valid and identity binds.
+ *
+ * @param {ParsedInvokeResult} parsed
+ * @param {ExpectedInvokeIdentity} expected
+ * @returns {ParsedInvokeResult}
+ */
+export function bindInvokeResultToRequest(parsed, expected) {
+  const expectedRequestId = String(expected.requestId);
+  const expectedProvider = String(expected.provider);
+  const expectedRequestedModel = normalizeRequestedModelIdentity(
+    expected.requestedModel,
+  );
+
+  const artifact = parsed.artifact;
+  // No artifact to bind — preserve the original parse/read failure (cannot be success).
+  if (artifact == null || typeof artifact !== 'object' || Array.isArray(artifact)) {
+    return {
+      ...parsed,
+      valid: false,
+      success: false,
+      artifact: null,
+    };
+  }
+
+  const rec = /** @type {Record<string, unknown>} */ (artifact);
+
+  const rawId = rec.requestId;
+  const gotId =
+    rawId != null && String(rawId).trim() !== '' ? String(rawId) : null;
+  if (gotId !== expectedRequestId) {
+    return {
+      ...parsed,
+      valid: false,
+      success: false,
+      artifact: null,
+      infraFailure: `adapter result requestId mismatch: expected ${expectedRequestId}, got ${gotId ?? '(missing)'}`,
+      parseError: 'requestId-mismatch',
+    };
+  }
+
+  const rawProvider = rec.provider;
+  const gotProvider =
+    rawProvider != null && String(rawProvider).trim() !== ''
+      ? String(rawProvider)
+      : null;
+  if (gotProvider !== expectedProvider) {
+    return {
+      ...parsed,
+      valid: false,
+      success: false,
+      artifact: null,
+      infraFailure: `adapter result provider mismatch: expected ${expectedProvider}, got ${gotProvider ?? '(missing)'}`,
+      parseError: 'provider-mismatch',
+    };
+  }
+
+  // model.requested: string | null | absent. Compare null-normalized identities.
+  let gotRequestedModel = null;
+  if (rec.model != null && typeof rec.model === 'object' && !Array.isArray(rec.model)) {
+    const m = /** @type {Record<string, unknown>} */ (rec.model);
+    gotRequestedModel = normalizeRequestedModelIdentity(m.requested);
+  }
+  if (gotRequestedModel !== expectedRequestedModel) {
+    return {
+      ...parsed,
+      valid: false,
+      success: false,
+      artifact: null,
+      infraFailure: `adapter result model.requested mismatch: expected ${expectedRequestedModel ?? '(none)'}, got ${gotRequestedModel ?? '(none)'}`,
+      parseError: 'requested-model-mismatch',
+    };
+  }
+
+  if (parsed.valid === true) {
+    return parsed;
+  }
+
+  // Identity matched but parse was already invalid — still clear artifact evidence.
+  return {
+    ...parsed,
+    valid: false,
+    success: false,
+    artifact: null,
+    infraFailure:
+      parsed.infraFailure || 'adapter result invalid after identity bind',
+    parseError: parsed.parseError || 'invalid-after-bind',
+  };
+}
+
+/**
+ * Bind a parsed invoke result to the expected requestId only.
+ * Prefer {@link bindInvokeResultToRequest} for full identity (provider + model).
  * Stale/pre-planted success for a different requestId is never accepted.
  * On any mismatch, clear artifact so model/parsedOutput cannot be consumed.
  *
@@ -626,10 +866,11 @@ export function expectedProviderRawPaths(outputPath, requestId) {
 }
 
 /**
- * After full schema + requestId binding, ingest actual Poetic provider
- * stdout/stderr from deterministic quarantine paths under the scratch tree
- * (<stem>.invoke-artifacts/<requestId>/). Fail closed on missing/unsafe/
- * escape/symlink paths — never claim provider evidence.
+ * After full schema + identity binding (requestId/provider/model.requested),
+ * ingest actual Poetic provider stdout/stderr from deterministic quarantine
+ * paths under the scratch tree (<stem>.invoke-artifacts/<requestId>/).
+ * Fail closed on missing/unsafe/escape/symlink paths — never claim provider
+ * evidence.
  *
  * @param {string} outputPath
  * @param {string} requestId
@@ -691,8 +932,9 @@ export async function ingestProviderRawEvidence(outputPath, requestId, opts = {}
  * Invoke Poetic via the provider-adapter path.
  *
  * Always parses the result artifact after spawn. Bridge process exit 0 alone
- * is not success — only outcome.kind === 'success' with matching requestId
- * yields success: true.
+ * is not success — only a fully schema-valid result with identity bound to
+ * the frozen request (requestId + provider + requested model) and
+ * outcome.kind === 'success' yields success: true.
  *
  * @param {object} opts
  * @param {string} opts.poeticBin - path or name of poetic executable (injectable for tests)
@@ -797,8 +1039,8 @@ export async function invokePoeticAdapter({
     };
   }
 
-  const expectedRequestId = await resolveExpectedRequestId(request, requestPath);
-  if (expectedRequestId == null) {
+  const expectedIdentity = await resolveExpectedIdentity(request, requestPath);
+  if (expectedIdentity.requestId == null) {
     return {
       exitCode: null,
       timedOut: false,
@@ -811,6 +1053,20 @@ export async function invokePoeticAdapter({
       infraFailure: 'requestId is required for adapter result binding',
     };
   }
+  if (expectedIdentity.provider == null) {
+    return {
+      exitCode: null,
+      timedOut: false,
+      stdout: '',
+      stderr: '',
+      outputPath: String(outputPath),
+      success: false,
+      outcomeKind: null,
+      reasonCode: null,
+      infraFailure: 'provider is required for adapter result identity binding',
+    };
+  }
+  const expectedRequestId = expectedIdentity.requestId;
 
   const args = [
     'provider',
@@ -857,10 +1113,14 @@ export async function invokePoeticAdapter({
   // Spawn-level failure (not found, timeout kill, etc.) — still try to parse
   // any artifact the bridge may have written before dying.
   let parsed = await readAndParseOutput(String(outputPath));
-  // Accept only when artifact requestId exactly equals this invoke's requestId.
-  parsed = bindInvokeResultToRequestId(parsed, expectedRequestId);
+  // Accept only when requestId + provider + requested model match the frozen request.
+  parsed = bindInvokeResultToRequest(parsed, {
+    requestId: expectedRequestId,
+    provider: expectedIdentity.provider,
+    requestedModel: expectedIdentity.requestedModel,
+  });
 
-  // Only a fully valid exact-bound result may supply model/artifact evidence.
+  // Only a fully schema-valid + identity-bound result may supply model/artifact evidence.
   const fullyBound = parsed.valid === true && parsed.artifact != null;
   base.parsedOutput = fullyBound ? parsed.artifact : null;
   base.outcomeKind = parsed.outcomeKind;
@@ -882,7 +1142,7 @@ export async function invokePoeticAdapter({
     base.providerFailure = parsed.providerFailure;
   }
 
-  // After full schema + requestId bind: ingest actual provider raw from
+  // After full schema + identity bind: ingest actual provider raw from
   // deterministic <stem>.invoke-artifacts/<requestId>/{stdout,stderr}.txt
   // (Poetic resolveArtifactQuarantineDir contract).
   // On any invalid/missing/unsafe path: do not claim provider evidence.
@@ -916,8 +1176,9 @@ export async function invokePoeticAdapter({
     base.stderr = '';
   }
 
-  // Success only when spawn did not time out, exit is 0,
-  // outcome.kind is success, requestId matches, and provider raw was ingested.
+  // Success only when spawn did not time out, exit is 0, outcome.kind is
+  // success, identity binds (requestId/provider/model.requested), and
+  // provider raw was ingested.
   const exitOk = result.exitCode === 0;
   base.success =
     fullyBound &&

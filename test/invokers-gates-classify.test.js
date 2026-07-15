@@ -94,9 +94,13 @@ fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'provider-stderr-body\\n');
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: req.requestId,
+  provider: req.provider,
   outcome: { kind: 'success', reasonCode: 'ok' },
   receivedRequest: req,
-  model: { resolved: { availability: 'available', value: 'resolved-from-provider' } },
+  model: {
+    requested: req.model != null ? req.model : null,
+    resolved: { availability: 'available', value: 'resolved-from-provider' }
+  },
   args,
   modes: { reqMode, outModeBefore }
 }));
@@ -225,8 +229,12 @@ fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'raw-err-${kind}\\n');
 fs.writeFileSync(out, JSON.stringify({
   schema: ${JSON.stringify(POETIC_INVOKE_RESULT_SCHEMA)},
   requestId: 'r-${kind}',
+  provider: req.provider,
   outcome: { kind: ${JSON.stringify(kind)}, reasonCode: 'rc-${kind}' },
-  model: { resolved: { availability: 'unavailable', reason: 'n/a' } }
+  model: {
+    requested: req.model != null ? req.model : null,
+    resolved: { availability: 'unavailable', reason: 'n/a' }
+  }
 }));
 process.exit(0);
 `,

@@ -174,8 +174,10 @@ fs.writeFileSync(path.join(rawDir, 'stderr.txt'), '');
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: 'stale-other-request',
+  provider: 'fake',
   outcome: { kind: 'success', reasonCode: 'ok' },
   model: {
+    requested: 'requested-arm-model',
     resolved: {
       availability: 'available',
       value: 'TEMPTING-MODEL-MUST-NOT-ATTRIBUTE'
@@ -329,8 +331,12 @@ const out = args[args.indexOf('--output') + 1];
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: 'wrong-id',
+  provider: 'fake',
   outcome: { kind: 'success', reasonCode: 'ok' },
-  model: { resolved: { availability: 'unavailable', reason: 'n/a' } }
+  model: {
+    requested: null,
+    resolved: { availability: 'unavailable', reason: 'n/a' }
+  }
 }));
 process.exit(0);
 `,
@@ -398,8 +404,12 @@ fs.writeFileSync(path.join(rawDir, 'stderr.txt'), '');
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: req.requestId,
+  provider: req.provider,
   outcome: { kind: 'success', reasonCode: 'ok' },
-  model: { resolved: { availability: 'available', value: 'm1' } }
+  model: {
+    requested: req.model != null ? req.model : null,
+    resolved: { availability: 'available', value: 'm1' }
+  }
 }));
 process.exit(0);
 `,
@@ -613,8 +623,12 @@ fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'E2E_CONTRACT_ERR\\n');
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: req.requestId,
+  provider: req.provider,
   outcome: { kind: 'success', reasonCode: 'ok' },
-  model: { resolved: { availability: 'available', value: 'm-contract' } }
+  model: {
+    requested: req.model != null ? req.model : null,
+    resolved: { availability: 'available', value: 'm-contract' }
+  }
 }));
 process.exit(0);
 `,
@@ -723,8 +737,10 @@ process.exit(0);
       const stale = parseInvokeResult({
         schema: 'poetic.provider.invoke.result.v1',
         requestId: 'stale-model-id',
+        provider: 'fake',
         outcome: { kind: 'success', reasonCode: 'ok' },
         model: {
+          requested: null,
           resolved: { availability: 'available', value: 'should-not-attribute' },
         },
       });
@@ -747,8 +763,12 @@ const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: req.requestId,
+  provider: req.provider,
   outcome: { kind: 'success', reasonCode: 'ok' },
-  model: { resolved: { availability: 'available', value: 'm-x' } }
+  model: {
+    requested: req.model != null ? req.model : null,
+    resolved: { availability: 'available', value: 'm-x' }
+  }
 }));
 process.exit(0);
 `,

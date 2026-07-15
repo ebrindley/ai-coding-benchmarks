@@ -222,6 +222,11 @@ describe('provider confinement', () => {
     const free = parseInvokeResult({
       schema: POETIC_INVOKE_RESULT_SCHEMA,
       requestId: 'r1',
+      provider: 'fake',
+      model: {
+        requested: null,
+        resolved: { availability: 'unavailable', reason: 'n/a' },
+      },
       outcome: {
         kind: 'provider_error',
         reasonCode: 'secret dump: password=hunter2 and free form',
@@ -238,8 +243,14 @@ describe('provider confinement', () => {
     const ok = parseInvokeResult({
       schema: POETIC_INVOKE_RESULT_SCHEMA,
       requestId: 'r1',
+      provider: 'fake',
+      model: {
+        requested: 'm1',
+        resolved: { availability: 'available', value: 'm1' },
+      },
       outcome: { kind: 'success', reasonCode: 'ok' },
     });
+    assert.equal(ok.valid, true);
     assert.equal(ok.reasonCode, 'ok');
     assert.equal(ok.reasonCodeRejected, false);
   });
