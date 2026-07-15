@@ -14,8 +14,6 @@
  */
 
 import {
-  mkdir,
-  writeFile,
   readdir,
   lstat,
   rmdir,
@@ -32,7 +30,12 @@ import {
   sanitizeBoundedIdentifier,
 } from './gates.js';
 import { assertSafeTrialId, trialPathUnder, isPathInside } from './paths.js';
-import { copyFileNoFollow, UnsafePathError } from './safe-fs.js';
+import {
+  copyFileNoFollow,
+  ensurePrivateDirNoFollow,
+  writeFileAtomicNoFollow,
+  UnsafePathError,
+} from './safe-fs.js';
 
 /** Top-level result keys allowed in sanitized export (whitelist). */
 const RESULT_WHITELIST_KEYS = new Set([
@@ -576,7 +579,7 @@ async function copyVerifiedTrialRaw(campaignDir, trialId, destRoot, warnings) {
   const rawRoot = path.join(path.resolve(campaignDir), 'raw');
   const srcDir = await trialPathUnder(rawRoot, safeId);
   const destDir = path.join(destRoot, 'raw', safeId);
-  await mkdir(destDir, { recursive: true });
+  await ensurePrivateDirNoFollow(destDir);
 
   let copied = 0;
   for (const fname of EXPORT_RAW_FILE_WHITELIST) {
@@ -730,10 +733,10 @@ export async function exportSanitizedBundle({
       srcRoot,
       exportIds,
     );
-    await writeFile(
+    await writeFileAtomicNoFollow(
       path.join(stagingRoot, 'manifest.json'),
       `${JSON.stringify(redactedManifest, null, 2)}\n`,
-      'utf8',
+      { mode: 0o600, fsync: true },
     );
     filesCopied += 1;
 
@@ -742,11 +745,11 @@ export async function exportSanitizedBundle({
       const id = assertSafeTrialId(String(raw.id));
       const clean = sanitizeResult(raw, srcRoot);
       const destDir = path.join(stagingRoot, 'results', id);
-      await mkdir(destDir, { recursive: true });
-      await writeFile(
+      await ensurePrivateDirNoFollow(destDir);
+      await writeFileAtomicNoFollow(
         path.join(destDir, 'result.json'),
         `${JSON.stringify(clean, null, 2)}\n`,
-        'utf8',
+        { mode: 0o600, fsync: true },
       );
       filesCopied += 1;
     }
@@ -759,20 +762,20 @@ export async function exportSanitizedBundle({
       stripPromptBearing(report),
       srcRoot,
     );
-    await writeFile(
+    await writeFileAtomicNoFollow(
       path.join(stagingRoot, 'report.json'),
       `${JSON.stringify(reportBody, null, 2)}\n`,
-      'utf8',
+      { mode: 0o600, fsync: true },
     );
     filesCopied += 1;
 
     const human = formatHumanSummary(
       /** @type {object} */ (reportBody),
     );
-    await writeFile(
+    await writeFileAtomicNoFollow(
       path.join(stagingRoot, 'summary.txt'),
       `${String(redactHostIdentifying(human, srcRoot))}\n`,
-      'utf8',
+      { mode: 0o600, fsync: true },
     );
     filesCopied += 1;
 
@@ -798,7 +801,7 @@ export async function exportSanitizedBundle({
       }
     }
 
-    await writeFile(
+    await writeFileAtomicNoFollow(
       path.join(stagingRoot, 'EXPORT_README.txt'),
       [
         'Sanitized campaign export bundle (whitelist)',
@@ -812,7 +815,7 @@ export async function exportSanitizedBundle({
         'Upload/publish is not performed by the harness.',
         '',
       ].join('\n'),
-      'utf8',
+      { mode: 0o600, fsync: true },
     );
     filesCopied += 1;
 

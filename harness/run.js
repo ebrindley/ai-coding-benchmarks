@@ -4,7 +4,7 @@
  * Resumable and deterministic.
  */
 
-import { mkdir, readFile, writeFile, chmod, access } from 'node:fs/promises';
+import { mkdir, access, lstat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -15,20 +15,13 @@ import { computePostureFingerprint } from './posture.js';
 import {
   parseResolvedModelEvidence,
 } from './invokers/index.js';
-import { readFileNoFollow, UnsafePathError } from './safe-fs.js';
+import {
+  assertCampaignFilesystemBoundary,
+  readFileNoFollow,
+  writeFileAtomicNoFollow,
+  UnsafePathError,
+} from './safe-fs.js';
 
-/**
- * Best-effort chmod for private modes (ignore platforms that lack mode bits).
- * @param {string} p
- * @param {number} mode
- */
-async function tryChmod(p, mode) {
-  try {
-    await chmod(p, mode);
-  } catch {
-    /* ignore */
-  }
-}
 
 /**
  * Lazy-load peer modules.
@@ -455,7 +448,24 @@ export async function runCampaign(opts) {
     };
   }
 
+  // Physical campaign boundary before any create/resume write: reject symlink
+  // campaign root and any existing user-controlled symlink ancestor/component.
+  try {
+    campaignDir = await assertCampaignFilesystemBoundary(campaignDir);
+  } catch (err) {
+    return {
+      ok: false,
+      stage: 'campaign-boundary',
+      errors: [
+        err instanceof Error ? err.message : String(err),
+      ],
+      warnings: pf.warnings,
+      campaignDir,
+    };
+  }
+
   // Campaign tree is private (0700) — secrets may land under raw/artifacts/results.
+  // Component-by-component mkdir without following symlinks.
   // Provider execution workspaces live outside the campaign tree (see executionRoot).
   await peers.ensurePrivateDir(campaignDir);
   await peers.ensurePrivateDir(path.join(campaignDir, 'raw'));
@@ -475,13 +485,28 @@ export async function runCampaign(opts) {
 
   try {
     // Resume uses frozen manifest.experiment; never prefer a mutated caller experiment.
+    // loadManifest validates the physical campaign boundary and reads nofollow.
     let manifest = null;
     if (opts.resume !== false) {
       try {
         manifest = await peers.loadManifest(campaignDir);
       } catch (err) {
+        // Symlink / unsafe boundary: fail closed immediately (never open through).
+        if (err instanceof UnsafePathError) {
+          return {
+            ok: false,
+            stage: 'resume',
+            errors: [
+              `unsafe campaign manifest path (fail closed): ${err.message}`,
+            ],
+            campaignDir,
+          };
+        }
+        // Distinguish "no manifest yet" from "manifest present but invalid".
+        // Use lstat so a planted leaf symlink is treated as present, not missing,
+        // without following it into host content.
         try {
-          await readFile(path.join(campaignDir, 'manifest.json'), 'utf8');
+          await lstat(path.join(campaignDir, 'manifest.json'));
           return {
             ok: false,
             stage: 'resume',
@@ -1159,12 +1184,17 @@ export async function runCampaign(opts) {
 
     const report = peers.buildReport(manifest, reportable);
     const human = peers.formatHumanSummary(report);
-    await writeFile(
+    // Atomic no-follow writes: never open/chmod pre-planted leaf symlinks.
+    await writeFileAtomicNoFollow(
       path.join(campaignDir, 'report.json'),
       `${JSON.stringify(report, null, 2)}\n`,
-      'utf8',
+      { mode: 0o600, fsync: true },
     );
-    await writeFile(path.join(campaignDir, 'summary.txt'), `${human}\n`, 'utf8');
+    await writeFileAtomicNoFollow(
+      path.join(campaignDir, 'summary.txt'),
+      `${human}\n`,
+      { mode: 0o600, fsync: true },
+    );
 
     const remaining = manifest.trials.filter((t) => t.state === 'pending').length;
     manifest.status = remaining === 0 ? 'completed' : 'paused';

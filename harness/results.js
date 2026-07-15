@@ -11,11 +11,7 @@
  */
 
 import {
-  mkdir,
   readFile,
-  rename,
-  writeFile,
-  chmod,
   access,
 } from 'node:fs/promises';
 import path from 'node:path';
@@ -28,7 +24,20 @@ import {
   digestArtifactDir,
   digestRawOutputBytes,
 } from './digest.js';
-import { copyFileNoFollow, UnsafePathError } from './safe-fs.js';
+import {
+  assertCampaignFilesystemBoundary,
+  copyFileNoFollow,
+  ensurePrivateDirNoFollow,
+  readFileNoFollow,
+  readTextNoFollow,
+  writeFileAtomicNoFollow,
+  writePrivateFileNoFollow,
+  DEFAULT_SAFE_READ_MAX_BYTES,
+  UnsafePathError,
+} from './safe-fs.js';
+
+/** Bound for campaign result.json / raw evidence nofollow reads. */
+const CAMPAIGN_READ_MAX_BYTES = DEFAULT_SAFE_READ_MAX_BYTES;
 
 const TRIAL_SCHEMA_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -465,35 +474,24 @@ export function assertManifestIdentityBinding(
 }
 
 /**
- * Best-effort chmod; ignore failures on platforms that lack mode bits.
- * @param {string} p
- * @param {number} mode
- */
-async function tryChmod(p, mode) {
-  try {
-    await chmod(p, mode);
-  } catch {
-    /* ignore */
-  }
-}
-
-/**
- * Ensure a private directory (0700).
+ * Ensure a private directory (0700) without following symlinks.
+ * Component-by-component creation; never open/chmod a pre-existing symlink.
  * @param {string} dir
+ * @returns {Promise<string>}
  */
 export async function ensurePrivateDir(dir) {
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  await tryChmod(dir, 0o700);
+  return ensurePrivateDirNoFollow(dir);
 }
 
 /**
- * Write a private file (0600).
+ * Write a private file (0600) via atomic no-follow replacement.
+ * Never opens or chmods a pre-existing destination symlink.
  * @param {string} filePath
  * @param {string | Buffer} data
+ * @returns {Promise<{ path: string }>}
  */
 export async function writePrivateFile(filePath, data) {
-  await writeFile(filePath, data, { mode: 0o600 });
-  await tryChmod(filePath, 0o600);
+  return writePrivateFileNoFollow(filePath, data);
 }
 
 /**
@@ -545,6 +543,7 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
 
   // results/ and trial dir are private; path is containment-checked
   const safeId = assertSafeTrialId(trialId);
+  const campaignRoot = await assertCampaignFilesystemBoundary(campaignDir);
 
   // ID binding: reject swapped/mismatched ids; always force destination id.
   if (result.id != null && String(result.id) !== '') {
@@ -555,8 +554,8 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
     }
   }
 
-  await ensurePrivateDir(path.join(path.resolve(campaignDir), 'results'));
-  const dir = await resolveTrialResultDir(campaignDir, safeId);
+  await ensurePrivateDir(path.join(campaignRoot, 'results'));
+  const dir = await resolveTrialResultDir(campaignRoot, safeId);
   await ensurePrivateDir(dir);
 
   const writtenAt = new Date().toISOString();
@@ -649,10 +648,11 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
   });
 
   const finalPath = path.join(dir, 'result.json');
-  const tmpPath = path.join(dir, 'result.json.tmp');
-  await writePrivateFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`);
-  await rename(tmpPath, finalPath);
-  await tryChmod(finalPath, 0o600);
+  await writeFileAtomicNoFollow(
+    finalPath,
+    `${JSON.stringify(payload, null, 2)}\n`,
+    { mode: 0o600, fsync: true },
+  );
 
   return { path: finalPath, result: payload };
 }
@@ -662,6 +662,10 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
  * Always enforces trial.schema.json (required + additionalProperties).
  * There is no validate opt-out.
  *
+ * Physically validates the campaign boundary, then reads result.json with
+ * readFileNoFollow so a pre-planted leaf symlink cannot inject host content
+ * into resume/verification/reporting/export paths.
+ *
  * @param {string} campaignDir
  * @param {string} trialId
  * @returns {Promise<object>}
@@ -670,9 +674,10 @@ export async function readTrialResult(campaignDir, trialId) {
   if (!campaignDir) throw new Error('readTrialResult: campaignDir is required');
   if (!trialId) throw new Error('readTrialResult: trialId is required');
 
-  const dir = await resolveTrialResultDir(campaignDir, trialId);
+  const campaignRoot = await assertCampaignFilesystemBoundary(campaignDir);
+  const dir = await resolveTrialResultDir(campaignRoot, trialId);
   const p = path.join(dir, 'result.json');
-  const text = await readFile(p, 'utf8');
+  const text = await readTextNoFollow(p, { maxBytes: CAMPAIGN_READ_MAX_BYTES });
   const result = JSON.parse(text);
   await assertTrialResultSchema(result, {
     label: 'readTrialResult',
@@ -681,14 +686,18 @@ export async function readTrialResult(campaignDir, trialId) {
 }
 
 /**
- * Read a private raw file if present; return null when absent.
+ * Read a private campaign raw file if present; return null when absent.
+ * Never follows leaf symlinks (fail closed with UnsafePathError).
  * @param {string} filePath
  * @returns {Promise<Buffer | null>}
  */
 async function readOptionalBuffer(filePath) {
   try {
-    return await readFile(filePath);
+    return await readFileNoFollow(filePath, {
+      maxBytes: CAMPAIGN_READ_MAX_BYTES,
+    });
   } catch (err) {
+    if (err instanceof UnsafePathError) throw err;
     const code = /** @type {NodeJS.ErrnoException} */ (err).code;
     if (code === 'ENOENT') return null;
     throw err;
@@ -766,10 +775,11 @@ export async function quarantineRawOutput(campaignDir, trialId, raw = {}) {
 
   // Ensure raw root is private; path is containment-checked
   const safeId = assertSafeTrialId(trialId);
-  const rawRoot = path.join(path.resolve(campaignDir), 'raw');
+  const campaignRoot = await assertCampaignFilesystemBoundary(campaignDir);
+  const rawRoot = path.join(campaignRoot, 'raw');
   await ensurePrivateDir(rawRoot);
 
-  const dir = await resolveTrialRawDir(campaignDir, safeId);
+  const dir = await resolveTrialRawDir(campaignRoot, safeId);
   await ensurePrivateDir(dir);
 
   // Always materialize stdout/stderr files (empty allowed) so digests are complete.
@@ -795,9 +805,8 @@ export async function quarantineRawOutput(campaignDir, trialId, raw = {}) {
   if (raw.outputPath) {
     try {
       const dest = path.join(dir, 'output.json');
-      // Never follow a provider-swapped symlink to host content.
+      // Never follow a provider-swapped symlink to host content (src or dest).
       await copyFileNoFollow(String(raw.outputPath), dest);
-      await tryChmod(dest, 0o600);
     } catch (err) {
       const note =
         err instanceof UnsafePathError
@@ -808,7 +817,7 @@ export async function quarantineRawOutput(campaignDir, trialId, raw = {}) {
   }
 
   // Digests of exact on-disk bytes (not lengths, not in-memory strings alone).
-  const digests = await computeRawOutputDigests(campaignDir, safeId);
+  const digests = await computeRawOutputDigests(campaignRoot, safeId);
 
   const meta = {
     trialId: String(safeId),

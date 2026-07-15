@@ -1,10 +1,10 @@
 /**
  * Resumable atomic campaign manifest under the campaign directory.
- * Writes via manifest.json.tmp then rename (atomic on the same filesystem).
+ * Writes via exclusive no-follow temp + rename (atomic on the same filesystem).
  * Validates shape on load/save; freezes and verifies input digests for resume integrity.
+ * Campaign root and ancestors are physically validated before any write.
  */
 
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { SCHEMA_VERSION, TRIAL_STATUSES } from './contracts.js';
@@ -15,6 +15,16 @@ import {
   digestHarnessContent,
 } from './digest.js';
 import { assertSafeCampaignId, assertSafeTrialId, resolveUnder } from './paths.js';
+import {
+  assertCampaignFilesystemBoundary,
+  ensurePrivateDirNoFollow,
+  readTextNoFollow,
+  writeFileAtomicNoFollow,
+  DEFAULT_SAFE_READ_MAX_BYTES,
+} from './safe-fs.js';
+
+/** Bound for campaign manifest.json nofollow reads (same default as other safe reads). */
+const MANIFEST_MAX_BYTES = DEFAULT_SAFE_READ_MAX_BYTES;
 
 export const MANIFEST_FILENAME = 'manifest.json';
 export const MANIFEST_TMP_FILENAME = 'manifest.json.tmp';
@@ -464,6 +474,10 @@ export function createManifest(opts) {
 
 /**
  * Load manifest.json from a campaign directory and fully validate shape.
+ * Physically validates the campaign boundary first, then reads the leaf with
+ * readFileNoFollow so a pre-planted manifest.json symlink cannot exfiltrate
+ * or inject host content on resume.
+ *
  * @param {string} campaignDir
  * @returns {Promise<object>}
  */
@@ -471,8 +485,10 @@ export async function loadManifest(campaignDir) {
   if (!campaignDir) {
     throw new Error('loadManifest: campaignDir is required');
   }
-  const p = path.join(campaignDir, MANIFEST_FILENAME);
-  const text = await readFile(p, 'utf8');
+  const root = await assertCampaignFilesystemBoundary(campaignDir);
+  const p = path.join(root, MANIFEST_FILENAME);
+  // Never follow a pre-planted leaf symlink into host content.
+  const text = await readTextNoFollow(p, { maxBytes: MANIFEST_MAX_BYTES });
   let data;
   try {
     data = JSON.parse(text);
@@ -484,7 +500,10 @@ export async function loadManifest(campaignDir) {
 }
 
 /**
- * Atomically persist a campaign manifest (tmp + rename).
+ * Atomically persist a campaign manifest via no-follow exclusive temp + rename.
+ * Rejects symlink campaign roots/ancestors and pre-planted manifest leaf/temp
+ * symlinks. Temp basenames are unpredictable (not manifest.json.tmp alone).
+ *
  * @param {string} campaignDir
  * @param {object} manifest
  * @returns {Promise<{ path: string }>}
@@ -497,7 +516,8 @@ export async function saveManifest(campaignDir, manifest) {
     throw new Error('saveManifest: manifest is required');
   }
 
-  await mkdir(campaignDir, { recursive: true });
+  const root = await assertCampaignFilesystemBoundary(campaignDir);
+  await ensurePrivateDirNoFollow(root);
 
   const updated = {
     ...manifest,
@@ -506,12 +526,9 @@ export async function saveManifest(campaignDir, manifest) {
   };
   validateManifest(updated);
 
-  const finalPath = path.join(campaignDir, MANIFEST_FILENAME);
-  const tmpPath = path.join(campaignDir, MANIFEST_TMP_FILENAME);
+  const finalPath = path.join(root, MANIFEST_FILENAME);
   const body = `${JSON.stringify(updated, null, 2)}\n`;
-
-  await writeFile(tmpPath, body, 'utf8');
-  await rename(tmpPath, finalPath);
+  await writeFileAtomicNoFollow(finalPath, body, { mode: 0o600, fsync: true });
 
   // Reflect updatedAt on the caller's object for in-memory continuity
   Object.assign(manifest, {

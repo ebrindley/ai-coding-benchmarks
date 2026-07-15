@@ -15,10 +15,12 @@
  * mismatched provider/model evidence is never treated as fullyBound.
  */
 
-import { writeFile, mkdir, readFile, lstat, unlink } from 'node:fs/promises';
+import { readFile, lstat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { spawnControlled } from './spawn-controlled.js';
 import {
+  ensurePrivateDirNoFollow,
+  writeFileAtomicNoFollow,
   readTextNoFollow,
   readContainedRegularFileNoFollow,
   UnsafePathError,
@@ -952,7 +954,8 @@ export async function prepareFreshOutputPath(outputPath) {
   const parent = path.dirname(out);
 
   try {
-    await mkdir(parent, { recursive: true, mode: 0o700 });
+    // Component-by-component; never follow intermediate symlink directories.
+    await ensurePrivateDirNoFollow(parent);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -978,6 +981,12 @@ export async function prepareFreshOutputPath(outputPath) {
     // Regular file (or other non-dir non-link): remove without following.
     await unlink(out);
   } catch (err) {
+    if (err instanceof UnsafePathError) {
+      return {
+        ok: false,
+        infraFailure: err.message,
+      };
+    }
     const code = /** @type {NodeJS.ErrnoException} */ (err).code;
     if (code !== 'ENOENT') {
       const message = err instanceof Error ? err.message : String(err);
@@ -989,8 +998,8 @@ export async function prepareFreshOutputPath(outputPath) {
   }
 
   try {
-    // O_EXCL (flag wx): only this run may create; reject races.
-    await writeFile(out, '', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    // Atomic exclusive create via shared no-follow primitive (empty seed).
+    await writeFileAtomicNoFollow(out, '', { mode: 0o600, fsync: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -1383,12 +1392,14 @@ export async function invokePoeticAdapter({
   }
 
   if (request !== undefined) {
-    // Parent dirs private (0700); request file private (0600) at creation.
-    await mkdir(path.dirname(requestPath), { recursive: true, mode: 0o700 });
-    await writeFile(requestPath, `${JSON.stringify(request, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600,
-    });
+    // Parent dirs private (0700); request file private (0600) via atomic no-follow.
+    // Never open/chmod a pre-existing request leaf symlink.
+    await ensurePrivateDirNoFollow(path.dirname(requestPath));
+    await writeFileAtomicNoFollow(
+      requestPath,
+      `${JSON.stringify(request, null, 2)}\n`,
+      { mode: 0o600, fsync: true },
+    );
   }
 
   // Fresh output binding: securely remove any prior artifact, then create empty.
