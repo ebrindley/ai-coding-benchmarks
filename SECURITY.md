@@ -11,6 +11,29 @@ Please **do not** report benchmark fixture bugs or intentionally vulnerable
 examples as security vulnerabilities. They are part of the test material, not
 defects in this repository.
 
+## Optional harness and untrusted execution
+
+This repository includes an **optional** local harness under `harness/`. When
+you run it:
+
+- Fixtures and task-declared gates/oracles may execute **untrusted or
+  intentionally vulnerable code**.
+- Gate/oracle commands are intended to run only under a **static confinement
+  adapter**. If the platform confinement primitive is unavailable, the harness
+  fails closed (marks execution unavailable) rather than running gate content
+  bare by accident.
+- Isolated trial workspaces are temporary git trees copied from fixtures; they
+  must not inherit this repository's agent instruction files as trusted policy
+  for the model under test.
+- Raw provider output is **secret-bearing**. It is quarantined under the
+  campaign directory, excluded from sanitized export by default, and must not be
+  committed. The `export` command produces a sanitized bundle; upload/publish is
+  out of scope for this repository.
+
+Pull-request and governance posture are unchanged: this is still a fixed
+reference corpus with optional tooling, not an invitation to run unreviewed
+third-party automation against production systems.
+
 ## Scope of security tooling
 
 Security tooling here is limited to **secret-leak prevention** (e.g. secret

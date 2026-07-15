@@ -1,0 +1,126 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-coding-benchmarks.local/schemas/trial.schema.json",
+  "title": "Trial",
+  "description": "Single trial execution record within a campaign.",
+  "type": "object",
+  "required": [
+    "id",
+    "experimentId",
+    "arm",
+    "taskId",
+    "repetition",
+    "scheduleSeed",
+    "invocationPath",
+    "requestedModel",
+    "state"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "experimentId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "arm": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Arm name from the experiment"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repetition": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "scheduleSeed": {
+      "type": ["integer", "string"]
+    },
+    "invocationPath": {
+      "type": "string",
+      "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+    },
+    "requestedModel": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resolvedModel": {
+      "type": ["string", "null"],
+      "description": "Model id actually used after resolution, if known"
+    },
+    "postureFingerprint": {
+      "type": ["string", "null"],
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "state": {
+      "type": "string",
+      "enum": ["pending", "running", "completed", "failed", "skipped"]
+    },
+    "classification": {
+      "type": ["string", "null"],
+      "enum": ["PASS", "FAIL", "NO_OP", "INFRA_FAIL", "TIMEOUT", null]
+    },
+    "classificationReason": {
+      "type": ["string", "null"]
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fixtureHash": { "type": "string" },
+        "baselineCommit": { "type": "string" },
+        "promptHash": { "type": "string" },
+        "workspaceHash": { "type": "string" }
+      }
+    },
+    "digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resultDigest": { "type": "string" },
+        "artifactDigest": { "type": "string" },
+        "rawOutputDigest": { "type": "string" }
+      }
+    },
+    "gateResults": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "changedFileCount": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "startedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "finishedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "durationMs": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "error": {
+      "type": ["string", "null"]
+    },
+    "workspaceDir": {
+      "type": ["string", "null"]
+    },
+    "artifactDir": {
+      "type": ["string", "null"]
+    }
+  }
+}

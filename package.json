@@ -1,0 +1,21 @@
+{
+  "name": "ai-coding-benchmarks",
+  "version": "0.1.0",
+  "description": "Portable AI coding benchmark corpus with an optional local harness",
+  "type": "module",
+  "bin": {
+    "aicb": "./harness/cli.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "self-validate": "node harness/cli.js self-validate"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "yaml": "^2.7.0"
+  },
+  "license": "MIT",
+  "private": false
+}
