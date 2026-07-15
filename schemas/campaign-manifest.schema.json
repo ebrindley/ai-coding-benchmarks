@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-coding-benchmarks.local/schemas/campaign-manifest.schema.json",
+  "title": "CampaignManifest",
+  "description": "Resumable campaign state: lock, trials, revisions, host metadata.",
+  "type": "object",
+  "required": [
+    "campaignId",
+    "schemaVersion",
+    "status",
+    "lock",
+    "trials",
+    "createdAt",
+    "updatedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "campaignId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "paused",
+        "completed",
+        "failed",
+        "aborted"
+      ]
+    },
+    "experimentId": {
+      "type": "string"
+    },
+    "experiment": {
+      "type": "object",
+      "description": "Embedded or referenced experiment definition",
+      "additionalProperties": true
+    },
+    "lock": {
+      "type": "object",
+      "required": ["held", "owner"],
+      "additionalProperties": false,
+      "properties": {
+        "held": { "type": "boolean" },
+        "owner": { "type": ["string", "null"] },
+        "acquiredAt": { "type": ["string", "null"], "format": "date-time" },
+        "path": { "type": ["string", "null"] }
+      }
+    },
+    "trials": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "state"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string" },
+          "state": {
+            "type": "string",
+            "enum": ["pending", "running", "completed", "failed", "skipped"]
+          },
+          "arm": { "type": "string" },
+          "taskId": { "type": "string" },
+          "repetition": { "type": "integer", "minimum": 1 },
+          "invocationPath": {
+            "type": "string",
+            "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+          },
+          "requestedModel": { "type": "string" },
+          "resolvedModel": { "type": ["string", "null"] },
+          "postureFingerprint": { "type": ["string", "null"] },
+          "classification": {
+            "type": ["string", "null"],
+            "enum": ["PASS", "FAIL", "NO_OP", "INFRA_FAIL", "TIMEOUT", null]
+          }
+        }
+      }
+    },
+    "corpusRevision": {
+      "type": ["string", "null"],
+      "description": "Git SHA or content digest of the corpus root"
+    },
+    "harnessRevision": {
+      "type": ["string", "null"],
+      "description": "Git SHA or version of the harness code"
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostname": { "type": "string" },
+        "platform": { "type": "string" },
+        "arch": { "type": "string" },
+        "nodeVersion": { "type": "string" },
+        "cpus": { "type": "integer", "minimum": 1 },
+        "totalMemoryBytes": { "type": "integer", "minimum": 0 },
+        "user": { "type": "string" }
+      }
+    },
+    "scheduleSeed": {
+      "type": ["integer", "string", "null"]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "artifactRoot": {
+      "type": ["string", "null"]
+    },
+    "workspaceRoot": {
+      "type": ["string", "null"]
+    }
+  }
+}

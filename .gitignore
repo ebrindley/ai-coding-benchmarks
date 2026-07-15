@@ -15,6 +15,19 @@ coverage/
 *.db
 *.log
 
+# Harness campaign artifacts (do not ignore source fixtures under benchmarks/)
+.build-out/
+.aicb-campaigns/
+campaigns/
+**/campaign.lock
+**/*.campaign.lock
+**/manifest.json.tmp
+# Local campaign dirs often created under /tmp; also ignore in-repo campaign roots
+.aicb/
+raw-provider-output/
+.harness-work/
+.harness-artifacts/
+
 # OS/editor noise
 .DS_Store
 .idea/
@@ -31,4 +44,3 @@ coverage/
 id_rsa
 id_ed25519
 .npmrc
-
