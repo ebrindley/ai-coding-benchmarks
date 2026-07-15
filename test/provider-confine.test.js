@@ -219,39 +219,43 @@ describe('provider confinement', () => {
     );
     assert.equal(sanitizeAdapterReasonCode('a'.repeat(129)), null);
 
-    const free = parseInvokeResult({
-      schema: POETIC_INVOKE_RESULT_SCHEMA,
-      requestId: 'r1',
-      provider: 'fake',
-      model: {
-        requested: null,
-        resolved: { availability: 'unavailable', reason: 'n/a' },
-      },
-      outcome: {
-        kind: 'provider_error',
-        reasonCode: 'secret dump: password=hunter2 and free form',
-      },
-    });
-    assert.equal(free.valid, true);
-    assert.equal(free.reasonCode, null);
-    assert.equal(free.reasonCodeRejected, true);
-    assert.equal(
-      /** @type {any} */ (free.artifact)?.outcome?.reasonCode,
-      undefined,
+    const { buildValidInvokeResultV1 } = await import(
+      './helpers/poetic-result-v1.js'
     );
 
-    const ok = parseInvokeResult({
-      schema: POETIC_INVOKE_RESULT_SCHEMA,
-      requestId: 'r1',
-      provider: 'fake',
-      model: {
-        requested: 'm1',
-        resolved: { availability: 'available', value: 'm1' },
-      },
-      outcome: { kind: 'success', reasonCode: 'ok' },
-    });
+    // Free-form reasonCode is not a ProviderInvokeReasonCode → invalid
+    const free = parseInvokeResult(
+      buildValidInvokeResultV1({
+        requestId: 'r1',
+        provider: 'fake',
+        requestedModel: null,
+        outcomeKind: 'provider_error',
+        reasonCode: 'PROVIDER_ERROR',
+        overrides: {
+          outcome: {
+            kind: 'provider_error',
+            exitCode: 1,
+            reasonCode: 'secret dump: password=hunter2 and free form',
+          },
+        },
+      }),
+    );
+    assert.equal(free.valid, false);
+    assert.equal(free.artifact, null);
+    assert.match(String(free.parseError), /reasonCode|invalid/i);
+
+    const ok = parseInvokeResult(
+      buildValidInvokeResultV1({
+        requestId: 'r1',
+        provider: 'fake',
+        requestedModel: 'm1',
+        resolvedModel: 'm1',
+        outcomeKind: 'success',
+        reasonCode: 'SUCCESS',
+      }),
+    );
     assert.equal(ok.valid, true);
-    assert.equal(ok.reasonCode, 'ok');
+    assert.equal(ok.reasonCode, 'SUCCESS');
     assert.equal(ok.reasonCodeRejected, false);
   });
 });

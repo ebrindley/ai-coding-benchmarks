@@ -23,6 +23,7 @@ import {
   realpath,
   access,
 } from 'node:fs/promises';
+import { FAKE_POETIC_WRITE_FULL_V1_CJS, buildValidInvokeResultV1 } from './helpers/poetic-result-v1.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -169,21 +170,15 @@ const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
 // naive path reader could still find success-shaped content.
 const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', 'stale-other-request');
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
-fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'planted\\n');
-fs.writeFileSync(path.join(rawDir, 'stderr.txt'), '');
-fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
+${FAKE_POETIC_WRITE_FULL_V1_CJS}
+const req = { requestId: 'stale-other-request', provider: 'fake', model: 'requested-arm-model' };
+writeFullV1(req, out, {
   requestId: 'stale-other-request',
   provider: 'fake',
-  outcome: { kind: 'success', reasonCode: 'ok' },
-  model: {
-    requested: 'requested-arm-model',
-    resolved: {
-      availability: 'available',
-      value: 'TEMPTING-MODEL-MUST-NOT-ATTRIBUTE'
-    }
-  }
-}));
+  requestedModel: 'requested-arm-model',
+  resolvedModel: 'TEMPTING-MODEL-MUST-NOT-ATTRIBUTE',
+  stdout: 'planted\\n',
+});
 process.exit(0);
 `,
         'utf8',
@@ -328,15 +323,41 @@ process.exit(0);
 const fs = require('fs');
 const args = process.argv.slice(2);
 const out = args[args.indexOf('--output') + 1];
+const path = require('path');
+const avail = (v) => ({ availability: 'available', value: v });
+const unavail = (r) => ({ availability: 'unavailable', reason: r });
+const now = new Date().toISOString();
+const qDir = path.join(path.dirname(path.resolve(out)), 'out.invoke-artifacts', 'wrong-id');
+fs.mkdirSync(qDir, { recursive: true });
+fs.writeFileSync(path.join(qDir, 'stdout.txt'), '');
+fs.writeFileSync(path.join(qDir, 'stderr.txt'), '');
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: 'wrong-id',
-  provider: 'fake',
-  outcome: { kind: 'success', reasonCode: 'ok' },
+  outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
+  provider: { requested: avail('fake'), resolved: avail('fake') },
   model: {
-    requested: null,
-    resolved: { availability: 'unavailable', reason: 'n/a' }
-  }
+    requested: unavail('no model requested'),
+    resolved: unavail('n/a'),
+    resolutionSource: 'unavailable',
+  },
+  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  posture: {
+    fingerprint: avail('${'a'.repeat(64)}'),
+    argvRedacted: avail(['x']),
+    commandPath: unavail('n/a'),
+    sourceClasses: ['cli'],
+    workspaceMode: unavail('n/a'),
+  },
+  stateIsolation: 'unsupported',
+  attempts: [{ attempt: 1, startedAt: now, endedAt: now, durationMs: 1, exitCode: 0 }],
+  timing: { startedAt: now, endedAt: now, durationMs: 1 },
+  process: { exitCode: 0, transportStatus: unavail('n/a') },
+  cleanup: { status: 'not-needed' },
+  diagnostics: unavail('n/a'),
+  usage: unavail('n/a'),
+  cost: unavail('n/a'),
+  artifacts: { result: path.resolve(out), quarantineDir: qDir },
 }));
 process.exit(0);
 `,
@@ -401,15 +422,42 @@ const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifa
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
 fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'actual-provider-out\\n');
 fs.writeFileSync(path.join(rawDir, 'stderr.txt'), '');
+const avail = (v) => ({ availability: 'available', value: v });
+const unavail = (r) => ({ availability: 'unavailable', reason: r });
+const now = new Date().toISOString();
+const rm = req.model != null && String(req.model).trim() !== '' ? String(req.model) : null;
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: req.requestId,
-  provider: req.provider,
-  outcome: { kind: 'success', reasonCode: 'ok' },
+  outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
+  provider: { requested: avail(req.provider), resolved: avail(req.provider) },
   model: {
-    requested: req.model != null ? req.model : null,
-    resolved: { availability: 'available', value: 'm1' }
-  }
+    requested: rm ? avail(rm) : unavail('no model requested'),
+    resolved: avail('m1'),
+    resolutionSource: 'provider-result',
+  },
+  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  posture: {
+    fingerprint: avail('${'a'.repeat(64)}'),
+    argvRedacted: avail(['x']),
+    commandPath: unavail('n/a'),
+    sourceClasses: ['cli'],
+    workspaceMode: unavail('n/a'),
+  },
+  stateIsolation: 'unsupported',
+  attempts: [{ attempt: 1, startedAt: now, endedAt: now, durationMs: 1, exitCode: 0 }],
+  timing: { startedAt: now, endedAt: now, durationMs: 1 },
+  process: { exitCode: 0, transportStatus: unavail('n/a') },
+  cleanup: { status: 'not-needed' },
+  diagnostics: unavail('n/a'),
+  usage: unavail('n/a'),
+  cost: unavail('n/a'),
+  artifacts: {
+    result: path.resolve(out),
+    quarantineDir: rawDir,
+    stdout: path.join(rawDir, 'stdout.txt'),
+    stderr: path.join(rawDir, 'stderr.txt'),
+  },
 }));
 process.exit(0);
 `,
@@ -618,18 +666,12 @@ const base = path.basename(path.resolve(out));
 const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
 const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
-fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'E2E_CONTRACT_OUT\\n');
-fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'E2E_CONTRACT_ERR\\n');
-fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
-  requestId: req.requestId,
-  provider: req.provider,
-  outcome: { kind: 'success', reasonCode: 'ok' },
-  model: {
-    requested: req.model != null ? req.model : null,
-    resolved: { availability: 'available', value: 'm-contract' }
-  }
-}));
+${FAKE_POETIC_WRITE_FULL_V1_CJS}
+writeFullV1(req, out, {
+  stdout: 'E2E_CONTRACT_OUT\\n',
+  stderr: 'E2E_CONTRACT_ERR\\n',
+  resolvedModel: 'm-contract',
+});
 process.exit(0);
 `,
         'utf8',
@@ -734,16 +776,14 @@ process.exit(0);
       assert.ok('error' in escape);
 
       // bind clears artifact on mismatch so model cannot leak
-      const stale = parseInvokeResult({
-        schema: 'poetic.provider.invoke.result.v1',
-        requestId: 'stale-model-id',
-        provider: 'fake',
-        outcome: { kind: 'success', reasonCode: 'ok' },
-        model: {
-          requested: null,
-          resolved: { availability: 'available', value: 'should-not-attribute' },
-        },
-      });
+      const stale = parseInvokeResult(
+        buildValidInvokeResultV1({
+          requestId: 'stale-model-id',
+          provider: 'fake',
+          requestedModel: null,
+          resolvedModel: 'should-not-attribute',
+        }),
+      );
       assert.equal(stale.valid, true);
       assert.ok(stale.artifact);
       const bound = bindInvokeResultToRequestId(stale, 'current-id');
@@ -760,16 +800,8 @@ const fs = require('fs');
 const args = process.argv.slice(2);
 const out = args[args.indexOf('--output') + 1];
 const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
-fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
-  requestId: req.requestId,
-  provider: req.provider,
-  outcome: { kind: 'success', reasonCode: 'ok' },
-  model: {
-    requested: req.model != null ? req.model : null,
-    resolved: { availability: 'available', value: 'm-x' }
-  }
-}));
+${FAKE_POETIC_WRITE_FULL_V1_CJS}
+writeFullV1(req, out, { writeRaw: false, resolvedModel: 'm-x' });
 process.exit(0);
 `,
         'utf8',

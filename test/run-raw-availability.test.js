@@ -19,6 +19,7 @@ import {
   rm,
   access,
 } from 'node:fs/promises';
+import { FAKE_POETIC_WRITE_FULL_V1_CJS } from './helpers/poetic-result-v1.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CORPUS = path.join(REPO, 'benchmarks');
@@ -228,18 +229,18 @@ describe('runCampaign raw evidence availability', () => {
     const { readTrialResult } = await import('../harness/results.js');
 
     const campaignDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-raw-noraw-'));
-    // Success-shaped schema + matching requestId but no invoke-artifacts files.
+    // Success-shaped full v1 + matching requestId but no invoke-artifacts files.
     const bin = await writeFakePoetic(`#!/usr/bin/env node
 const fs = require('fs');
 const args = process.argv.slice(2);
 const out = args[args.indexOf('--output') + 1];
 const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
-fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
-  requestId: req.requestId,
-  outcome: { kind: 'success', reasonCode: 'ok' },
-  model: { resolved: { availability: 'available', value: 'must-not-pass-without-raw' } }
-}));
+${FAKE_POETIC_WRITE_FULL_V1_CJS}
+writeFullV1(req, out, {
+  writeRaw: false,
+  resolvedModel: 'must-not-pass-without-raw',
+  requestedModel: req.model != null ? String(req.model) : null,
+});
 process.exit(0);
 `);
     try {
@@ -295,27 +296,16 @@ process.exit(0);
     const campaignDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-raw-mismatch-'));
     const bin = await writeFakePoetic(`#!/usr/bin/env node
 const fs = require('fs');
-const path = require('path');
 const args = process.argv.slice(2);
 const out = args[args.indexOf('--output') + 1];
-const base = path.basename(path.resolve(out));
-const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
-// Plant raw under WRONG requestId so a naive reader could still find streams.
-const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', 'stale-other-request');
-fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
-fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'planted-stdout\\n');
-fs.writeFileSync(path.join(rawDir, 'stderr.txt'), '');
-fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
+const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
+${FAKE_POETIC_WRITE_FULL_V1_CJS}
+writeFullV1(req, out, {
   requestId: 'stale-other-request',
-  outcome: { kind: 'success', reasonCode: 'ok' },
-  model: {
-    resolved: {
-      availability: 'available',
-      value: 'TEMPTING-MODEL-MUST-NOT-ATTRIBUTE'
-    }
-  }
-}));
+  stdout: 'planted-stdout\\n',
+  resolvedModel: 'TEMPTING-MODEL-MUST-NOT-ATTRIBUTE',
+  requestedModel: req.model != null ? String(req.model) : null,
+});
 process.exit(0);
 `);
     try {

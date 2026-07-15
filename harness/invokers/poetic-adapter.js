@@ -92,7 +92,54 @@ export const POETIC_OUTCOME_KINDS = Object.freeze([
 const OUTCOME_KIND_SET = new Set(POETIC_OUTCOME_KINDS);
 
 /**
+ * Stable reason codes from poetic ProviderInvokeReasonCode.
+ * Free-form text is never accepted on the parse boundary.
+ */
+export const POETIC_REASON_CODES = Object.freeze([
+  'SUCCESS',
+  'MODEL_UNRESOLVED',
+  'PROVIDER_ERROR',
+  'PROVIDER_EXECUTION_ERROR',
+  'PROVIDER_AUTH_ERROR',
+  'PROVIDER_TIMEOUT',
+  'PROVIDER_ABORTED',
+  'PROVIDER_NOT_FOUND',
+  'INTERNAL_ERROR',
+  'NOT_READY',
+]);
+
+/** @type {ReadonlySet<string>} */
+const REASON_CODE_SET = new Set(POETIC_REASON_CODES);
+
+/** Model resolutionSource enum from Poetic types.ts */
+export const MODEL_RESOLUTION_SOURCES = Object.freeze([
+  'request',
+  'provider-result',
+  'config-default',
+  'unavailable',
+]);
+
+/** @type {ReadonlySet<string>} */
+const RESOLUTION_SOURCE_SET = new Set(MODEL_RESOLUTION_SOURCES);
+
+/** stateIsolation enum */
+export const STATE_ISOLATION_LEVELS = Object.freeze([
+  'enforced',
+  'partial',
+  'unsupported',
+]);
+
+/** cleanup.status enum */
+export const CLEANUP_STATUSES = Object.freeze([
+  'complete',
+  'partial',
+  'unsupported',
+  'not-needed',
+]);
+
+/**
  * Bounded adapter reasonCode syntax for ordinary/exported records.
+ * Accepts Poetic ProviderInvokeReasonCode values and other bounded ids.
  * Free-form text is rejected at the parse boundary (never flows into results).
  */
 export const REASON_CODE_RE = /^[A-Za-z0-9._-]{1,128}$/;
@@ -133,9 +180,8 @@ export function sanitizeAdapterReasonCode(value) {
  */
 
 /**
- * Normalize requested-model identity for bind comparison.
+ * Normalize requested-model identity from a request.model string (request side).
  * Absent / null / empty → null (request did not pin a model).
- * Non-empty string → that string.
  *
  * @param {unknown} value
  * @returns {string | null}
@@ -145,6 +191,23 @@ export function normalizeRequestedModelIdentity(value) {
   if (typeof value !== 'string') return null;
   const s = value.trim();
   return s === '' ? null : s;
+}
+
+/**
+ * Extract string value from AvailabilityCoded / AvailableValue for bind compare.
+ * available + non-empty value → string; unavailable or missing → null.
+ *
+ * @param {unknown} coded
+ * @returns {string | null}
+ */
+export function valueFromAvailabilityCoded(coded) {
+  if (coded == null || typeof coded !== 'object' || Array.isArray(coded)) {
+    return null;
+  }
+  const c = /** @type {Record<string, unknown>} */ (coded);
+  if (c.availability !== 'available') return null;
+  if (typeof c.value !== 'string' || c.value.trim() === '') return null;
+  return c.value.trim();
 }
 
 /**
@@ -169,81 +232,101 @@ function invalidParse(infraFailure, parseError, extra = {}) {
 }
 
 /**
- * Type-check model.resolved under poetic.provider.invoke.result.v1.
- * - availability: "available" requires non-empty string value
- * - availability: "unavailable" may include optional reason (string if present)
- *
- * @param {unknown} resolved
- * @returns {{ ok: true } | { ok: false, error: string, parseError: string }}
+ * Validate AvailabilityCoded<T> / AvailableValue shape.
+ * @param {unknown} coded
+ * @param {string} path
+ * @param {{ requireAvailable?: boolean, valueType?: 'string' | 'string[]' | 'object' | 'number' }} [opts]
+ * @returns {string | null} error message or null if ok
  */
-function validateModelResolved(resolved) {
-  if (resolved == null || typeof resolved !== 'object' || Array.isArray(resolved)) {
-    return {
-      ok: false,
-      error: 'invoke result model.resolved must be an object',
-      parseError: 'invalid-model-resolved',
-    };
+function validateAvailabilityCoded(coded, path, opts = {}) {
+  if (coded == null || typeof coded !== 'object' || Array.isArray(coded)) {
+    return `${path} must be an AvailabilityCoded object`;
   }
-  const r = /** @type {Record<string, unknown>} */ (resolved);
+  const c = /** @type {Record<string, unknown>} */ (coded);
   const availability =
-    r.availability != null ? String(r.availability).trim() : '';
+    c.availability != null ? String(c.availability).trim() : '';
   if (availability === 'available') {
-    if (typeof r.value !== 'string' || r.value.trim() === '') {
-      return {
-        ok: false,
-        error:
-          'invoke result model.resolved.availability is available but value is missing or not a non-empty string',
-        parseError: 'model-resolved-available-missing-value',
-      };
+    if (!('value' in c)) {
+      return `${path}.value is required when availability is available`;
     }
-    return { ok: true };
+    const vt = opts.valueType ?? 'string';
+    if (vt === 'string') {
+      if (typeof c.value !== 'string' || c.value.trim() === '') {
+        return `${path}.value must be a non-empty string when available`;
+      }
+    } else if (vt === 'string[]') {
+      if (!Array.isArray(c.value) || !c.value.every((x) => typeof x === 'string')) {
+        return `${path}.value must be a string[] when available`;
+      }
+    } else if (vt === 'object') {
+      if (
+        c.value == null ||
+        typeof c.value !== 'object' ||
+        Array.isArray(c.value)
+      ) {
+        return `${path}.value must be a plain object when available`;
+      }
+    } else if (vt === 'number') {
+      if (typeof c.value !== 'number' || !Number.isFinite(c.value)) {
+        return `${path}.value must be a finite number when available`;
+      }
+    }
+    return null;
   }
   if (availability === 'unavailable') {
-    if (r.reason != null && typeof r.reason !== 'string') {
-      return {
-        ok: false,
-        error: 'invoke result model.resolved.reason must be a string when present',
-        parseError: 'invalid-model-resolved-reason',
-      };
+    if (opts.requireAvailable) {
+      return `${path} must be available`;
     }
-    return { ok: true };
+    if (c.reason != null && typeof c.reason !== 'string') {
+      return `${path}.reason must be a string when present`;
+    }
+    return null;
   }
-  return {
-    ok: false,
-    error: `invoke result model.resolved.availability must be "available" or "unavailable", got ${availability || '(missing)'}`,
-    parseError: 'invalid-model-resolved-availability',
-  };
+  return `${path}.availability must be "available" or "unavailable"`;
 }
 
 /**
- * Type-check model object under poetic.provider.invoke.result.v1.
- *
- * model.requested contract:
- * - optional at parse time (string or null/absent)
- * - non-string non-null is invalid
- * - identity consistency with the frozen request is enforced by
- *   bindInvokeResultToRequest (not parse alone)
- *
- * @param {unknown} model
- * @returns {{ ok: true } | { ok: false, error: string, parseError: string }}
+ * @param {unknown} attempt
+ * @param {string} path
+ * @returns {string | null}
  */
-function validateModelObject(model) {
-  if (model == null || typeof model !== 'object' || Array.isArray(model)) {
-    return {
-      ok: false,
-      error: 'invoke result missing model object',
-      parseError: 'missing-model',
-    };
+function validateAttempt(attempt, path) {
+  if (attempt == null || typeof attempt !== 'object' || Array.isArray(attempt)) {
+    return `${path} must be an object`;
   }
-  const m = /** @type {Record<string, unknown>} */ (model);
-  if ('requested' in m && m.requested != null && typeof m.requested !== 'string') {
-    return {
-      ok: false,
-      error: 'invoke result model.requested must be a string or null/absent',
-      parseError: 'invalid-model-requested',
-    };
+  const a = /** @type {Record<string, unknown>} */ (attempt);
+  if (typeof a.attempt !== 'number' || !Number.isInteger(a.attempt) || a.attempt < 1) {
+    return `${path}.attempt must be an integer >= 1`;
   }
-  return validateModelResolved(m.resolved);
+  if (typeof a.startedAt !== 'string' || a.startedAt.trim() === '') {
+    return `${path}.startedAt must be a non-empty string`;
+  }
+  if (typeof a.endedAt !== 'string' || a.endedAt.trim() === '') {
+    return `${path}.endedAt must be a non-empty string`;
+  }
+  if (typeof a.durationMs !== 'number' || !Number.isFinite(a.durationMs)) {
+    return `${path}.durationMs must be a finite number`;
+  }
+  if (
+    'exitCode' in a &&
+    a.exitCode != null &&
+    (typeof a.exitCode !== 'number' || !Number.isInteger(a.exitCode))
+  ) {
+    return `${path}.exitCode must be an integer or null when present`;
+  }
+  if ('error' in a && a.error != null) {
+    if (typeof a.error !== 'object' || Array.isArray(a.error)) {
+      return `${path}.error must be an object when present`;
+    }
+    const e = /** @type {Record<string, unknown>} */ (a.error);
+    if (typeof e.code !== 'string' || e.code.trim() === '') {
+      return `${path}.error.code must be a non-empty string`;
+    }
+    if (typeof e.message !== 'string') {
+      return `${path}.error.message must be a string`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -337,20 +420,16 @@ export function mapOutcomeKind(kind, reasonCode = null) {
 }
 
 /**
- * Parse and validate a poetic.provider.invoke.result.v1 artifact.
+ * Parse and validate a poetic.provider.invoke.result.v1 artifact against the
+ * real ProviderInvokeResultV1 contract (poetic types.ts). Fail closed: invalid
+ * never retains model/artifact evidence.
  *
- * Strict contract (fail closed — invalid never retains model/artifact evidence):
- * - schema === poetic.provider.invoke.result.v1
- * - requestId: non-empty string
- * - provider: non-empty string
- * - model: object with:
- *     requested?: string | null (identity match deferred to bind)
- *     resolved: { availability: "available"|"unavailable", value?|reason? }
- * - outcome: { kind ∈ POETIC_OUTCOME_KINDS, reasonCode?: sanitized }
- * - process / evidence / artifact: if present, must be plain objects
+ * Required top-level: schema, requestId, outcome, provider, model, versions,
+ * posture, stateIsolation, attempts, timing, process, cleanup, diagnostics,
+ * usage, cost, artifacts.
  *
  * Non-success outcome kinds remain valid when the rest of the schema is sound;
- * identity binding (requestId/provider/model.requested) is separate.
+ * identity binding is separate ({@link bindInvokeResultToRequest}).
  *
  * @param {unknown} artifact - parsed JSON or JSON string from poetic --output
  * @returns {ParsedInvokeResult}
@@ -379,78 +458,331 @@ export function parseInvokeResult(artifact) {
     );
   }
 
-  // Required identity fields on the result itself (bind still checks vs request).
   if (typeof rec.requestId !== 'string' || rec.requestId.trim() === '') {
     return invalidParse(
       'invoke result requestId must be a non-empty string',
       'missing-requestId',
     );
   }
-  if (typeof rec.provider !== 'string' || rec.provider.trim() === '') {
+
+  // --- outcome ---
+  const outcome = rec.outcome;
+  if (outcome == null || typeof outcome !== 'object' || Array.isArray(outcome)) {
+    return invalidParse('invoke result missing outcome object', 'missing-outcome');
+  }
+  const o = /** @type {Record<string, unknown>} */ (outcome);
+  if (o.kind == null || String(o.kind).trim() === '') {
+    return invalidParse('invoke result outcome.kind is missing', 'missing-kind');
+  }
+  const kind = String(o.kind).trim();
+  if (!OUTCOME_KIND_SET.has(kind)) {
     return invalidParse(
-      'invoke result provider must be a non-empty string',
+      `unknown adapter outcome kind (${kind})`,
+      'unknown-kind',
+    );
+  }
+  if (
+    !('exitCode' in o) ||
+    (o.exitCode != null &&
+      (typeof o.exitCode !== 'number' || !Number.isInteger(o.exitCode)))
+  ) {
+    return invalidParse(
+      'invoke result outcome.exitCode must be an integer or null',
+      'invalid-outcome-exitCode',
+    );
+  }
+  if (typeof o.reasonCode !== 'string' || !REASON_CODE_SET.has(o.reasonCode)) {
+    return invalidParse(
+      `invoke result outcome.reasonCode must be a ProviderInvokeReasonCode, got ${
+        o.reasonCode != null ? JSON.stringify(o.reasonCode) : '(missing)'
+      }`,
+      'invalid-reasonCode',
+    );
+  }
+  if (o.message != null && typeof o.message !== 'string') {
+    return invalidParse(
+      'invoke result outcome.message must be a string when present',
+      'invalid-outcome-message',
+    );
+  }
+  const reasonCode = o.reasonCode;
+  const reasonCodeRejected = false;
+
+  // --- provider: { requested: AvailableValue<string>, resolved: AvailabilityCoded<string> } ---
+  const provider = rec.provider;
+  if (provider == null || typeof provider !== 'object' || Array.isArray(provider)) {
+    return invalidParse(
+      'invoke result provider must be an object',
       'missing-provider',
     );
   }
-
-  const modelCheck = validateModelObject(rec.model);
-  if (!modelCheck.ok) {
-    return invalidParse(modelCheck.error, modelCheck.parseError);
+  const p = /** @type {Record<string, unknown>} */ (provider);
+  const provReqErr = validateAvailabilityCoded(p.requested, 'provider.requested', {
+    requireAvailable: true,
+    valueType: 'string',
+  });
+  if (provReqErr) {
+    return invalidParse(provReqErr, 'invalid-provider-requested');
+  }
+  const provResErr = validateAvailabilityCoded(p.resolved, 'provider.resolved', {
+    valueType: 'string',
+  });
+  if (provResErr) {
+    return invalidParse(provResErr, 'invalid-provider-resolved');
   }
 
-  // Optional envelope fields: type-check when present (never accept arrays / scalars).
-  for (const key of /** @type {const} */ (['process', 'evidence', 'artifact'])) {
-    if (key in rec && rec[key] != null) {
-      if (typeof rec[key] !== 'object' || Array.isArray(rec[key])) {
-        return invalidParse(
-          `invoke result ${key} must be an object when present`,
-          `invalid-${key}`,
-        );
-      }
+  // --- model: { requested, resolved: AvailabilityCoded, resolutionSource } ---
+  const model = rec.model;
+  if (model == null || typeof model !== 'object' || Array.isArray(model)) {
+    return invalidParse('invoke result missing model object', 'missing-model');
+  }
+  const m = /** @type {Record<string, unknown>} */ (model);
+  const modelReqErr = validateAvailabilityCoded(m.requested, 'model.requested', {
+    valueType: 'string',
+  });
+  if (modelReqErr) {
+    return invalidParse(modelReqErr, 'invalid-model-requested');
+  }
+  const modelResErr = validateAvailabilityCoded(m.resolved, 'model.resolved', {
+    valueType: 'string',
+  });
+  if (modelResErr) {
+    return invalidParse(modelResErr, 'invalid-model-resolved');
+  }
+  if (
+    typeof m.resolutionSource !== 'string' ||
+    !RESOLUTION_SOURCE_SET.has(m.resolutionSource)
+  ) {
+    return invalidParse(
+      `invoke result model.resolutionSource must be a ModelResolutionSource, got ${
+        m.resolutionSource != null ? JSON.stringify(m.resolutionSource) : '(missing)'
+      }`,
+      'invalid-resolutionSource',
+    );
+  }
+
+  // --- versions ---
+  const versions = rec.versions;
+  if (versions == null || typeof versions !== 'object' || Array.isArray(versions)) {
+    return invalidParse('invoke result missing versions object', 'missing-versions');
+  }
+  const v = /** @type {Record<string, unknown>} */ (versions);
+  for (const key of /** @type {const} */ (['poetic', 'providerCli'])) {
+    const err = validateAvailabilityCoded(v[key], `versions.${key}`, {
+      valueType: 'string',
+    });
+    if (err) return invalidParse(err, `invalid-versions-${key}`);
+  }
+
+  // --- posture ---
+  const posture = rec.posture;
+  if (posture == null || typeof posture !== 'object' || Array.isArray(posture)) {
+    return invalidParse('invoke result missing posture object', 'missing-posture');
+  }
+  const pos = /** @type {Record<string, unknown>} */ (posture);
+  for (const [key, vt] of /** @type {const} */ ([
+    ['fingerprint', 'string'],
+    ['argvRedacted', 'string[]'],
+    ['commandPath', 'string'],
+    ['workspaceMode', 'string'],
+  ])) {
+    const err = validateAvailabilityCoded(pos[key], `posture.${key}`, {
+      valueType: /** @type {'string' | 'string[]'} */ (vt),
+    });
+    if (err) return invalidParse(err, `invalid-posture-${key}`);
+  }
+  if (
+    !Array.isArray(pos.sourceClasses) ||
+    !pos.sourceClasses.every((x) => typeof x === 'string')
+  ) {
+    return invalidParse(
+      'posture.sourceClasses must be a string array',
+      'invalid-posture-sourceClasses',
+    );
+  }
+
+  // --- stateIsolation ---
+  if (
+    typeof rec.stateIsolation !== 'string' ||
+    !STATE_ISOLATION_LEVELS.includes(
+      /** @type {typeof STATE_ISOLATION_LEVELS[number]} */ (rec.stateIsolation),
+    )
+  ) {
+    return invalidParse(
+      `invoke result stateIsolation invalid: ${JSON.stringify(rec.stateIsolation)}`,
+      'invalid-stateIsolation',
+    );
+  }
+
+  // --- attempts ---
+  if (!Array.isArray(rec.attempts) || rec.attempts.length < 1) {
+    return invalidParse(
+      'invoke result attempts must be a non-empty array',
+      'invalid-attempts',
+    );
+  }
+  for (let i = 0; i < rec.attempts.length; i += 1) {
+    const err = validateAttempt(rec.attempts[i], `attempts[${i}]`);
+    if (err) return invalidParse(err, 'invalid-attempt');
+  }
+
+  // --- timing ---
+  const timing = rec.timing;
+  if (timing == null || typeof timing !== 'object' || Array.isArray(timing)) {
+    return invalidParse('invoke result missing timing object', 'missing-timing');
+  }
+  const t = /** @type {Record<string, unknown>} */ (timing);
+  if (typeof t.startedAt !== 'string' || t.startedAt.trim() === '') {
+    return invalidParse('timing.startedAt must be a non-empty string', 'invalid-timing');
+  }
+  if (typeof t.endedAt !== 'string' || t.endedAt.trim() === '') {
+    return invalidParse('timing.endedAt must be a non-empty string', 'invalid-timing');
+  }
+  if (typeof t.durationMs !== 'number' || !Number.isFinite(t.durationMs)) {
+    return invalidParse('timing.durationMs must be a finite number', 'invalid-timing');
+  }
+
+  // --- process ---
+  const processObj = rec.process;
+  if (
+    processObj == null ||
+    typeof processObj !== 'object' ||
+    Array.isArray(processObj)
+  ) {
+    return invalidParse('invoke result missing process object', 'missing-process');
+  }
+  const proc = /** @type {Record<string, unknown>} */ (processObj);
+  if (
+    !('exitCode' in proc) ||
+    (proc.exitCode != null &&
+      (typeof proc.exitCode !== 'number' || !Number.isInteger(proc.exitCode)))
+  ) {
+    return invalidParse(
+      'process.exitCode must be an integer or null',
+      'invalid-process-exitCode',
+    );
+  }
+  const tsErr = validateAvailabilityCoded(
+    proc.transportStatus,
+    'process.transportStatus',
+    { valueType: 'string' },
+  );
+  if (tsErr) return invalidParse(tsErr, 'invalid-process-transportStatus');
+
+  // --- cleanup ---
+  const cleanup = rec.cleanup;
+  if (cleanup == null || typeof cleanup !== 'object' || Array.isArray(cleanup)) {
+    return invalidParse('invoke result missing cleanup object', 'missing-cleanup');
+  }
+  const cl = /** @type {Record<string, unknown>} */ (cleanup);
+  if (
+    typeof cl.status !== 'string' ||
+    !CLEANUP_STATUSES.includes(
+      /** @type {typeof CLEANUP_STATUSES[number]} */ (cl.status),
+    )
+  ) {
+    return invalidParse(
+      `cleanup.status invalid: ${JSON.stringify(cl.status)}`,
+      'invalid-cleanup-status',
+    );
+  }
+  if (
+    cl.notes != null &&
+    (!Array.isArray(cl.notes) || !cl.notes.every((x) => typeof x === 'string'))
+  ) {
+    return invalidParse(
+      'cleanup.notes must be a string array when present',
+      'invalid-cleanup-notes',
+    );
+  }
+
+  // --- diagnostics / usage / cost ---
+  const diagErr = validateAvailabilityCoded(rec.diagnostics, 'diagnostics', {
+    valueType: 'object',
+  });
+  if (diagErr) return invalidParse(diagErr, 'invalid-diagnostics');
+
+  const usage = rec.usage;
+  if (usage == null || typeof usage !== 'object' || Array.isArray(usage)) {
+    return invalidParse('invoke result missing usage object', 'missing-usage');
+  }
+  const u = /** @type {Record<string, unknown>} */ (usage);
+  if (u.availability === 'available') {
+    if (u.value == null || typeof u.value !== 'object' || Array.isArray(u.value)) {
+      return invalidParse(
+        'usage.value must be an object when available',
+        'invalid-usage',
+      );
     }
+  } else {
+    const uErr = validateAvailabilityCoded(usage, 'usage', { valueType: 'object' });
+    if (uErr) return invalidParse(uErr, 'invalid-usage');
   }
 
-  const outcome = rec.outcome;
-  if (outcome == null || typeof outcome !== 'object' || Array.isArray(outcome)) {
+  const cost = rec.cost;
+  if (cost == null || typeof cost !== 'object' || Array.isArray(cost)) {
+    return invalidParse('invoke result missing cost object', 'missing-cost');
+  }
+  const co = /** @type {Record<string, unknown>} */ (cost);
+  if (co.availability === 'available') {
+    if (
+      co.value == null ||
+      typeof co.value !== 'object' ||
+      Array.isArray(co.value)
+    ) {
+      return invalidParse(
+        'cost.value must be an object when available',
+        'invalid-cost',
+      );
+    }
+    const cv = /** @type {Record<string, unknown>} */ (co.value);
+    if (typeof cv.totalCostUsd !== 'number' || !Number.isFinite(cv.totalCostUsd)) {
+      return invalidParse(
+        'cost.value.totalCostUsd must be a finite number when available',
+        'invalid-cost',
+      );
+    }
+  } else {
+    const cErr = validateAvailabilityCoded(cost, 'cost', { valueType: 'object' });
+    if (cErr) return invalidParse(cErr, 'invalid-cost');
+  }
+
+  // --- artifacts (required object with result + quarantineDir) ---
+  const artifacts = rec.artifacts;
+  if (
+    artifacts == null ||
+    typeof artifacts !== 'object' ||
+    Array.isArray(artifacts)
+  ) {
     return invalidParse(
-      'invoke result missing outcome object',
-      'missing-outcome',
+      'invoke result missing artifacts object',
+      'missing-artifacts',
     );
   }
-
-  const o = /** @type {Record<string, unknown>} */ (outcome);
-  if (o.kind == null || String(o.kind).trim() === '') {
+  const art = /** @type {Record<string, unknown>} */ (artifacts);
+  if (typeof art.result !== 'string' || art.result.trim() === '') {
     return invalidParse(
-      'invoke result outcome.kind is missing',
-      'missing-kind',
+      'artifacts.result must be a non-empty string path',
+      'invalid-artifacts-result',
     );
   }
-
-  const kind = String(o.kind).trim();
-  // Parse-boundary validation: free-form reasonCode never enters ordinary records.
-  const rawReason =
-    o.reasonCode != null && String(o.reasonCode).trim() !== ''
-      ? String(o.reasonCode).trim()
-      : null;
-  const reasonCodeRejected =
-    rawReason != null && sanitizeAdapterReasonCode(rawReason) == null;
-  const reasonCode = sanitizeAdapterReasonCode(rawReason);
-
-  if (!OUTCOME_KIND_SET.has(kind)) {
-    const mapped = mapOutcomeKind(kind, reasonCode);
-    return {
-      valid: false,
-      ...mapped,
-      success: false,
-      reasonCode, // sanitized only (null if free-form)
-      reasonCodeRejected,
-      infraFailure:
-        mapped.infraFailure ??
-        `unknown adapter outcome kind (${kind})`,
-      parseError: 'unknown-kind',
-      // Invalid kinds never supply model/artifact evidence
-      artifact: null,
-    };
+  if (typeof art.quarantineDir !== 'string' || art.quarantineDir.trim() === '') {
+    return invalidParse(
+      'artifacts.quarantineDir must be a non-empty string path',
+      'invalid-artifacts-quarantineDir',
+    );
+  }
+  if (art.stdout != null && typeof art.stdout !== 'string') {
+    return invalidParse(
+      'artifacts.stdout must be a string when present',
+      'invalid-artifacts-stdout',
+    );
+  }
+  if (art.stderr != null && typeof art.stderr !== 'string') {
+    return invalidParse(
+      'artifacts.stderr must be a string when present',
+      'invalid-artifacts-stderr',
+    );
   }
 
   const mapped = mapOutcomeKind(kind, reasonCode);
@@ -459,31 +791,9 @@ export function parseInvokeResult(artifact) {
     ...mapped,
     reasonCode,
     reasonCodeRejected,
-    artifact: sanitizeArtifactReasonCode(rec),
+    // Keep the fully validated object (reasonCode already enum-bound)
+    artifact: { ...rec },
   };
-}
-
-/**
- * Return a shallow copy of the result artifact with outcome.reasonCode
- * sanitized (or removed when free-form) so free-form never flows downstream.
- * @param {Record<string, unknown>} rec
- * @returns {Record<string, unknown>}
- */
-function sanitizeArtifactReasonCode(rec) {
-  const out = { ...rec };
-  if (out.outcome != null && typeof out.outcome === 'object' && !Array.isArray(out.outcome)) {
-    const outcome = { .../** @type {Record<string, unknown>} */ (out.outcome) };
-    if ('reasonCode' in outcome) {
-      const s = sanitizeAdapterReasonCode(outcome.reasonCode);
-      if (s == null) {
-        delete outcome.reasonCode;
-      } else {
-        outcome.reasonCode = s;
-      }
-    }
-    out.outcome = outcome;
-  }
-  return out;
 }
 
 /**
@@ -679,11 +989,10 @@ async function resolveExpectedIdentity(request, requestPath) {
  *
  * Before fullyBound / success / model evidence is allowed:
  * - result.requestId must exactly equal expected.requestId
- * - result.provider must exactly equal expected.provider
- * - requested model identity must match, including null/absence:
- *     - if the request has no model / null / empty, the result must not claim
- *       a different non-null model.requested
- *     - if the request has a model string, result.model.requested must equal it
+ * - result.provider.requested.value must exactly equal expected.provider
+ * - model.requested AvailabilityCoded must match request.model semantics:
+ *     - request pinned model string → available with exact value
+ *     - no request model → unavailable (value must not claim a different model)
  *
  * On any mismatch: valid=false, success=false, artifact=null (no model evidence).
  * Non-success outcome kinds are preserved when schema is valid and identity binds.
@@ -726,37 +1035,84 @@ export function bindInvokeResultToRequest(parsed, expected) {
     };
   }
 
-  const rawProvider = rec.provider;
-  const gotProvider =
-    rawProvider != null && String(rawProvider).trim() !== ''
-      ? String(rawProvider)
-      : null;
+  // provider.requested is AvailableValue<string> after strict parse
+  let gotProvider = null;
+  if (
+    rec.provider != null &&
+    typeof rec.provider === 'object' &&
+    !Array.isArray(rec.provider)
+  ) {
+    const p = /** @type {Record<string, unknown>} */ (rec.provider);
+    gotProvider = valueFromAvailabilityCoded(p.requested);
+  }
   if (gotProvider !== expectedProvider) {
     return {
       ...parsed,
       valid: false,
       success: false,
       artifact: null,
-      infraFailure: `adapter result provider mismatch: expected ${expectedProvider}, got ${gotProvider ?? '(missing)'}`,
+      infraFailure: `adapter result provider.requested mismatch: expected ${expectedProvider}, got ${gotProvider ?? '(missing)'}`,
       parseError: 'provider-mismatch',
     };
   }
 
-  // model.requested: string | null | absent. Compare null-normalized identities.
+  // model.requested is AvailabilityCoded: available value or unavailable
   let gotRequestedModel = null;
+  let modelRequestedUnavailable = false;
   if (rec.model != null && typeof rec.model === 'object' && !Array.isArray(rec.model)) {
     const m = /** @type {Record<string, unknown>} */ (rec.model);
-    gotRequestedModel = normalizeRequestedModelIdentity(m.requested);
+    if (
+      m.requested != null &&
+      typeof m.requested === 'object' &&
+      !Array.isArray(m.requested)
+    ) {
+      const mr = /** @type {Record<string, unknown>} */ (m.requested);
+      if (mr.availability === 'unavailable') {
+        modelRequestedUnavailable = true;
+        gotRequestedModel = null;
+      } else {
+        gotRequestedModel = valueFromAvailabilityCoded(m.requested);
+      }
+    }
   }
-  if (gotRequestedModel !== expectedRequestedModel) {
-    return {
-      ...parsed,
-      valid: false,
-      success: false,
-      artifact: null,
-      infraFailure: `adapter result model.requested mismatch: expected ${expectedRequestedModel ?? '(none)'}, got ${gotRequestedModel ?? '(none)'}`,
-      parseError: 'requested-model-mismatch',
-    };
+
+  if (expectedRequestedModel != null) {
+    // Request pinned a model → result must claim available with exact value
+    if (gotRequestedModel !== expectedRequestedModel) {
+      return {
+        ...parsed,
+        valid: false,
+        success: false,
+        artifact: null,
+        infraFailure: `adapter result model.requested mismatch: expected available ${expectedRequestedModel}, got ${gotRequestedModel ?? (modelRequestedUnavailable ? 'unavailable' : '(missing)')}`,
+        parseError: 'requested-model-mismatch',
+      };
+    }
+  } else {
+    // No request model → result must report unavailable (not a non-null available claim)
+    if (gotRequestedModel != null) {
+      return {
+        ...parsed,
+        valid: false,
+        success: false,
+        artifact: null,
+        infraFailure: `adapter result model.requested mismatch: expected unavailable (no model on request), got available ${gotRequestedModel}`,
+        parseError: 'requested-model-mismatch',
+      };
+    }
+    if (!modelRequestedUnavailable && gotRequestedModel == null) {
+      // parse requires AvailabilityCoded — if missing structure, already invalid
+      // at parse. If somehow absent, fail closed.
+      return {
+        ...parsed,
+        valid: false,
+        success: false,
+        artifact: null,
+        infraFailure:
+          'adapter result model.requested must be unavailable when request has no model',
+        parseError: 'requested-model-mismatch',
+      };
+    }
   }
 
   if (parsed.valid === true) {

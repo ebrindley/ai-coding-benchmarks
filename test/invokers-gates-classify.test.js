@@ -91,18 +91,43 @@ const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifa
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
 fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'provider-stdout-body\\n');
 fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'provider-stderr-body\\n');
+const avail = (v) => ({ availability: 'available', value: v });
+const unavail = (r) => ({ availability: 'unavailable', reason: r });
+const now = new Date().toISOString();
+const rm = req.model != null && String(req.model).trim() !== '' ? String(req.model) : null;
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: req.requestId,
-  provider: req.provider,
-  outcome: { kind: 'success', reasonCode: 'ok' },
-  receivedRequest: req,
+  outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
+  provider: { requested: avail(req.provider), resolved: avail(req.provider) },
   model: {
-    requested: req.model != null ? req.model : null,
-    resolved: { availability: 'available', value: 'resolved-from-provider' }
+    requested: rm ? avail(rm) : unavail('no model requested'),
+    resolved: avail('resolved-from-provider'),
+    resolutionSource: 'provider-result',
   },
-  args,
-  modes: { reqMode, outModeBefore }
+  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  posture: {
+    fingerprint: avail('${'e'.repeat(64)}'),
+    argvRedacted: avail(['x']),
+    commandPath: unavail('n/a'),
+    sourceClasses: ['cli'],
+    workspaceMode: unavail('n/a'),
+  },
+  stateIsolation: 'unsupported',
+  attempts: [{ attempt: 1, startedAt: now, endedAt: now, durationMs: 1, exitCode: 0 }],
+  timing: { startedAt: now, endedAt: now, durationMs: 1 },
+  process: { exitCode: 0, transportStatus: unavail('n/a') },
+  cleanup: { status: 'not-needed' },
+  diagnostics: unavail('n/a'),
+  usage: unavail('n/a'),
+  cost: unavail('n/a'),
+  artifacts: {
+    result: path.resolve(out),
+    quarantineDir: rawDir,
+    stdout: path.join(rawDir, 'stdout.txt'),
+    stderr: path.join(rawDir, 'stderr.txt'),
+  },
+  modes: { reqMode, outModeBefore },
 }));
 process.stdout.write('done');
 `,
@@ -151,7 +176,7 @@ process.stdout.write('done');
       assert.equal(result.exitCode, 0);
       assert.equal(result.success, true);
       assert.equal(result.outcomeKind, 'success');
-      assert.equal(result.reasonCode, 'ok');
+      assert.equal(result.reasonCode, 'SUCCESS');
       assert.equal(result.timedOut, false);
       assert.equal(result.infraFailure, undefined);
       // Actual provider raw ingested (not quiet wrapper CLI stdout "done")
@@ -161,7 +186,8 @@ process.stdout.write('done');
       assert.ok(!result.stdout.includes('done'));
 
       const written = JSON.parse(await readFile(outputPath, 'utf8'));
-      assert.equal(written.receivedRequest.schema, POETIC_INVOKE_REQUEST_SCHEMA);
+      assert.equal(written.schema, 'poetic.provider.invoke.result.v1');
+      assert.equal(written.provider.requested.value, request.provider);
       // Model evidence from bound parsedOutput only
       const evidence = parseResolvedModelEvidence(result.parsedOutput);
       assert.equal(evidence.available, true);
@@ -226,15 +252,44 @@ const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifa
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
 fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'raw-out-${kind}\\n');
 fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'raw-err-${kind}\\n');
+const avail = (v) => ({ availability: 'available', value: v });
+const unavail = (r) => ({ availability: 'unavailable', reason: r });
+const now = new Date().toISOString();
+const kind = ${JSON.stringify(kind)};
+const reasonCode = kind === 'success' ? 'SUCCESS' : kind === 'timeout' ? 'PROVIDER_TIMEOUT' : kind === 'aborted' ? 'PROVIDER_ABORTED' : kind === 'internal_error' ? 'INTERNAL_ERROR' : 'PROVIDER_ERROR';
+const exitCode = kind === 'success' ? 0 : 1;
 fs.writeFileSync(out, JSON.stringify({
   schema: ${JSON.stringify(POETIC_INVOKE_RESULT_SCHEMA)},
   requestId: 'r-${kind}',
-  provider: req.provider,
-  outcome: { kind: ${JSON.stringify(kind)}, reasonCode: 'rc-${kind}' },
+  outcome: { kind, exitCode, reasonCode },
+  provider: { requested: avail(req.provider), resolved: avail(req.provider) },
   model: {
-    requested: req.model != null ? req.model : null,
-    resolved: { availability: 'unavailable', reason: 'n/a' }
-  }
+    requested: unavail('no model requested'),
+    resolved: unavail('n/a'),
+    resolutionSource: 'unavailable',
+  },
+  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  posture: {
+    fingerprint: avail('${'f'.repeat(64)}'),
+    argvRedacted: avail(['x']),
+    commandPath: unavail('n/a'),
+    sourceClasses: ['cli'],
+    workspaceMode: unavail('n/a'),
+  },
+  stateIsolation: 'unsupported',
+  attempts: [{ attempt: 1, startedAt: now, endedAt: now, durationMs: 1, exitCode }],
+  timing: { startedAt: now, endedAt: now, durationMs: 1 },
+  process: { exitCode, transportStatus: unavail('n/a') },
+  cleanup: { status: 'not-needed' },
+  diagnostics: unavail('n/a'),
+  usage: unavail('n/a'),
+  cost: unavail('n/a'),
+  artifacts: {
+    result: path.resolve(out),
+    quarantineDir: rawDir,
+    stdout: path.join(rawDir, 'stdout.txt'),
+    stderr: path.join(rawDir, 'stderr.txt'),
+  },
 }));
 process.exit(0);
 `,
@@ -266,7 +321,8 @@ process.exit(0);
         const exp = expectByKind[kind];
         assert.equal(result.exitCode, 0, kind);
         assert.equal(result.outcomeKind, kind, kind);
-        assert.equal(result.reasonCode, `rc-${kind}`, kind);
+        // reasonCode is a stable ProviderInvokeReasonCode (not free-form rc-*)
+        assert.ok(result.reasonCode == null || /^[A-Z0-9_]+$/.test(result.reasonCode), kind);
         assert.equal(result.timedOut, exp.timedOut, kind);
         assert.equal(result.success, exp.success, kind);
 

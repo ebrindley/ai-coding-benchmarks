@@ -1,289 +1,227 @@
 /**
- * Strict poetic.provider.invoke.result.v1 parse + identity bind contract.
- *
- * Invariant: bridge artifact must be fully schema-valid and identity-bound
- * to the frozen request before model/raw success claims.
+ * Strict poetic.provider.invoke.result.v1 contract (ProviderInvokeResultV1).
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtemp, writeFile, chmod, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, writeFile, chmod, mkdir, rm } from 'node:fs/promises';
+import {
+  buildValidInvokeResultV1,
+  available,
+  unavailable,
+} from './helpers/poetic-result-v1.js';
 
-const RESULT_SCHEMA = 'poetic.provider.invoke.result.v1';
-
-/**
- * Minimal valid full v1 result (schema-valid; identity bind is separate).
- * @param {Record<string, unknown>} [overrides]
- */
-function fullResult(overrides = {}) {
-  return {
-    schema: RESULT_SCHEMA,
-    requestId: 'req-1',
-    provider: 'openai',
-    model: {
-      requested: 'gpt-test',
-      resolved: { availability: 'available', value: 'resolved-model' },
-    },
-    outcome: { kind: 'success', reasonCode: 'ok' },
-    ...overrides,
-  };
-}
-
-describe('poetic-adapter strict result.v1 contract', () => {
-  it('missing/malformed required fields → invalid, no artifact', async () => {
-    const {
-      parseInvokeResult,
-      POETIC_INVOKE_RESULT_SCHEMA,
-    } = await import('../harness/invokers/poetic-adapter.js');
-
-    assert.equal(POETIC_INVOKE_RESULT_SCHEMA, RESULT_SCHEMA);
-
-    /** @type {Array<[string, unknown, string]>} */
-    const cases = [
-      ['not-object', null, 'not-object'],
-      ['array', [], 'not-object'],
-      ['schema-mismatch', { schema: 'wrong', requestId: 'r', provider: 'p' }, 'schema-mismatch'],
-      [
-        'missing-requestId',
-        {
-          schema: RESULT_SCHEMA,
-          provider: 'p',
-          model: {
-            resolved: { availability: 'unavailable', reason: 'n/a' },
-          },
-          outcome: { kind: 'success' },
-        },
-        'missing-requestId',
-      ],
-      [
-        'empty-requestId',
-        {
-          schema: RESULT_SCHEMA,
-          requestId: '  ',
-          provider: 'p',
-          model: {
-            resolved: { availability: 'unavailable', reason: 'n/a' },
-          },
-          outcome: { kind: 'success' },
-        },
-        'missing-requestId',
-      ],
-      [
-        'missing-provider',
-        {
-          schema: RESULT_SCHEMA,
-          requestId: 'r1',
-          model: {
-            resolved: { availability: 'unavailable', reason: 'n/a' },
-          },
-          outcome: { kind: 'success' },
-        },
-        'missing-provider',
-      ],
-      [
-        'missing-model',
-        {
-          schema: RESULT_SCHEMA,
-          requestId: 'r1',
-          provider: 'p',
-          outcome: { kind: 'success' },
-        },
-        'missing-model',
-      ],
-      [
-        'invalid-model-resolved',
-        {
-          schema: RESULT_SCHEMA,
-          requestId: 'r1',
-          provider: 'p',
-          model: { resolved: 'bare-string' },
-          outcome: { kind: 'success' },
-        },
-        'invalid-model-resolved',
-      ],
-      [
-        'available-missing-value',
-        {
-          schema: RESULT_SCHEMA,
-          requestId: 'r1',
-          provider: 'p',
-          model: { resolved: { availability: 'available' } },
-          outcome: { kind: 'success' },
-        },
-        'model-resolved-available-missing-value',
-      ],
-      [
-        'invalid-model-requested',
-        {
-          schema: RESULT_SCHEMA,
-          requestId: 'r1',
-          provider: 'p',
-          model: {
-            requested: 42,
-            resolved: { availability: 'unavailable', reason: 'n/a' },
-          },
-          outcome: { kind: 'success' },
-        },
-        'invalid-model-requested',
-      ],
-      [
-        'missing-outcome',
-        {
-          schema: RESULT_SCHEMA,
-          requestId: 'r1',
-          provider: 'p',
-          model: {
-            resolved: { availability: 'unavailable', reason: 'n/a' },
-          },
-        },
-        'missing-outcome',
-      ],
-      [
-        'unknown-kind',
-        {
-          schema: RESULT_SCHEMA,
-          requestId: 'r1',
-          provider: 'p',
-          model: {
-            resolved: { availability: 'unavailable', reason: 'n/a' },
-          },
-          outcome: { kind: 'not-a-real-kind' },
-        },
-        'unknown-kind',
-      ],
-      [
-        'invalid-process',
-        {
-          ...fullResult(),
-          process: 'not-an-object',
-        },
-        'invalid-process',
-      ],
-      [
-        'invalid-evidence',
-        {
-          ...fullResult(),
-          evidence: ['array'],
-        },
-        'invalid-evidence',
-      ],
+describe('poetic-adapter strict ProviderInvokeResultV1 contract', () => {
+  it('rejects missing each required top-level section', async () => {
+    const { parseInvokeResult } = await import(
+      '../harness/invokers/poetic-adapter.js'
+    );
+    const full = buildValidInvokeResultV1();
+    const required = [
+      'schema',
+      'requestId',
+      'outcome',
+      'provider',
+      'model',
+      'versions',
+      'posture',
+      'stateIsolation',
+      'attempts',
+      'timing',
+      'process',
+      'cleanup',
+      'diagnostics',
+      'usage',
+      'cost',
+      'artifacts',
     ];
-
-    for (const [label, input, expectedParseError] of cases) {
-      const parsed = parseInvokeResult(input);
-      assert.equal(parsed.valid, false, label);
-      assert.equal(parsed.success, false, label);
-      assert.equal(parsed.artifact, null, label);
-      assert.equal(parsed.parseError, expectedParseError, label);
+    for (const key of required) {
+      const copy = { ...full };
+      delete copy[key];
+      const parsed = parseInvokeResult(copy);
+      assert.equal(parsed.valid, false, `missing ${key} should be invalid`);
+      assert.equal(parsed.artifact, null, `missing ${key} must clear artifact`);
+      assert.equal(parsed.success, false);
     }
   });
 
-  it('provider mismatch → not fullyBound / no success / no model attribution', async () => {
+  it('rejects malformed availability-coded values', async () => {
+    const { parseInvokeResult } = await import(
+      '../harness/invokers/poetic-adapter.js'
+    );
+    const base = buildValidInvokeResultV1();
+
+    const badAvailable = {
+      ...base,
+      model: {
+        .../** @type {object} */ (base.model),
+        resolved: { availability: 'available' }, // missing value
+      },
+    };
+    assert.equal(parseInvokeResult(badAvailable).valid, false);
+
+    const badProviderRequested = {
+      ...base,
+      provider: {
+        requested: unavailable('nope'), // must be AvailableValue
+        resolved: available('fake'),
+      },
+    };
+    assert.equal(parseInvokeResult(badProviderRequested).valid, false);
+
+    const badResolutionSource = {
+      ...base,
+      model: {
+        .../** @type {object} */ (base.model),
+        resolutionSource: 'not-a-source',
+      },
+    };
+    assert.equal(parseInvokeResult(badResolutionSource).valid, false);
+
+    const freeReason = {
+      ...base,
+      outcome: {
+        kind: 'provider_error',
+        exitCode: 1,
+        reasonCode: 'secret dump free form',
+      },
+    };
+    assert.equal(parseInvokeResult(freeReason).valid, false);
+  });
+
+  it('provider mismatch and requested-model mismatch fail bind', async () => {
     const {
       parseInvokeResult,
       bindInvokeResultToRequest,
     } = await import('../harness/invokers/poetic-adapter.js');
 
     const parsed = parseInvokeResult(
-      fullResult({ provider: 'other-provider' }),
+      buildValidInvokeResultV1({
+        requestId: 'id-1',
+        provider: 'openai',
+        requestedModel: 'gpt-test',
+        resolvedModel: 'gpt-test',
+      }),
     );
     assert.equal(parsed.valid, true);
-    assert.ok(parsed.artifact);
 
-    const bound = bindInvokeResultToRequest(parsed, {
-      requestId: 'req-1',
-      provider: 'openai',
+    const wrongProv = bindInvokeResultToRequest(parsed, {
+      requestId: 'id-1',
+      provider: 'anthropic',
       requestedModel: 'gpt-test',
     });
-    assert.equal(bound.valid, false);
-    assert.equal(bound.success, false);
-    assert.equal(bound.artifact, null);
-    assert.equal(bound.parseError, 'provider-mismatch');
-    assert.match(String(bound.infraFailure), /provider mismatch/i);
-  });
+    assert.equal(wrongProv.valid, false);
+    assert.equal(wrongProv.artifact, null);
+    assert.match(String(wrongProv.parseError), /provider/i);
 
-  it('requested-model mismatch → not fullyBound / no success / no model attribution', async () => {
-    const {
-      parseInvokeResult,
-      bindInvokeResultToRequest,
-    } = await import('../harness/invokers/poetic-adapter.js');
-
-    // Result claims a different requested model than the frozen request.
-    const wrongClaim = parseInvokeResult(
-      fullResult({
-        model: {
-          requested: 'other-model',
-          resolved: { availability: 'available', value: 'resolved-model' },
-        },
-      }),
-    );
-    assert.equal(wrongClaim.valid, true);
-    const boundWrong = bindInvokeResultToRequest(wrongClaim, {
-      requestId: 'req-1',
+    const wrongModel = bindInvokeResultToRequest(parsed, {
+      requestId: 'id-1',
       provider: 'openai',
-      requestedModel: 'gpt-test',
+      requestedModel: 'other-model',
     });
-    assert.equal(boundWrong.valid, false);
-    assert.equal(boundWrong.success, false);
-    assert.equal(boundWrong.artifact, null);
-    assert.equal(boundWrong.parseError, 'requested-model-mismatch');
+    assert.equal(wrongModel.valid, false);
+    assert.equal(wrongModel.artifact, null);
+    assert.match(String(wrongModel.parseError), /requested-model/i);
 
-    // Request pinned no model; result must not claim a non-null requested model.
-    const claimWhenNone = parseInvokeResult(
-      fullResult({
-        model: {
-          requested: 'sneaky-model',
-          resolved: { availability: 'available', value: 'resolved-model' },
-        },
+    // request has no model; result claims available model
+    const claimed = parseInvokeResult(
+      buildValidInvokeResultV1({
+        requestId: 'id-2',
+        provider: 'openai',
+        requestedModel: 'sneaky',
       }),
     );
-    const boundClaim = bindInvokeResultToRequest(claimWhenNone, {
-      requestId: 'req-1',
+    const claimWhenNone = bindInvokeResultToRequest(claimed, {
+      requestId: 'id-2',
       provider: 'openai',
       requestedModel: null,
     });
-    assert.equal(boundClaim.valid, false);
-    assert.equal(boundClaim.artifact, null);
-    assert.equal(boundClaim.parseError, 'requested-model-mismatch');
+    assert.equal(claimWhenNone.valid, false);
+    assert.match(String(claimWhenNone.parseError), /requested-model/i);
 
-    // Request pinned a model; result omitted model.requested → mismatch.
-    const omittedObj = fullResult();
-    delete /** @type {any} */ (omittedObj.model).requested;
-    const omittedParsed = parseInvokeResult(omittedObj);
-    assert.equal(omittedParsed.valid, true);
-    const boundOmitted = bindInvokeResultToRequest(omittedParsed, {
-      requestId: 'req-1',
-      provider: 'openai',
-      requestedModel: 'gpt-test',
-    });
-    assert.equal(boundOmitted.valid, false);
-    assert.equal(boundOmitted.artifact, null);
-    assert.equal(boundOmitted.parseError, 'requested-model-mismatch');
-
-    // Both sides null/absent → match
-    const noneParsed = parseInvokeResult(omittedObj);
-    const boundNone = bindInvokeResultToRequest(noneParsed, {
-      requestId: 'req-1',
+    // no model both sides
+    const none = parseInvokeResult(
+      buildValidInvokeResultV1({
+        requestId: 'id-3',
+        provider: 'openai',
+        requestedModel: null,
+        resolvedModel: null,
+      }),
+    );
+    const boundNone = bindInvokeResultToRequest(none, {
+      requestId: 'id-3',
       provider: 'openai',
       requestedModel: null,
     });
     assert.equal(boundNone.valid, true);
     assert.ok(boundNone.artifact);
-    assert.equal(boundNone.success, true);
   });
 
-  it('valid full result with matching identity + provider raw files → success', async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-contract-ok-'));
+  it('valid full success and refusal artifacts parse and bind', async () => {
+    const {
+      parseInvokeResult,
+      bindInvokeResultToRequest,
+      parseResolvedModelEvidence,
+    } = await import('../harness/invokers/index.js');
+
+    const success = buildValidInvokeResultV1({
+      requestId: 'ok-1',
+      provider: 'openai',
+      requestedModel: 'm1',
+      resolvedModel: 'm1-resolved',
+      outcomeKind: 'success',
+      reasonCode: 'SUCCESS',
+      exitCode: 0,
+    });
+    const ps = parseInvokeResult(success);
+    assert.equal(ps.valid, true);
+    assert.equal(ps.success, true);
+    const bs = bindInvokeResultToRequest(ps, {
+      requestId: 'ok-1',
+      provider: 'openai',
+      requestedModel: 'm1',
+    });
+    assert.equal(bs.valid, true);
+    assert.equal(bs.success, true);
+    const ev = parseResolvedModelEvidence(bs.artifact);
+    assert.equal(ev.available, true);
+    assert.equal(ev.resolvedModel, 'm1-resolved');
+
+    const refusal = buildValidInvokeResultV1({
+      requestId: 'ref-1',
+      provider: 'openai',
+      requestedModel: null,
+      resolvedModel: null,
+      outcomeKind: 'refusal',
+      reasonCode: 'PROVIDER_ERROR',
+      exitCode: 1,
+    });
+    const pr = parseInvokeResult(refusal);
+    assert.equal(pr.valid, true);
+    assert.equal(pr.success, false);
+    assert.equal(pr.outcomeKind, 'refusal');
+    const br = bindInvokeResultToRequest(pr, {
+      requestId: 'ref-1',
+      provider: 'openai',
+      requestedModel: null,
+    });
+    assert.equal(br.valid, true);
+    assert.equal(br.success, false);
+    assert.ok(br.artifact);
+  });
+
+  it('end-to-end adapter: full valid result + raw → success; mismatch → fail', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-v1-e2e-'));
     try {
-      const { invokePoeticAdapter, parseResolvedModelEvidence } = await import(
-        '../harness/invokers/index.js'
+      const { invokePoeticAdapter } = await import(
+        '../harness/invokers/poetic-adapter.js'
       );
 
-      const bin = path.join(dir, 'fake-poetic');
+      const binOk = path.join(dir, 'fake-ok');
       await writeFile(
-        bin,
+        binOk,
         `#!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
@@ -293,38 +231,65 @@ const out = args[args.indexOf('--output') + 1];
 const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
 const base = path.basename(path.resolve(out));
 const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
-const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
-fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
-fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'contract-provider-stdout\\n');
-fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'contract-provider-stderr\\n');
+const qDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
+fs.mkdirSync(qDir, { recursive: true, mode: 0o700 });
+fs.writeFileSync(path.join(qDir, 'stdout.txt'), 'full-v1-out\\n');
+fs.writeFileSync(path.join(qDir, 'stderr.txt'), '');
+const avail = (v) => ({ availability: 'available', value: v });
+const unavail = (r) => ({ availability: 'unavailable', reason: r });
+const now = new Date().toISOString();
+const rm = req.model != null && String(req.model).trim() !== '' ? String(req.model) : null;
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: req.requestId,
-  provider: req.provider,
+  outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
+  provider: { requested: avail(req.provider), resolved: avail(req.provider) },
   model: {
-    requested: req.model != null ? req.model : null,
-    resolved: { availability: 'available', value: 'resolved-from-bridge' }
+    requested: rm ? avail(rm) : unavail('no model requested'),
+    resolved: rm ? avail(rm) : unavail('model not resolved'),
+    resolutionSource: rm ? 'provider-result' : 'unavailable',
   },
-  outcome: { kind: 'success', reasonCode: 'ok' }
+  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  posture: {
+    fingerprint: avail('${'c'.repeat(64)}'),
+    argvRedacted: avail(['x']),
+    commandPath: unavail('n/a'),
+    sourceClasses: ['cli'],
+    workspaceMode: unavail('n/a'),
+  },
+  stateIsolation: 'unsupported',
+  attempts: [{ attempt: 1, startedAt: now, endedAt: now, durationMs: 1, exitCode: 0 }],
+  timing: { startedAt: now, endedAt: now, durationMs: 1 },
+  process: { exitCode: 0, transportStatus: unavail('n/a') },
+  cleanup: { status: 'not-needed' },
+  diagnostics: unavail('n/a'),
+  usage: unavail('n/a'),
+  cost: unavail('n/a'),
+  artifacts: {
+    result: path.resolve(out),
+    quarantineDir: qDir,
+    stdout: path.join(qDir, 'stdout.txt'),
+    stderr: path.join(qDir, 'stderr.txt'),
+  },
 }));
 process.exit(0);
 `,
         'utf8',
       );
-      await chmod(bin, 0o755);
+      await chmod(binOk, 0o755);
 
-      const campaignDir = path.join(dir, '_campaign');
+      const campaignDir = path.join(dir, '_camp');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-      const result = await invokePoeticAdapter({
-        poeticBin: bin,
+      const ok = await invokePoeticAdapter({
+        poeticBin: binOk,
         requestPath: path.join(dir, 'req.json'),
         outputPath: path.join(dir, 'out.json'),
         request: {
           schema: 'poetic.provider.invoke.request.v1',
-          requestId: 'contract-req-1',
+          requestId: 'e2e-ok',
           provider: 'openai',
-          model: 'gpt-test',
-          prompt: 'do the thing',
+          model: 'm1',
+          prompt: 'x',
           workingDirectory: dir,
           timeoutMs: 5000,
         },
@@ -332,178 +297,82 @@ process.exit(0);
         campaignDir,
         cwd: dir,
       });
+      assert.equal(ok.success, true, ok.infraFailure);
+      assert.equal(ok.providerRawEvidence, 'actual');
+      assert.match(ok.stdout, /full-v1-out/);
 
-      assert.equal(result.exitCode, 0);
-      assert.equal(result.success, true);
-      assert.equal(result.outcomeKind, 'success');
-      assert.equal(result.infraFailure, undefined);
-      assert.equal(result.providerRawEvidence, 'actual');
-      assert.match(result.stdout, /contract-provider-stdout/);
-      assert.ok(result.parsedOutput);
-      assert.equal(result.parsedOutput.provider, 'openai');
-      assert.equal(
-        /** @type {any} */ (result.parsedOutput).model.requested,
-        'gpt-test',
-      );
-      const evidence = parseResolvedModelEvidence(result.parsedOutput);
-      assert.equal(evidence.available, true);
-      assert.equal(evidence.resolvedModel, 'resolved-from-bridge');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('refusal with valid schema still non-success but identity-bound', async () => {
-    const {
-      parseInvokeResult,
-      bindInvokeResultToRequest,
-    } = await import('../harness/invokers/poetic-adapter.js');
-
-    const parsed = parseInvokeResult(
-      fullResult({
-        outcome: { kind: 'refusal', reasonCode: 'policy_block' },
-        model: {
-          requested: 'gpt-test',
-          resolved: {
-            availability: 'unavailable',
-            reason: 'provider refused before resolve',
-          },
-        },
-      }),
-    );
-    assert.equal(parsed.valid, true);
-    assert.equal(parsed.success, false);
-    assert.equal(parsed.outcomeKind, 'refusal');
-    assert.equal(parsed.reasonCode, 'policy_block');
-    assert.ok(parsed.artifact);
-
-    const bound = bindInvokeResultToRequest(parsed, {
-      requestId: 'req-1',
-      provider: 'openai',
-      requestedModel: 'gpt-test',
-    });
-    assert.equal(bound.valid, true, 'identity-bound refusal remains valid');
-    assert.equal(bound.success, false);
-    assert.equal(bound.outcomeKind, 'refusal');
-    assert.ok(bound.artifact, 'identity-bound non-success may retain artifact');
-    assert.equal(bound.artifact.provider, 'openai');
-  });
-
-  it('adapter invoke rejects provider/model identity mismatches (no model evidence)', async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-contract-mis-'));
-    try {
-      const { invokePoeticAdapter } = await import(
-        '../harness/invokers/index.js'
-      );
-
-      // Fake echoes wrong provider
-      const badProviderBin = path.join(dir, 'fake-wrong-provider');
+      // Wrong provider in result
+      const binBad = path.join(dir, 'fake-bad');
       await writeFile(
-        badProviderBin,
+        binBad,
         `#!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
 const args = process.argv.slice(2);
-const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
+const reqPath = args[args.indexOf('--request') + 1];
 const out = args[args.indexOf('--output') + 1];
+const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
 const base = path.basename(path.resolve(out));
 const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
-const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
-fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
-fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'x\\n');
-fs.writeFileSync(path.join(rawDir, 'stderr.txt'), '');
+const qDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
+fs.mkdirSync(qDir, { recursive: true, mode: 0o700 });
+fs.writeFileSync(path.join(qDir, 'stdout.txt'), 'x\\n');
+fs.writeFileSync(path.join(qDir, 'stderr.txt'), '');
+const avail = (v) => ({ availability: 'available', value: v });
+const unavail = (r) => ({ availability: 'unavailable', reason: r });
+const now = new Date().toISOString();
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: req.requestId,
-  provider: 'WRONG',
+  outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
+  provider: { requested: avail('WRONG-PROVIDER'), resolved: avail('WRONG-PROVIDER') },
   model: {
-    requested: req.model != null ? req.model : null,
-    resolved: { availability: 'available', value: 'TEMPTING-MODEL' }
+    requested: unavail('no model requested'),
+    resolved: unavail('n/a'),
+    resolutionSource: 'unavailable',
   },
-  outcome: { kind: 'success', reasonCode: 'ok' }
+  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  posture: {
+    fingerprint: avail('${'d'.repeat(64)}'),
+    argvRedacted: avail(['x']),
+    commandPath: unavail('n/a'),
+    sourceClasses: ['cli'],
+    workspaceMode: unavail('n/a'),
+  },
+  stateIsolation: 'unsupported',
+  attempts: [{ attempt: 1, startedAt: now, endedAt: now, durationMs: 1, exitCode: 0 }],
+  timing: { startedAt: now, endedAt: now, durationMs: 1 },
+  process: { exitCode: 0, transportStatus: unavail('n/a') },
+  cleanup: { status: 'not-needed' },
+  diagnostics: unavail('n/a'),
+  usage: unavail('n/a'),
+  cost: unavail('n/a'),
+  artifacts: { result: path.resolve(out), quarantineDir: qDir },
 }));
 process.exit(0);
 `,
         'utf8',
       );
-      await chmod(badProviderBin, 0o755);
-
-      const campaignDir = path.join(dir, '_campaign');
-      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-      const badProv = await invokePoeticAdapter({
-        poeticBin: badProviderBin,
-        requestPath: path.join(dir, 'req-p.json'),
-        outputPath: path.join(dir, 'out-p.json'),
+      await chmod(binBad, 0o755);
+      const bad = await invokePoeticAdapter({
+        poeticBin: binBad,
+        requestPath: path.join(dir, 'req2.json'),
+        outputPath: path.join(dir, 'out2.json'),
         request: {
           schema: 'poetic.provider.invoke.request.v1',
-          requestId: 'id-p',
+          requestId: 'e2e-bad',
           provider: 'openai',
-          model: 'gpt-test',
           prompt: 'x',
           workingDirectory: dir,
-          timeoutMs: 1000,
+          timeoutMs: 5000,
         },
         timeoutMs: 10_000,
         campaignDir,
         cwd: dir,
       });
-      assert.equal(badProv.success, false);
-      assert.equal(badProv.parsedOutput, null);
-      assert.match(String(badProv.infraFailure), /provider mismatch/i);
-      assert.equal(badProv.providerRawEvidence, 'unavailable');
-
-      // Fake echoes wrong model.requested
-      const badModelBin = path.join(dir, 'fake-wrong-model');
-      await writeFile(
-        badModelBin,
-        `#!/usr/bin/env node
-const fs = require('fs');
-const path = require('path');
-const args = process.argv.slice(2);
-const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
-const out = args[args.indexOf('--output') + 1];
-const base = path.basename(path.resolve(out));
-const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
-const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
-fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
-fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'x\\n');
-fs.writeFileSync(path.join(rawDir, 'stderr.txt'), '');
-fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
-  requestId: req.requestId,
-  provider: req.provider,
-  model: {
-    requested: 'NOT-THE-REQUESTED-MODEL',
-    resolved: { availability: 'available', value: 'TEMPTING-MODEL' }
-  },
-  outcome: { kind: 'success', reasonCode: 'ok' }
-}));
-process.exit(0);
-`,
-        'utf8',
-      );
-      await chmod(badModelBin, 0o755);
-
-      const badModel = await invokePoeticAdapter({
-        poeticBin: badModelBin,
-        requestPath: path.join(dir, 'req-m.json'),
-        outputPath: path.join(dir, 'out-m.json'),
-        request: {
-          schema: 'poetic.provider.invoke.request.v1',
-          requestId: 'id-m',
-          provider: 'openai',
-          model: 'gpt-test',
-          prompt: 'x',
-          workingDirectory: dir,
-          timeoutMs: 1000,
-        },
-        timeoutMs: 10_000,
-        campaignDir,
-        cwd: dir,
-      });
-      assert.equal(badModel.success, false);
-      assert.equal(badModel.parsedOutput, null);
-      assert.match(String(badModel.infraFailure), /model\.requested mismatch/i);
+      assert.equal(bad.success, false);
+      assert.equal(bad.parsedOutput, null);
+      assert.match(String(bad.infraFailure), /provider/i);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
