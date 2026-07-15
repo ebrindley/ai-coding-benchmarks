@@ -1322,3 +1322,122 @@ describe('digest evidence binding + tamper', () => {
     }
   });
 });
+
+describe('digest leaf swap / no-follow identity', () => {
+  it('sha256File refuses leaf symlink (never follows to sentinel)', async () => {
+    if (process.platform === 'win32') return;
+    const { sha256File } = await import('../harness/digest.js');
+    const { UnsafePathError } = await import('../harness/safe-fs.js');
+    const { symlink, lstat } = await import('node:fs/promises');
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-dig-sym-'));
+    try {
+      const secret = path.join(dir, 'host-secret.txt');
+      await writeFile(secret, 'DIGEST_SENTINEL_SECRET\n', 'utf8');
+      const link = path.join(dir, 'artifact.bin');
+      await symlink(secret, link);
+      const st = await lstat(link);
+      assert.equal(st.isSymbolicLink(), true);
+
+      await assert.rejects(
+        () => sha256File(link),
+        (err) =>
+          err instanceof UnsafePathError ||
+          err?.code === 'ELOOP' ||
+          /symlink|fail closed|UNSAFE/i.test(String(err)),
+      );
+      assert.equal(await readFile(secret, 'utf8'), 'DIGEST_SENTINEL_SECRET\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('collectDirEntries fails closed when regular file is swapped to symlink', async () => {
+    if (process.platform === 'win32') return;
+    const { collectDirEntries, sha256Buffer } = await import(
+      '../harness/digest.js'
+    );
+    const { UnsafePathError } = await import('../harness/safe-fs.js');
+    const { symlink } = await import('node:fs/promises');
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-dig-swap-'));
+    try {
+      const secret = path.join(dir, 'outside-secret.txt');
+      await writeFile(secret, 'DIGEST_SWAP_SENTINEL\n', 'utf8');
+      const nested = path.join(dir, 'tree');
+      await mkdir(nested, { recursive: true });
+      const target = path.join(nested, 'payload.txt');
+      await writeFile(target, 'original-payload\n', 'utf8');
+
+      // Baseline: digest sees the regular file content.
+      const before = await collectDirEntries(nested, '');
+      const fileEntry = before.find((e) => e.type === 'file' && e.path === 'payload.txt');
+      assert.ok(fileEntry);
+      assert.equal(fileEntry.sha256, sha256Buffer('original-payload\n'));
+
+      // Leaf swap race shape: replace file with symlink to host secret.
+      await rm(target);
+      await symlink(secret, target);
+
+      // Directory walk records symlink metadata only (never reads secret bytes).
+      const after = await collectDirEntries(nested, '');
+      const sym = after.find((e) => e.path === 'payload.txt');
+      assert.ok(sym);
+      assert.equal(sym.type, 'symlink');
+      assert.ok(!('sha256' in sym) || sym.sha256 == null);
+
+      // Direct file hash of the swapped leaf must refuse follow.
+      const { sha256File } = await import('../harness/digest.js');
+      await assert.rejects(
+        () => sha256File(target),
+        (err) =>
+          err instanceof UnsafePathError ||
+          err?.code === 'ELOOP' ||
+          /symlink|fail closed/i.test(String(err)),
+      );
+      assert.equal(await readFile(secret, 'utf8'), 'DIGEST_SWAP_SENTINEL\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('sha256File with identity pin refuses replaced inode at same path', async () => {
+    if (process.platform === 'win32') return;
+    const { readFileNoFollow, UnsafePathError } = await import(
+      '../harness/safe-fs.js'
+    );
+    const { sha256Buffer } = await import('../harness/digest.js');
+    const { lstat, rename: fsRename } = await import('node:fs/promises');
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-dig-id-'));
+    try {
+      const pathA = path.join(dir, 'a.txt');
+      const pathB = path.join(dir, 'b.txt');
+      await writeFile(pathA, 'content-a\n', 'utf8');
+      await writeFile(pathB, 'content-b-SECRET\n', 'utf8');
+      const st = await lstat(pathA);
+
+      await rm(pathA);
+      await fsRename(pathB, pathA);
+
+      await assert.rejects(
+        () =>
+          readFileNoFollow(pathA, {
+            expectedDev: st.dev,
+            expectedIno: st.ino,
+          }),
+        (err) =>
+          err instanceof UnsafePathError &&
+          (err.code === 'IDENTITY_MISMATCH' ||
+            /identity mismatch/i.test(err.message)),
+      );
+
+      // Unpinned nofollow still hashes the replacement (regular file) correctly.
+      const { sha256File } = await import('../harness/digest.js');
+      const h = await sha256File(pathA);
+      assert.equal(h, sha256Buffer('content-b-SECRET\n'));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

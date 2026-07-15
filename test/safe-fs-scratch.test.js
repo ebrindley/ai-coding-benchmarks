@@ -2,6 +2,9 @@
  * Adversarial symlink-swap: provider replaces scratch request/output with a
  * symlink to a host sentinel; trusted harness must never copy sentinel bytes
  * into campaign artifacts/raw/results.
+ *
+ * Also covers pinned-boundary write races (grandparent/ancestor swap between
+ * validation and open/replace) and leaf no-follow identity checks.
  */
 
 import { describe, it } from 'node:test';
@@ -16,7 +19,11 @@ import {
   rm,
   symlink,
   readdir,
+  lstat,
+  rename as fsRename,
 } from 'node:fs/promises';
+
+const SENTINEL = 'SENTINEL_HOST_SECRET_BYTES\n';
 
 describe('safe scratch nofollow', () => {
   it('readFileNoFollow / copyFileNoFollow refuse symlinks (fail closed)', async () => {
@@ -30,7 +37,7 @@ describe('safe scratch nofollow', () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-safe-'));
     try {
       const secret = path.join(dir, 'host-secret.txt');
-      await writeFile(secret, 'SENTINEL_HOST_SECRET_BYTES\n', 'utf8');
+      await writeFile(secret, SENTINEL, 'utf8');
       const link = path.join(dir, 'swapped.json');
       await symlink(secret, link);
 
@@ -56,6 +63,45 @@ describe('safe scratch nofollow', () => {
       await writeFile(reg, '{"ok":true}\n', 'utf8');
       const buf = await readFileNoFollow(reg);
       assert.equal(buf.toString('utf8'), '{"ok":true}\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('readFileNoFollow refuses leaf identity mismatch after lstat pin', async () => {
+    if (process.platform === 'win32') return;
+    const { readFileNoFollow, UnsafePathError } = await import(
+      '../harness/safe-fs.js'
+    );
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-leaf-id-'));
+    try {
+      const legit = path.join(dir, 'legit.txt');
+      const other = path.join(dir, 'other.txt');
+      await writeFile(legit, 'legit-body\n', 'utf8');
+      await writeFile(other, SENTINEL, 'utf8');
+      const st = await lstat(legit);
+
+      // Simulate TOCTOU: path now names a different inode than the lstat pin.
+      await rm(legit);
+      await fsRename(other, legit);
+
+      await assert.rejects(
+        () =>
+          readFileNoFollow(legit, {
+            expectedDev: st.dev,
+            expectedIno: st.ino,
+          }),
+        (err) =>
+          err instanceof UnsafePathError &&
+          (err.code === 'IDENTITY_MISMATCH' ||
+            /identity mismatch/i.test(err.message)),
+      );
+
+      // Without identity pin, nofollow still reads the replacement regular file
+      // (leaf symlink case is covered separately).
+      const body = await readFileNoFollow(legit);
+      assert.equal(body.toString('utf8'), SENTINEL);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -147,6 +193,223 @@ describe('safe scratch nofollow', () => {
     } finally {
       await rm(campaign, { recursive: true, force: true });
       await rm(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('pinned boundary ancestor races', () => {
+  it('grandparent swap to symlink between pin and assert fails closed', async () => {
+    if (process.platform === 'win32') return;
+    const {
+      pinDirectoryBoundary,
+      assertPinnedBoundary,
+      releaseBoundaryPin,
+      writeFileAtomicNoFollow,
+      createFileExclusiveNoFollow,
+      UnsafePathError,
+    } = await import('../harness/safe-fs.js');
+
+    const base = await mkdtemp(path.join(os.tmpdir(), 'aicb-gp-swap-'));
+    const outside = path.join(base, 'outside');
+    const external = path.join(outside, 'host-secret.txt');
+    try {
+      await mkdir(outside, { recursive: true });
+      await writeFile(external, SENTINEL, 'utf8');
+
+      // base/grand/parent/ — pin parent, then replace grand with symlink.
+      const grand = path.join(base, 'grand');
+      const parent = path.join(grand, 'parent');
+      await mkdir(parent, { recursive: true });
+
+      const pin = await pinDirectoryBoundary(parent);
+      try {
+        // Deterministic race: replace grandparent after pin, before use.
+        await rm(grand, { recursive: true, force: true });
+        await symlink(outside, grand);
+
+        await assert.rejects(
+          () => assertPinnedBoundary(pin),
+          (err) =>
+            err instanceof UnsafePathError &&
+            (err.code === 'SYMLINK' ||
+              err.code === 'IDENTITY_MISMATCH' ||
+              err.code === 'MISSING' ||
+              /symlink|identity|missing|fail closed/i.test(err.message)),
+        );
+
+        // Full write paths must also fail closed and not create outside.
+        await assert.rejects(
+          () =>
+            writeFileAtomicNoFollow(
+              path.join(parent, 'report.json'),
+              '{"pwned":true}\n',
+            ),
+          (err) =>
+            err instanceof UnsafePathError ||
+            /symlink|fail closed|identity|missing/i.test(String(err)),
+        );
+        await assert.rejects(
+          () =>
+            createFileExclusiveNoFollow(
+              path.join(parent, 'campaign.lock'),
+              '{"owner":"x"}\n',
+            ),
+          (err) =>
+            err instanceof UnsafePathError ||
+            /symlink|fail closed|identity|missing/i.test(String(err)),
+        );
+
+        const outsideListing = await readdir(outside);
+        assert.ok(
+          !outsideListing.includes('report.json'),
+          'must not write report through swapped grandparent',
+        );
+        assert.ok(
+          !outsideListing.includes('campaign.lock'),
+          'must not write lock through swapped grandparent',
+        );
+        assert.ok(
+          !outsideListing.includes('parent'),
+          'must not mkdir parent through swapped grandparent',
+        );
+        assert.equal(await readFile(external, 'utf8'), SENTINEL);
+      } finally {
+        await releaseBoundaryPin(pin);
+      }
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it('ancestor directory replaced with different directory fails pin identity', async () => {
+    if (process.platform === 'win32') return;
+    const {
+      pinDirectoryBoundary,
+      assertPinnedBoundary,
+      releaseBoundaryPin,
+      UnsafePathError,
+    } = await import('../harness/safe-fs.js');
+
+    const base = await mkdtemp(path.join(os.tmpdir(), 'aicb-anc-id-'));
+    try {
+      const mid = path.join(base, 'mid');
+      const parent = path.join(mid, 'parent');
+      await mkdir(parent, { recursive: true });
+      const pin = await pinDirectoryBoundary(parent);
+      try {
+        // Move real mid aside and plant a fresh directory at the same path
+        // (different inode) — identity pin must fail closed.
+        const midMoved = path.join(base, 'mid-moved');
+        await fsRename(mid, midMoved);
+        await mkdir(path.join(base, 'mid', 'parent'), { recursive: true });
+
+        await assert.rejects(
+          () => assertPinnedBoundary(pin),
+          (err) =>
+            err instanceof UnsafePathError &&
+            (err.code === 'IDENTITY_MISMATCH' ||
+              err.code === 'MISSING' ||
+              /identity|missing|fail closed/i.test(err.message)),
+        );
+      } finally {
+        await releaseBoundaryPin(pin);
+      }
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it('revalidateBeforeRename rejects full-chain grandparent symlink without pin', async () => {
+    if (process.platform === 'win32') return;
+    const {
+      revalidateBeforeRename,
+      UnsafePathError,
+    } = await import('../harness/safe-fs.js');
+
+    const base = await mkdtemp(path.join(os.tmpdir(), 'aicb-reval-gp-'));
+    const outside = path.join(base, 'outside');
+    try {
+      await mkdir(outside, { recursive: true });
+      const grand = path.join(base, 'grand');
+      const parent = path.join(grand, 'parent');
+      await mkdir(parent, { recursive: true });
+      const dest = path.join(parent, 'manifest.json');
+
+      // Control: clean chain passes parent/dest checks.
+      await revalidateBeforeRename(parent, dest);
+
+      // Swap grandparent to symlink — full-chain revalidation must refuse.
+      await rm(grand, { recursive: true, force: true });
+      await symlink(outside, grand);
+      // Recreate lexical parent path under the symlink so parent exists
+      // through the redirected chain (attacker-shaped).
+      await mkdir(path.join(outside, 'parent'), { recursive: true });
+
+      await assert.rejects(
+        () => revalidateBeforeRename(parent, dest),
+        (err) =>
+          err instanceof UnsafePathError &&
+          (err.code === 'SYMLINK' || /symlink|fail closed/i.test(err.message)),
+      );
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it('exclusive create still refuses leaf symlink and keeps mode 0600 on success', async () => {
+    if (process.platform === 'win32') return;
+    const {
+      createFileExclusiveNoFollow,
+      UnsafePathError,
+    } = await import('../harness/safe-fs.js');
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-excl-'));
+    try {
+      const external = path.join(dir, 'ext.txt');
+      await writeFile(external, SENTINEL, 'utf8');
+      const leaf = path.join(dir, 'campaign.lock');
+      await symlink(external, leaf);
+
+      await assert.rejects(
+        () => createFileExclusiveNoFollow(leaf, '{"owner":"x"}\n'),
+        (err) =>
+          err instanceof UnsafePathError ||
+          /symlink|fail closed|EEXIST/i.test(String(err)),
+      );
+      assert.equal(await readFile(external, 'utf8'), SENTINEL);
+
+      await rm(leaf, { force: true });
+      await createFileExclusiveNoFollow(leaf, '{"owner":"ok"}\n', {
+        mode: 0o600,
+        fsync: true,
+      });
+      const st = await lstat(leaf);
+      assert.equal(st.isSymbolicLink(), false);
+      assert.equal(st.isFile(), true);
+      assert.equal(st.mode & 0o777, 0o600);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('atomic write happy path remains regular private file (no EXDEV weaken)', async () => {
+    if (process.platform === 'win32') return;
+    const { writeFileAtomicNoFollow } = await import('../harness/safe-fs.js');
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-atomic-ok-'));
+    try {
+      const dest = path.join(dir, 'report.json');
+      await writeFileAtomicNoFollow(dest, '{"ok":true}\n', {
+        mode: 0o600,
+        fsync: true,
+      });
+      const st = await lstat(dest);
+      assert.equal(st.isSymbolicLink(), false);
+      assert.equal(st.isFile(), true);
+      assert.equal(st.mode & 0o777, 0o600);
+      assert.equal(await readFile(dest, 'utf8'), '{"ok":true}\n');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });

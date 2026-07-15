@@ -12,8 +12,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readdir, readFile, lstat, readlink } from 'node:fs/promises';
+import { readdir, lstat, readlink } from 'node:fs/promises';
 import path from 'node:path';
+import { readFileNoFollow } from './safe-fs.js';
 
 /**
  * Directory basenames excluded from both fixture copy and directory digests.
@@ -84,14 +85,17 @@ export function sha256Buffer(buf) {
 }
 
 /**
- * Hash a regular file by content. Callers must not pass symlink paths when
- * symlink-safe digests are required — use collectDirEntries instead.
+ * Hash a regular file by content through a held no-follow descriptor.
+ * Never follows a leaf symlink (O_NOFOLLOW open + fstat). Prefer
+ * collectDirEntries for tree digests (per-entry identity pin).
  *
  * @param {string} filePath
  * @returns {Promise<string>} sha256 hex
  */
 export async function sha256File(filePath) {
-  const buf = await readFile(filePath);
+  // Full-chain policy for single-file digests: refuse symlink leaf via
+  // no-follow open; content is read only from the held regular-file fd.
+  const buf = await readFileNoFollow(filePath);
   return sha256Buffer(buf);
 }
 
@@ -193,12 +197,27 @@ export async function collectDirEntries(dir, relBase = '') {
       }
 
       if (st.isFile()) {
-        const buf = await readFile(abs);
+        // Close leaf swap races: after lstat identity, open O_NOFOLLOW and
+        // require the held fd to match (dev,ino) before reading content.
+        // Never follow a symlink planted between lstat and open.
+        let buf;
+        try {
+          buf = await readFileNoFollow(abs, {
+            expectedDev: st.dev,
+            expectedIno: st.ino,
+          });
+        } catch (err) {
+          const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+          // Vanished between lstat and open: omit (same as lstat race above).
+          if (code === 'ENOENT') continue;
+          // Symlink / identity mismatch / not-regular: fail closed (throw).
+          throw err;
+        }
         entries.push({
           type: 'file',
           path: posixRel,
           sha256: sha256Buffer(buf),
-          size: st.size,
+          size: buf.length,
           mode,
         });
       }
@@ -306,12 +325,22 @@ export async function digestHarnessContent(root) {
       continue;
     }
     if (st.isFile()) {
-      const buf = await readFile(abs);
+      let buf;
+      try {
+        buf = await readFileNoFollow(abs, {
+          expectedDev: st.dev,
+          expectedIno: st.ino,
+        });
+      } catch (err) {
+        const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+        if (code === 'ENOENT') continue;
+        throw err;
+      }
       entries.push({
         type: 'file',
         path: name,
         sha256: sha256Buffer(buf),
-        size: st.size,
+        size: buf.length,
         mode: portableModeBits(st.mode),
       });
     }

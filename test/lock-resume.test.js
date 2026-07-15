@@ -963,3 +963,102 @@ describe('path containment for trial ids', () => {
     }
   });
 });
+
+describe('lock acquire under grandparent swap / pinned boundary', () => {
+  it('acquireLock fails closed when grandparent is swapped to symlink', async () => {
+    if (process.platform === 'win32') return;
+    const { acquireLock, lockPath } = await import('../harness/lock.js');
+    const {
+      pinDirectoryBoundary,
+      assertPinnedBoundary,
+      releaseBoundaryPin,
+      UnsafePathError,
+    } = await import('../harness/safe-fs.js');
+
+    const base = await mkdtemp(path.join(os.tmpdir(), 'aicb-lock-gp-'));
+    const outside = path.join(base, 'outside');
+    const external = path.join(outside, 'host-secret.txt');
+    const SENTINEL = 'LOCK_GP_SENTINEL\n';
+    try {
+      await mkdir(outside, { recursive: true });
+      await writeFile(external, SENTINEL, 'utf8');
+
+      const grand = path.join(base, 'grand');
+      const camp = path.join(grand, 'campaign');
+      await mkdir(camp, { recursive: true });
+
+      // Pin succeeds on the clean chain.
+      const pin = await pinDirectoryBoundary(camp);
+      try {
+        await assertPinnedBoundary(pin);
+
+        // Deterministic grandparent swap before lock create.
+        await rm(grand, { recursive: true, force: true });
+        await symlink(outside, grand);
+
+        await assert.rejects(
+          () => assertPinnedBoundary(pin),
+          (err) =>
+            err instanceof UnsafePathError ||
+            /symlink|identity|missing|fail closed/i.test(String(err)),
+        );
+
+        const acq = await acquireLock(camp, 'owner-gp', { minAgeMs: 0 });
+        assert.equal(acq.ok, false);
+        assert.equal(acq.acquired, false);
+        assert.match(
+          String(acq.error || ''),
+          /symlink|fail closed|parent|missing|identity|unsafe|unreadable/i,
+        );
+
+        // No lock file under outside (escape target).
+        const outsideListing = await readdir(outside);
+        assert.ok(
+          !outsideListing.includes('campaign.lock'),
+          'must not write campaign.lock through swapped grandparent',
+        );
+        assert.ok(
+          !outsideListing.includes('campaign'),
+          'must not create campaign dir through swapped grandparent for lock',
+        );
+        // Lexical lock path under the symlink must not be a successful private lock.
+        try {
+          await lstat(path.join(outside, 'campaign.lock'));
+          assert.fail('lock must not exist at outside/campaign.lock');
+        } catch (err) {
+          const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+          assert.equal(code, 'ENOENT');
+        }
+        assert.equal(await readFile(external, 'utf8'), SENTINEL);
+      } finally {
+        await releaseBoundaryPin(pin);
+      }
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it('readLock refuses leaf symlink at campaign.lock (nofollow)', async () => {
+    if (process.platform === 'win32') return;
+    const { readLock, lockPath } = await import('../harness/lock.js');
+    const { UnsafePathError } = await import('../harness/safe-fs.js');
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-lock-leaf-'));
+    const external = path.join(dir, 'host-secret.txt');
+    const SENTINEL = 'LOCK_LEAF_SENTINEL\n';
+    try {
+      await writeFile(external, SENTINEL, 'utf8');
+      await symlink(external, lockPath(dir));
+
+      await assert.rejects(
+        () => readLock(dir),
+        (err) =>
+          err instanceof UnsafePathError ||
+          /symlink|fail closed|UNSAFE/i.test(String(err)),
+      );
+      assert.equal(await readFile(external, 'utf8'), SENTINEL);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
