@@ -3,8 +3,9 @@
  * symlink to a host sentinel; trusted harness must never copy sentinel bytes
  * into campaign artifacts/raw/results.
  *
- * Also covers pinned-boundary write races (grandparent/ancestor swap between
- * validation and open/replace) and leaf no-follow identity checks.
+ * Also covers authenticated-cwd helper write races (grandparent swap before
+ * helper acquisition fails closed; swap after cwd auth leaves writes in the
+ * original directory) and leaf no-follow identity checks.
  */
 
 import { describe, it } from 'node:test';
@@ -21,7 +22,9 @@ import {
   readdir,
   lstat,
   rename as fsRename,
+  access,
 } from 'node:fs/promises';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 const SENTINEL = 'SENTINEL_HOST_SECRET_BYTES\n';
 
@@ -197,8 +200,26 @@ describe('safe scratch nofollow', () => {
   });
 });
 
-describe('pinned boundary ancestor races', () => {
-  it('grandparent swap to symlink between pin and assert fails closed', async () => {
+describe('authenticated-cwd helper ancestor races', () => {
+  /**
+   * Wait until a relative barrier file exists under an absolute dir.
+   * @param {string} absPath
+   * @param {number} timeoutMs
+   */
+  async function waitForFile(absPath, timeoutMs = 5000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        await access(absPath);
+        return;
+      } catch {
+        await sleep(20);
+      }
+    }
+    throw new Error(`timeout waiting for ${absPath}`);
+  }
+
+  it('grandparent swap before helper acquisition fails closed (no write to replacement)', async () => {
     if (process.platform === 'win32') return;
     const {
       pinDirectoryBoundary,
@@ -209,21 +230,20 @@ describe('pinned boundary ancestor races', () => {
       UnsafePathError,
     } = await import('../harness/safe-fs.js');
 
-    const base = await mkdtemp(path.join(os.tmpdir(), 'aicb-gp-swap-'));
+    const base = await mkdtemp(path.join(os.tmpdir(), 'aicb-gp-pre-'));
     const outside = path.join(base, 'outside');
     const external = path.join(outside, 'host-secret.txt');
     try {
       await mkdir(outside, { recursive: true });
       await writeFile(external, SENTINEL, 'utf8');
 
-      // base/grand/parent/ — pin parent, then replace grand with symlink.
       const grand = path.join(base, 'grand');
       const parent = path.join(grand, 'parent');
       await mkdir(parent, { recursive: true });
 
       const pin = await pinDirectoryBoundary(parent);
       try {
-        // Deterministic race: replace grandparent after pin, before use.
+        // Swap before any helper spawn: pin path-walk must fail closed.
         await rm(grand, { recursive: true, force: true });
         await symlink(outside, grand);
 
@@ -237,7 +257,7 @@ describe('pinned boundary ancestor races', () => {
               /symlink|identity|missing|fail closed/i.test(err.message)),
         );
 
-        // Full write paths must also fail closed and not create outside.
+        // Fresh write paths pin then spawn: either pin or helper identity fails.
         await assert.rejects(
           () =>
             writeFileAtomicNoFollow(
@@ -246,7 +266,7 @@ describe('pinned boundary ancestor races', () => {
             ),
           (err) =>
             err instanceof UnsafePathError ||
-            /symlink|fail closed|identity|missing/i.test(String(err)),
+            /symlink|fail closed|identity|missing|helper/i.test(String(err)),
         );
         await assert.rejects(
           () =>
@@ -256,7 +276,7 @@ describe('pinned boundary ancestor races', () => {
             ),
           (err) =>
             err instanceof UnsafePathError ||
-            /symlink|fail closed|identity|missing/i.test(String(err)),
+            /symlink|fail closed|identity|missing|helper/i.test(String(err)),
         );
 
         const outsideListing = await readdir(outside);
@@ -281,6 +301,136 @@ describe('pinned boundary ancestor races', () => {
     }
   });
 
+  it('grandparent swap after helper cwd auth keeps atomic write in original dir', async () => {
+    if (process.platform === 'win32') return;
+    const { writeFileAtomicNoFollow } = await import('../harness/safe-fs.js');
+
+    const base = await mkdtemp(path.join(os.tmpdir(), 'aicb-gp-post-'));
+    try {
+      const grand = path.join(base, 'grand');
+      const parent = path.join(grand, 'parent');
+      await mkdir(parent, { recursive: true });
+      const parentSt = await lstat(parent);
+
+      const readyName = '.aicb-barrier-ready';
+      const goName = '.aicb-barrier-go';
+      const destName = 'report.json';
+      const body = '{"anchored":true}\n';
+
+      const writePromise = writeFileAtomicNoFollow(
+        path.join(parent, destName),
+        body,
+        {
+          mode: 0o600,
+          fsync: true,
+          testBarrier: { readyName, goName },
+          helperTimeoutMs: 10_000,
+        },
+      );
+
+      // Barrier ready is written relative to authenticated original cwd.
+      await waitForFile(path.join(parent, readyName));
+
+      // Swap grandparent after helper acquired/authenticated cwd.
+      const moved = path.join(base, 'grand-moved');
+      await fsRename(grand, moved);
+      await mkdir(path.join(base, 'grand', 'parent'), { recursive: true });
+      await writeFile(
+        path.join(base, 'grand', 'parent', 'trap.txt'),
+        'trap\n',
+        'utf8',
+      );
+
+      // Release barrier via the held original directory (moved path).
+      await writeFile(path.join(moved, 'parent', goName), '1', 'utf8');
+
+      await writePromise;
+
+      const originalListing = await readdir(path.join(moved, 'parent'));
+      assert.ok(
+        originalListing.includes(destName),
+        'write must land in original authenticated directory',
+      );
+      assert.equal(
+        await readFile(path.join(moved, 'parent', destName), 'utf8'),
+        body,
+      );
+      const destSt = await lstat(path.join(moved, 'parent', destName));
+      assert.equal(destSt.mode & 0o777, 0o600);
+
+      const trapListing = await readdir(path.join(base, 'grand', 'parent'));
+      assert.ok(
+        !trapListing.includes(destName),
+        'write must never reach replacement target',
+      );
+      assert.deepEqual(trapListing.filter((n) => n === destName), []);
+      assert.ok(trapListing.includes('trap.txt'));
+
+      // Original parent inode is still the one we wrote into.
+      const movedParentSt = await lstat(path.join(moved, 'parent'));
+      assert.equal(movedParentSt.dev, parentSt.dev);
+      assert.equal(movedParentSt.ino, parentSt.ino);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it('grandparent swap after helper cwd auth keeps exclusive create in original dir', async () => {
+    if (process.platform === 'win32') return;
+    const { createFileExclusiveNoFollow } = await import(
+      '../harness/safe-fs.js'
+    );
+
+    const base = await mkdtemp(path.join(os.tmpdir(), 'aicb-gp-excl-post-'));
+    try {
+      const grand = path.join(base, 'grand');
+      const parent = path.join(grand, 'parent');
+      await mkdir(parent, { recursive: true });
+
+      const readyName = '.aicb-barrier-ready';
+      const goName = '.aicb-barrier-go';
+      const lockName = 'campaign.lock';
+      const body = '{"owner":"anchored"}\n';
+
+      const createPromise = createFileExclusiveNoFollow(
+        path.join(parent, lockName),
+        body,
+        {
+          mode: 0o600,
+          fsync: true,
+          testBarrier: { readyName, goName },
+          helperTimeoutMs: 10_000,
+        },
+      );
+
+      await waitForFile(path.join(parent, readyName));
+
+      const moved = path.join(base, 'grand-moved');
+      await fsRename(grand, moved);
+      await mkdir(path.join(base, 'grand', 'parent'), { recursive: true });
+      await writeFile(
+        path.join(base, 'grand', 'parent', 'trap.txt'),
+        'trap\n',
+        'utf8',
+      );
+      await writeFile(path.join(moved, 'parent', goName), '1', 'utf8');
+
+      await createPromise;
+
+      assert.equal(
+        await readFile(path.join(moved, 'parent', lockName), 'utf8'),
+        body,
+      );
+      const trapListing = await readdir(path.join(base, 'grand', 'parent'));
+      assert.ok(
+        !trapListing.includes(lockName),
+        'exclusive create must never reach replacement target',
+      );
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
   it('ancestor directory replaced with different directory fails pin identity', async () => {
     if (process.platform === 'win32') return;
     const {
@@ -297,8 +447,6 @@ describe('pinned boundary ancestor races', () => {
       await mkdir(parent, { recursive: true });
       const pin = await pinDirectoryBoundary(parent);
       try {
-        // Move real mid aside and plant a fresh directory at the same path
-        // (different inode) — identity pin must fail closed.
         const midMoved = path.join(base, 'mid-moved');
         await fsRename(mid, midMoved);
         await mkdir(path.join(base, 'mid', 'parent'), { recursive: true });
@@ -335,14 +483,10 @@ describe('pinned boundary ancestor races', () => {
       await mkdir(parent, { recursive: true });
       const dest = path.join(parent, 'manifest.json');
 
-      // Control: clean chain passes parent/dest checks.
       await revalidateBeforeRename(parent, dest);
 
-      // Swap grandparent to symlink — full-chain revalidation must refuse.
       await rm(grand, { recursive: true, force: true });
       await symlink(outside, grand);
-      // Recreate lexical parent path under the symlink so parent exists
-      // through the redirected chain (attacker-shaped).
       await mkdir(path.join(outside, 'parent'), { recursive: true });
 
       await assert.rejects(

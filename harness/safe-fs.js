@@ -5,29 +5,39 @@
  * file, then bounded read from the held descriptor. Optional expected
  * (dev,ino) identity pins close leaf swap races (digest / evidence reads).
  *
- * Write path (campaign boundary) — pinned-boundary strategy:
+ * Write path (campaign boundary) — authenticated-cwd helper strategy:
  * Node has no portable openat/renameat. Pathname open/rename always walk
  * intermediate components, and O_NOFOLLOW protects only the leaf. Therefore:
- * 1. Pin every existing directory component with O_DIRECTORY|O_NOFOLLOW,
- *    holding FDs and recording (dev,ino) identity.
- * 2. Re-assert that held-fd identity and path-walk identity still match
- *    before every pathname open/rename (full chain, not only the parent).
- * 3. On Linux, prefer /proc/self/fd/<dirfd>/<name> for leaf create/rename so
- *    the operation is relative to the pinned parent inode (strongest portable
- *    construction available without native openat).
- * 4. Fail closed when O_NOFOLLOW/O_DIRECTORY are unavailable or identity
- *    cannot be established. Never follow user symlinks; macOS /tmp and /var
- *    volume aliases remain the only allowed symlink components.
+ * 1. Pin the parent directory (O_DIRECTORY|O_NOFOLLOW + full ancestor policy
+ *    walk) and record deepest-directory (dev,ino) identity.
+ * 2. Spawn harness/fs-boundary-helper.js with cwd set to that parent. The OS
+ *    resolves cwd at spawn; the child holds the directory vnode/inode even if
+ *    a lexical ancestor is later renamed or replaced.
+ * 3. The helper stats `.`, fails closed on identity mismatch, then performs
+ *    basename-only relative O_EXCL|O_NOFOLLOW create/write/fchmod/fsync and
+ *    relative temp→dest rename inside the held cwd.
+ * 4. Do not rely on /proc/self/fd for correctness (Linux-only optimization
+ *    removed). macOS /tmp and /var volume aliases work by inode identity.
  *
  * Provider children must never gain access to campaign-control storage via
  * ancestor replacement between validation and open/replace.
  */
 
-import { open, constants, lstat, realpath, mkdir, rename, unlink } from 'node:fs/promises';
+import { open, constants, lstat, realpath, mkdir } from 'node:fs/promises';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { isPathInside } from './paths.js';
+
+/** Absolute path to the trusted boundary helper (no shell, fixed script). */
+const FS_BOUNDARY_HELPER_PATH = fileURLToPath(
+  new URL('./fs-boundary-helper.js', import.meta.url),
+);
+
+/** Default helper wall-clock timeout for exclusive create / atomic replace. */
+export const FS_BOUNDARY_HELPER_TIMEOUT_MS = 15_000;
 
 /** Default max bytes for a single safe read (adapter outputs / request JSON). */
 export const DEFAULT_SAFE_READ_MAX_BYTES = 32 * 1024 * 1024;
@@ -112,49 +122,6 @@ export function safeOpenExclusiveWriteFlags() {
 }
 
 /**
- * Linux /proc/self/fd/<dirfd>/<name> lets leaf open/rename target a held
- * directory inode without re-walking replaced ancestors. Not available on
- * macOS (/dev/fd/N is not a directory mount).
- * @returns {boolean}
- */
-export function canUseFdRelativePaths() {
-  return process.platform === 'linux';
-}
-
-/**
- * Build a leaf path relative to an open directory fd (Linux only).
- * Returns null when the construction is unavailable.
- *
- * @param {number} dirFd
- * @param {string} baseName - single path component (no separators)
- * @returns {string | null}
- */
-export function fdRelativeChildPath(dirFd, baseName) {
-  if (!canUseFdRelativePaths()) return null;
-  const name = String(baseName);
-  if (
-    !name ||
-    name === '.' ||
-    name === '..' ||
-    name.includes('/') ||
-    name.includes('\\') ||
-    name.includes('\0')
-  ) {
-    throw new UnsafePathError(
-      `fdRelativeChildPath: invalid leaf name (fail closed): ${name}`,
-      { code: 'INVALID_NAME', path: name },
-    );
-  }
-  if (!Number.isInteger(dirFd) || dirFd < 0) {
-    throw new UnsafePathError(
-      `fdRelativeChildPath: invalid directory fd (fail closed)`,
-      { code: 'INVALID_FD' },
-    );
-  }
-  return `/proc/self/fd/${dirFd}/${name}`;
-}
-
-/**
  * @typedef {{
  *   path: string,
  *   realPath: string,
@@ -169,6 +136,13 @@ export function fdRelativeChildPath(dirFd, baseName) {
  *   dirs: PinnedDir[],
  *   release: () => Promise<void>,
  * }} BoundaryPin
+ *
+ * @typedef {{
+ *   ok: boolean,
+ *   code?: string,
+ *   message?: string,
+ *   [key: string]: unknown,
+ * }} FsBoundaryHelperResult
  */
 
 /**
@@ -433,16 +407,7 @@ export async function pinDirectoryBoundary(dirPath, opts = {}) {
         );
       }
 
-      // Prefer Linux fd-relative open from the previous pin when available so
-      // intermediate path resolution cannot be redirected mid-walk.
-      let openPath = cur;
-      const prev = dirs.length > 0 ? dirs[dirs.length - 1] : null;
-      if (prev && !prev.allowedAlias && canUseFdRelativePaths()) {
-        const relOpen = fdRelativeChildPath(prev.handle.fd, parts[i]);
-        if (relOpen) openPath = relOpen;
-      }
-
-      const pin = await openPinnedDirectory(openPath, cur, {
+      const pin = await openPinnedDirectory(cur, cur, {
         dev: st.dev,
         ino: st.ino,
       });
@@ -456,9 +421,7 @@ export async function pinDirectoryBoundary(dirPath, opts = {}) {
       );
     }
 
-    // Final component of dirPath must be represented (or root-only path).
-    const leaf = dirs[dirs.length - 1];
-    // Re-check lexical leaf identity via path walk vs held fd.
+    // Confirm held-fd identities match the path walk at pin time.
     await assertPinnedBoundary({ path: lexical, dirs, release: async () => {} });
 
     return {
@@ -621,37 +584,303 @@ function pinLeafDir(pin) {
 }
 
 /**
- * Resolve the pathname used for a leaf create/open/rename under a pinned parent.
- * Prefers Linux fd-relative paths; otherwise lexical join after caller has
- * assertPinnedBoundary'd.
- *
- * @param {BoundaryPin} pin
- * @param {string} baseName
+ * Validate a single path basename for relative helper ops.
+ * @param {string} name
+ * @param {string} label
  * @returns {string}
  */
-function leafPathUnderPin(pin, baseName) {
-  const leaf = pinLeafDir(pin);
-  const fdRel = fdRelativeChildPath(leaf.handle.fd, baseName);
-  if (fdRel) return fdRel;
-  return path.join(pin.path, baseName);
+export function requireLeafBasename(name, label = 'name') {
+  const n = String(name);
+  if (
+    !n ||
+    n === '.' ||
+    n === '..' ||
+    n.includes('/') ||
+    n.includes('\\') ||
+    n.includes('\0') ||
+    path.isAbsolute(n)
+  ) {
+    throw new UnsafePathError(
+      `${label}: invalid leaf name (fail closed): ${n}`,
+      { code: 'INVALID_NAME', path: n },
+    );
+  }
+  return n;
+}
+
+/**
+ * Run the trusted FS boundary helper with cwd pinned to `parentDir`.
+ *
+ * The OS resolves cwd at spawn; the child holds that directory inode.
+ * Parent supplies expected (dev,ino) of the deepest directory; the helper
+ * authenticates `.` before any leaf op. Malformed/timeout/nonzero output
+ * is treated as failure.
+ *
+ * @param {string} parentDir - absolute parent directory (spawn cwd)
+ * @param {{ dev: number, ino: number }} identity - expected cwd identity
+ * @param {Record<string, unknown>} request - helper request (op + fields)
+ * @param {{
+ *   timeoutMs?: number,
+ *   allowTestBarrier?: boolean,
+ * }} [opts]
+ * @returns {Promise<FsBoundaryHelperResult>}
+ */
+export async function runFsBoundaryHelper(
+  parentDir,
+  identity,
+  request,
+  opts = {},
+) {
+  assertDirectoryOpenAvailable();
+  const cwd = path.resolve(String(parentDir));
+  if (cwd.includes('\0')) {
+    throw new UnsafePathError(
+      'runFsBoundaryHelper: parent path contains null byte (fail closed)',
+      { code: 'NULL_BYTE', path: cwd },
+    );
+  }
+  if (
+    identity == null ||
+    typeof identity.dev !== 'number' ||
+    typeof identity.ino !== 'number' ||
+    !Number.isFinite(identity.dev) ||
+    !Number.isFinite(identity.ino)
+  ) {
+    throw new UnsafePathError(
+      'runFsBoundaryHelper: invalid expected identity (fail closed)',
+      { code: 'INVALID_IDENTITY', path: cwd },
+    );
+  }
+
+  const timeoutMs =
+    opts.timeoutMs != null && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+      ? Math.floor(opts.timeoutMs)
+      : FS_BOUNDARY_HELPER_TIMEOUT_MS;
+
+  /** @type {Record<string, unknown>} */
+  const body = {
+    ...request,
+    expectedDev: identity.dev,
+    expectedIno: identity.ino,
+  };
+  if (body.testBarrier != null && !opts.allowTestBarrier) {
+    throw new UnsafePathError(
+      'runFsBoundaryHelper: testBarrier not permitted (fail closed)',
+      { code: 'TEST_BARRIER_DENIED', path: cwd },
+    );
+  }
+
+  const payload = Buffer.from(JSON.stringify(body), 'utf8');
+
+  /** @type {NodeJS.ProcessEnv} */
+  const env = {
+    PATH: process.env.PATH,
+  };
+  // Minimal env: never inherit attacker-controlled NODE_OPTIONS etc.
+  if (opts.allowTestBarrier) {
+    env.AICB_FS_HELPER_TEST_BARRIER = '1';
+  }
+
+  return new Promise((resolve, reject) => {
+    /** @type {import('node:child_process').ChildProcessWithoutNullStreams} */
+    let child;
+    try {
+      child = /** @type {import('node:child_process').ChildProcessWithoutNullStreams} */ (
+        spawn(process.execPath, [FS_BOUNDARY_HELPER_PATH], {
+          cwd,
+          env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
+        })
+      );
+    } catch (err) {
+      reject(
+        new UnsafePathError(
+          `runFsBoundaryHelper: spawn failed (fail closed): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { code: 'HELPER_SPAWN', path: cwd },
+        ),
+      );
+      return;
+    }
+
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let timer = null;
+
+    const finish = (err, result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(/** @type {FsBoundaryHelperResult} */ (result));
+    };
+
+    timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* ignore */
+      }
+      finish(
+        new UnsafePathError(
+          `runFsBoundaryHelper: helper timed out after ${timeoutMs}ms (fail closed)`,
+          { code: 'HELPER_TIMEOUT', path: cwd },
+        ),
+      );
+    }, timeoutMs);
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.length > 64 * 1024) {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
+        finish(
+          new UnsafePathError(
+            'runFsBoundaryHelper: helper stdout exceeded bound (fail closed)',
+            { code: 'HELPER_OUTPUT', path: cwd },
+          ),
+        );
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      if (stderr.length > 16 * 1024) {
+        stderr = stderr.slice(0, 16 * 1024);
+      }
+    });
+
+    child.on('error', (err) => {
+      finish(
+        new UnsafePathError(
+          `runFsBoundaryHelper: helper process error (fail closed): ${err.message}`,
+          { code: 'HELPER_SPAWN', path: cwd },
+        ),
+      );
+    });
+
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      const text = stdout.trim();
+      if (!text) {
+        finish(
+          new UnsafePathError(
+            `runFsBoundaryHelper: empty helper output (code=${code}, signal=${signal}, stderr=${stderr.slice(0, 200)}) (fail closed)`,
+            { code: 'HELPER_OUTPUT', path: cwd },
+          ),
+        );
+        return;
+      }
+      // Single JSON object only (reject trailing garbage).
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        finish(
+          new UnsafePathError(
+            'runFsBoundaryHelper: malformed helper JSON (fail closed)',
+            { code: 'HELPER_OUTPUT', path: cwd },
+          ),
+        );
+        return;
+      }
+      if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        finish(
+          new UnsafePathError(
+            'runFsBoundaryHelper: helper result is not an object (fail closed)',
+            { code: 'HELPER_OUTPUT', path: cwd },
+          ),
+        );
+        return;
+      }
+      if (parsed.ok === true && code === 0) {
+        finish(null, parsed);
+        return;
+      }
+      const errCode =
+        typeof parsed.code === 'string' && parsed.code
+          ? parsed.code
+          : code !== 0 && code != null
+            ? 'HELPER_NONZERO'
+            : 'HELPER_FAILED';
+      const message =
+        typeof parsed.message === 'string' && parsed.message
+          ? parsed.message
+          : `helper failed (code=${code})`;
+      finish(
+        new UnsafePathError(
+          `runFsBoundaryHelper: ${message} (fail closed)`,
+          { code: errCode, path: cwd },
+        ),
+      );
+    });
+
+    try {
+      child.stdin.end(payload);
+    } catch (err) {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* ignore */
+      }
+      finish(
+        new UnsafePathError(
+          `runFsBoundaryHelper: failed to write helper stdin (fail closed): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+          { code: 'HELPER_SPAWN', path: cwd },
+        ),
+      );
+    }
+  });
+}
+
+/**
+ * Best-effort unlink of a basename inside an authenticated parent cwd via helper.
+ * Only used for temps proven to have been created under this identity.
+ *
+ * @param {string} parentDir
+ * @param {{ dev: number, ino: number }} identity
+ * @param {string} baseName
+ * @returns {Promise<void>}
+ */
+async function cleanupAuthenticatedTemp(parentDir, identity, baseName) {
+  try {
+    requireLeafBasename(baseName, 'cleanup temp');
+    await runFsBoundaryHelper(parentDir, identity, {
+      op: 'unlink',
+      name: baseName,
+    });
+  } catch {
+    /* best-effort; never follow a swapped lexical path from the parent */
+  }
 }
 
 /**
  * Create a new file exclusively without following symlinks and without rename.
  *
- * Used for lock-style acquisition that must not replace an existing file:
- * open with O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600 (default), complete write,
- * fsync, and close. Never opens a pre-existing path (including a leaf
- * symlink) for write-through.
- *
- * Parent is pinned (held directory FDs + identity) for the full ancestor
- * chain before open so intermediate/grandparent user symlink swaps cannot
- * redirect the create. chmod(mode) and fsync are part of the contract:
- * failures remove the partial regular file and rethrow (fail closed).
+ * Used for lock-style acquisition that must not replace an existing file.
+ * Parent directory identity is pinned, then a trusted helper with cwd set to
+ * that parent performs basename-only O_CREAT|O_EXCL|O_NOFOLLOW create/write/
+ * fchmod/fsync inside the held cwd. chmod and fsync failures fail closed
+ * (helper removes the partial regular file).
  *
  * @param {string} filePath
  * @param {string | Buffer} data
- * @param {{ mode?: number, fsync?: boolean }} [opts]
+ * @param {{
+ *   mode?: number,
+ *   fsync?: boolean,
+ *   testBarrier?: { readyName: string, goName: string },
+ *   helperTimeoutMs?: number,
+ * }} [opts]
  * @returns {Promise<{ path: string }>}
  */
 export async function createFileExclusiveNoFollow(filePath, data, opts = {}) {
@@ -667,83 +896,35 @@ export async function createFileExclusiveNoFollow(filePath, data, opts = {}) {
   }
 
   const parent = path.dirname(abs);
-  const baseName = path.basename(abs);
-  if (!baseName || baseName === '.' || baseName === '..') {
-    throw new UnsafePathError(
-      `createFileExclusiveNoFollow: invalid leaf name (fail closed): ${abs}`,
-      { code: 'INVALID_NAME', path: abs },
-    );
-  }
+  const baseName = requireLeafBasename(
+    path.basename(abs),
+    'createFileExclusiveNoFollow',
+  );
 
   const pin = await pinDirectoryBoundary(parent, {
     label: 'createFileExclusiveNoFollow parent',
   });
-  /** @type {boolean} */
-  let created = false;
-  /** @type {string | null} */
-  let createdPath = null;
   try {
-    await assertPinnedBoundary(pin);
-
-    // Refuse pre-existing leaf symlink without following (clearer than EEXIST alone).
-    const destSt = await lstatOrNull(abs);
-    if (destSt?.isSymbolicLink()) {
-      throw new UnsafePathError(
-        `createFileExclusiveNoFollow: path is a symlink (fail closed): ${abs}`,
-        { code: 'SYMLINK', path: abs },
-      );
-    }
-
+    const leaf = pinLeafDir(pin);
+    const identity = { dev: leaf.dev, ino: leaf.ino };
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
-    const flags = safeOpenExclusiveWriteFlags();
-    const openPath = leafPathUnderPin(pin, baseName);
 
-    // Re-assert immediately before pathname/fd-relative open.
-    await assertPinnedBoundary(pin);
-
-    /** @type {import('node:fs/promises').FileHandle | null} */
-    let handle = null;
-    try {
-      try {
-        handle = await open(openPath, flags, mode);
-      } catch (err) {
-        rethrowOpenError(err, abs);
-      }
-      created = true;
-      createdPath = abs;
-
-      let offset = 0;
-      while (offset < buf.length) {
-        const { bytesWritten } = await handle.write(
-          buf,
-          offset,
-          buf.length - offset,
-          offset,
-        );
-        offset += bytesWritten;
-      }
-      // Create mode can be masked by umask; enforce private bits on the fd.
-      // Fail closed: do not swallow chmod/sync errors (mode 0600 + durability).
-      await handle.chmod(mode);
-      if (doFsync) {
-        await handle.sync();
-      }
-    } catch (err) {
-      if (created && createdPath) {
-        // Incomplete exclusive create: remove only the partial regular file we created.
-        // Prefer fd-relative unlink when available so we do not follow a swapped path.
-        const unlinkPath = leafPathUnderPin(pin, baseName);
-        await unlink(unlinkPath).catch(async () => {
-          await unlink(createdPath).catch(() => {});
-        });
-      }
-      throw err;
-    } finally {
-      if (handle != null) {
-        await handle.close().catch(() => {});
-        handle = null;
-      }
+    /** @type {Record<string, unknown>} */
+    const request = {
+      op: 'exclusive-create',
+      name: baseName,
+      dataB64: buf.toString('base64'),
+      mode,
+      fsync: doFsync,
+    };
+    if (opts.testBarrier) {
+      request.testBarrier = opts.testBarrier;
     }
+
+    await runFsBoundaryHelper(pin.path, identity, request, {
+      allowTestBarrier: Boolean(opts.testBarrier),
+      timeoutMs: opts.helperTimeoutMs,
+    });
     return { path: abs };
   } finally {
     await releaseBoundaryPin(pin);
@@ -1283,20 +1464,25 @@ export async function revalidateBeforeRename(parentDir, destPath, opts = {}) {
 /**
  * Atomically replace a file without following leaf/intermediate symlinks.
  *
- * Pinned-boundary strategy (Node has no portable openat/renameat):
+ * Authenticated-cwd helper strategy (Node has no portable openat/renameat):
  * 1. Ensure parent via mkdirpNoFollow
- * 2. Pin full parent ancestor chain (held O_DIRECTORY|O_NOFOLLOW FDs + identity)
- * 3. Create unpredictable same-dir temp with O_CREAT|O_EXCL|O_NOFOLLOW
- *    (Linux: via /proc/self/fd/<parentfd>/name; else lexical path after pin assert)
- * 4. Write + chmod + fsync on the held fd (fail closed; clean only our temp)
- * 5. Re-assert pin identity + destination (reject dest symlink / full chain)
- * 6. rename temp → dest (fd-relative when available)
+ * 2. Pin parent directory identity (ancestor policy + O_DIRECTORY|O_NOFOLLOW)
+ * 3. Spawn trusted helper with cwd=parent and expected (dev,ino)
+ * 4. Helper authenticates `.`, exclusive-creates temp, write/chmod/fsync,
+ *    then relative rename temp→dest — all basename-only inside held cwd
+ * 5. Helper cleans its own temp on failure; parent only cleans a temp proven
+ *    to be in the authenticated cwd (via another helper unlink)
  *
  * Never opens or chmods a pre-existing destination symlink.
  *
  * @param {string} filePath
  * @param {string | Buffer} data
- * @param {{ mode?: number, fsync?: boolean }} [opts]
+ * @param {{
+ *   mode?: number,
+ *   fsync?: boolean,
+ *   testBarrier?: { readyName: string, goName: string },
+ *   helperTimeoutMs?: number,
+ * }} [opts]
  * @returns {Promise<{ path: string }>}
  */
 export async function writeFileAtomicNoFollow(filePath, data, opts = {}) {
@@ -1312,13 +1498,10 @@ export async function writeFileAtomicNoFollow(filePath, data, opts = {}) {
   }
 
   const parent = path.dirname(abs);
-  const destBase = path.basename(abs);
-  if (!destBase || destBase === '.' || destBase === '..') {
-    throw new UnsafePathError(
-      `writeFileAtomicNoFollow: invalid leaf name (fail closed): ${abs}`,
-      { code: 'INVALID_NAME', path: abs },
-    );
-  }
+  const destBase = requireLeafBasename(
+    path.basename(abs),
+    'writeFileAtomicNoFollow',
+  );
 
   await mkdirpNoFollow(parent, { mode: 0o700 });
 
@@ -1326,105 +1509,39 @@ export async function writeFileAtomicNoFollow(filePath, data, opts = {}) {
     label: 'writeFileAtomicNoFollow parent',
   });
 
-  /** @type {string | null} */
-  let tmpBase = null;
-  /** @type {string | null} */
-  let tmpLexical = null;
+  const tmpBase = `.aicb-tmp-${randomBytes(16).toString('hex')}`;
+  /** @type {{ dev: number, ino: number } | null} */
+  let identity = null;
+  /** @type {boolean} */
+  let helperSucceeded = false;
 
   try {
-    await assertPinnedBoundary(pin);
-
-    // Reject destination symlink before any exclusive open of temp (fast path).
-    {
-      const destSt = await lstatOrNull(abs);
-      if (destSt?.isSymbolicLink()) {
-        throw new UnsafePathError(
-          `writeFileAtomicNoFollow: destination is a symlink (fail closed): ${abs}`,
-          { code: 'SYMLINK_DEST', path: abs },
-        );
-      }
-      if (destSt && !destSt.isFile()) {
-        throw new UnsafePathError(
-          `writeFileAtomicNoFollow: destination is not a regular file (fail closed): ${abs}`,
-          { code: 'NOT_REGULAR', path: abs },
-        );
-      }
-    }
-
+    const leaf = pinLeafDir(pin);
+    identity = { dev: leaf.dev, ino: leaf.ino };
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
-    const flags = safeOpenExclusiveWriteFlags();
 
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      const candidateBase = `${'.aicb-tmp-'}${randomBytes(16).toString('hex')}`;
-      await assertPinnedBoundary(pin);
-      const openPath = leafPathUnderPin(pin, candidateBase);
-      try {
-        const handle = await open(openPath, flags, mode);
-        tmpBase = candidateBase;
-        tmpLexical = path.join(parent, candidateBase);
-        try {
-          let offset = 0;
-          while (offset < buf.length) {
-            const { bytesWritten } = await handle.write(
-              buf,
-              offset,
-              buf.length - offset,
-              offset,
-            );
-            offset += bytesWritten;
-          }
-          // Ensure mode on the fd (create mode can be masked by umask).
-          // Fail closed: do not swallow chmod/fsync errors.
-          await handle.chmod(mode);
-          if (doFsync) {
-            await handle.sync();
-          }
-        } catch (err) {
-          // Partial temp: remove only the file we created, then rethrow.
-          await handle.close().catch(() => {});
-          const unlinkPath = leafPathUnderPin(pin, candidateBase);
-          await unlink(unlinkPath).catch(async () => {
-            if (tmpLexical) await unlink(tmpLexical).catch(() => {});
-          });
-          tmpBase = null;
-          tmpLexical = null;
-          throw err;
-        }
-        await handle.close().catch(() => {});
-        break;
-      } catch (err) {
-        if (err instanceof UnsafePathError) throw err;
-        const code = /** @type {NodeJS.ErrnoException} */ (err).code;
-        if (code === 'EEXIST') {
-          tmpBase = null;
-          tmpLexical = null;
-          continue;
-        }
-        rethrowOpenError(err, path.join(parent, candidateBase));
-      }
+    /** @type {Record<string, unknown>} */
+    const request = {
+      op: 'atomic-replace',
+      destName: destBase,
+      tmpName: tmpBase,
+      dataB64: buf.toString('base64'),
+      mode,
+      fsync: doFsync,
+    };
+    if (opts.testBarrier) {
+      request.testBarrier = opts.testBarrier;
     }
 
-    if (tmpBase == null || tmpLexical == null) {
-      throw new UnsafePathError(
-        `writeFileAtomicNoFollow: failed to create exclusive temp (fail closed): ${parent}`,
-        { code: 'TEMP_CREATE', path: parent },
-      );
-    }
-
-    // Immediately before rename: full-chain pin identity + dest revalidation.
-    await revalidateBeforeRename(parent, abs, { pin });
-
-    const renameFrom = leafPathUnderPin(pin, tmpBase);
-    const renameTo = leafPathUnderPin(pin, destBase);
-    await rename(renameFrom, renameTo);
-    tmpBase = null;
-    tmpLexical = null;
+    await runFsBoundaryHelper(pin.path, identity, request, {
+      allowTestBarrier: Boolean(opts.testBarrier),
+      timeoutMs: opts.helperTimeoutMs,
+    });
+    helperSucceeded = true;
   } finally {
-    if (tmpBase != null) {
-      const unlinkPath = leafPathUnderPin(pin, tmpBase);
-      await unlink(unlinkPath).catch(async () => {
-        if (tmpLexical) await unlink(tmpLexical).catch(() => {});
-      });
+    if (!helperSucceeded && identity != null) {
+      // Only clean via authenticated helper (never lexical unlink after swap).
+      await cleanupAuthenticatedTemp(pin.path, identity, tmpBase);
     }
     await releaseBoundaryPin(pin);
   }
