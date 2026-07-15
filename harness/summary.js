@@ -192,20 +192,15 @@ export function buildReport(manifest, trialResults) {
   const experimentId =
     manifest?.experimentId != null ? String(manifest.experimentId) : null;
 
-  // Prefer result records; fall back to manifest trial rows for sparse sets
-  /** @type {Map<string, object>} */
-  const byId = new Map();
-  for (const t of manifest?.trials || []) {
-    if (t?.id) byId.set(t.id, { ...t });
-  }
+  // Aggregate ONLY the supplied trialResults. Do not seed from
+  // manifest.trials — pending/skipped/unverified rows must not inflate
+  // n/completed/classifications. Callers pass verified reportableResults.
+  /** @type {object[]} */
+  const trials = [];
   for (const r of results) {
-    if (r?.id) {
-      byId.set(r.id, { ...(byId.get(r.id) || {}), ...r });
-    } else {
-      byId.set(`anon-${byId.size}`, r);
-    }
+    if (r == null || typeof r !== 'object') continue;
+    trials.push(r);
   }
-  const trials = [...byId.values()];
 
   /** @type {Map<string, { cell: object, stats: ReturnType<typeof emptyStats>, durations: number[] }>} */
   const cellMap = new Map();

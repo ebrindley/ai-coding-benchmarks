@@ -16,6 +16,12 @@
 import {
   mkdir,
   writeFile,
+  readdir,
+  lstat,
+  rmdir,
+  rename,
+  rm,
+  mkdtemp,
 } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -24,7 +30,7 @@ import {
   isBoundedIdentifier,
   sanitizeBoundedIdentifier,
 } from './gates.js';
-import { assertSafeTrialId, trialPathUnder } from './paths.js';
+import { assertSafeTrialId, trialPathUnder, isPathInside } from './paths.js';
 import { copyFileNoFollow, UnsafePathError } from './safe-fs.js';
 
 /** Top-level result keys allowed in sanitized export (whitelist). */
@@ -277,11 +283,23 @@ function sanitizeResult(result, campaignDir) {
 
 /**
  * Sanitize a loaded campaign manifest for export (no absolute paths / usernames).
+ * When verifiedIds is provided, manifest.trials is filtered to exactly those
+ * verified exported trial IDs (pending/skipped/unverified excluded).
+ *
  * @param {object} manifest
  * @param {string} srcRoot
+ * @param {Set<string>} [verifiedIds]
  * @returns {object}
  */
-function sanitizeManifestForExport(manifest, srcRoot) {
+function sanitizeManifestForExport(manifest, srcRoot, verifiedIds) {
+  const sourceTrials = Array.isArray(manifest.trials) ? manifest.trials : [];
+  const filteredTrials =
+    verifiedIds != null
+      ? sourceTrials.filter(
+          (t) => t && t.id != null && verifiedIds.has(String(t.id)),
+        )
+      : sourceTrials;
+
   /** @type {Record<string, unknown>} */
   const sanitizedManifest = {
     campaignId: manifest.campaignId,
@@ -289,39 +307,37 @@ function sanitizeManifestForExport(manifest, srcRoot) {
     status: manifest.status,
     experimentId: manifest.experimentId ?? null,
     lock: { held: false, owner: null, acquiredAt: null, path: null },
-    trials: Array.isArray(manifest.trials)
-      ? manifest.trials.map((t) => {
-          if (!t || typeof t !== 'object') return t;
-          const {
-            id,
-            state,
-            arm,
-            taskId,
-            repetition,
-            invocationPath,
-            requestedModel,
-            resolvedModel,
-            postureFingerprint,
-            classification,
-            provider,
-            scheduleSeed,
-          } = t;
-          return {
-            id,
-            state,
-            arm,
-            taskId,
-            repetition,
-            invocationPath,
-            requestedModel,
-            resolvedModel,
-            postureFingerprint,
-            classification,
-            provider,
-            scheduleSeed,
-          };
-        })
-      : [],
+    trials: filteredTrials.map((t) => {
+      if (!t || typeof t !== 'object') return t;
+      const {
+        id,
+        state,
+        arm,
+        taskId,
+        repetition,
+        invocationPath,
+        requestedModel,
+        resolvedModel,
+        postureFingerprint,
+        classification,
+        provider,
+        scheduleSeed,
+      } = t;
+      return {
+        id,
+        state,
+        arm,
+        taskId,
+        repetition,
+        invocationPath,
+        requestedModel,
+        resolvedModel,
+        postureFingerprint,
+        classification,
+        provider,
+        scheduleSeed,
+      };
+    }),
     corpusRevision: manifest.corpusRevision ?? null,
     harnessRevision: manifest.harnessRevision ?? null,
     host: manifest.host
@@ -340,6 +356,92 @@ function sanitizeManifestForExport(manifest, srcRoot) {
   return /** @type {object} */ (
     redactHostIdentifying(stripPromptBearing(sanitizedManifest), srcRoot)
   );
+}
+
+/**
+ * Reject equal or nested campaignDir/outDir in either direction.
+ * Require a fresh destination: must not exist, or be an empty real directory
+ * (not a symlink). Never merge into pre-existing/stale content.
+ *
+ * @param {string} campaignDir
+ * @param {string} outDir
+ * @returns {Promise<{ srcRoot: string, destRoot: string, destExists: boolean }>}
+ */
+async function assertSafeExportDestination(campaignDir, outDir) {
+  const srcRoot = path.resolve(campaignDir);
+  const destRoot = path.resolve(outDir);
+
+  if (srcRoot === destRoot) {
+    throw new Error(
+      'exportSanitizedBundle: outDir must not equal campaignDir (fail closed)',
+    );
+  }
+  // Nested either direction (separator-aware via isPathInside)
+  if (isPathInside(srcRoot, destRoot) && srcRoot !== destRoot) {
+    throw new Error(
+      'exportSanitizedBundle: outDir must not be inside campaignDir (fail closed)',
+    );
+  }
+  if (isPathInside(destRoot, srcRoot) && srcRoot !== destRoot) {
+    throw new Error(
+      'exportSanitizedBundle: campaignDir must not be inside outDir (fail closed)',
+    );
+  }
+
+  let destExists = false;
+  try {
+    const st = await lstat(destRoot);
+    destExists = true;
+    if (st.isSymbolicLink()) {
+      throw new Error(
+        'exportSanitizedBundle: outDir must not be a symlink (fail closed)',
+      );
+    }
+    if (!st.isDirectory()) {
+      throw new Error(
+        'exportSanitizedBundle: outDir exists and is not a directory (fail closed)',
+      );
+    }
+    const entries = await readdir(destRoot);
+    if (entries.length > 0) {
+      throw new Error(
+        'exportSanitizedBundle: outDir must be empty or not exist; refusing to merge into pre-existing content (fail closed)',
+      );
+    }
+  } catch (err) {
+    if (err instanceof Error && /fail closed/.test(err.message)) {
+      throw err;
+    }
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code !== 'ENOENT') {
+      throw err;
+    }
+    destExists = false;
+  }
+
+  // Parent of dest must not be a symlink (staging publishes via rename under it).
+  const parent = path.dirname(destRoot);
+  try {
+    const parentSt = await lstat(parent);
+    if (parentSt.isSymbolicLink()) {
+      throw new Error(
+        'exportSanitizedBundle: outDir parent must not be a symlink (fail closed)',
+      );
+    }
+  } catch (err) {
+    if (err instanceof Error && /fail closed/.test(err.message)) {
+      throw err;
+    }
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code === 'ENOENT') {
+      throw new Error(
+        'exportSanitizedBundle: outDir parent directory does not exist (fail closed)',
+      );
+    }
+    throw err;
+  }
+
+  return { srcRoot, destRoot, destExists };
 }
 
 /**
@@ -422,8 +524,10 @@ export async function exportSanitizedBundle({
     throw new Error('exportSanitizedBundle: outDir is required');
   }
 
-  const srcRoot = path.resolve(campaignDir);
-  const destRoot = path.resolve(outDir);
+  // Destination safety first: no overlap, no symlink, fresh/empty only.
+  const { srcRoot, destRoot, destExists } =
+    await assertSafeExportDestination(campaignDir, outDir);
+
   /** @type {string[]} */
   const warnings = [];
   let filesCopied = 0;
@@ -491,95 +595,143 @@ export async function exportSanitizedBundle({
     );
   }
 
-  await mkdir(destRoot, { recursive: true });
+  /** @type {Set<string>} */
+  const exportIds = new Set(exportResults.map((r) => String(r.id)));
 
-  // Sanitized manifest
-  const redactedManifest = sanitizeManifestForExport(manifest, srcRoot);
-  await writeFile(
-    path.join(destRoot, 'manifest.json'),
-    `${JSON.stringify(redactedManifest, null, 2)}\n`,
-    'utf8',
-  );
-  filesCopied += 1;
+  // Write into a private staging directory, then rename-publish into destRoot.
+  // Never merge into a pre-existing nonempty destination; never recursive
+  // cleanup of user-chosen existing content.
+  const parent = path.dirname(destRoot);
+  const stagingRoot = await mkdtemp(path.join(parent, '.aicb-export-staging-'));
 
-  // 3. Export ONLY verified reportable results — never readdir results/.
-  for (const raw of exportResults) {
-    const id = assertSafeTrialId(String(raw.id));
-    const clean = sanitizeResult(raw, srcRoot);
-    const destDir = path.join(destRoot, 'results', id);
-    await mkdir(destDir, { recursive: true });
+  try {
+    // Sanitized manifest: trials list is exactly the verified export set.
+    const redactedManifest = sanitizeManifestForExport(
+      manifest,
+      srcRoot,
+      exportIds,
+    );
     await writeFile(
-      path.join(destDir, 'result.json'),
-      `${JSON.stringify(clean, null, 2)}\n`,
+      path.join(stagingRoot, 'manifest.json'),
+      `${JSON.stringify(redactedManifest, null, 2)}\n`,
       'utf8',
     );
     filesCopied += 1;
-  }
 
-  // 4. Rebuild report/summary from validated manifest + verified results.
-  // Never read or copy source report.json / summary.txt.
-  const { buildReport, formatHumanSummary } = await import('./summary.js');
-  const report = buildReport(manifest, exportResults);
-  const reportBody = redactHostIdentifying(
-    stripPromptBearing(report),
-    srcRoot,
-  );
-  await writeFile(
-    path.join(destRoot, 'report.json'),
-    `${JSON.stringify(reportBody, null, 2)}\n`,
-    'utf8',
-  );
-  filesCopied += 1;
+    // Export ONLY verified reportable results — never readdir results/.
+    for (const raw of exportResults) {
+      const id = assertSafeTrialId(String(raw.id));
+      const clean = sanitizeResult(raw, srcRoot);
+      const destDir = path.join(stagingRoot, 'results', id);
+      await mkdir(destDir, { recursive: true });
+      await writeFile(
+        path.join(destDir, 'result.json'),
+        `${JSON.stringify(clean, null, 2)}\n`,
+        'utf8',
+      );
+      filesCopied += 1;
+    }
 
-  const human = formatHumanSummary(
-    /** @type {object} */ (reportBody),
-  );
-  await writeFile(
-    path.join(destRoot, 'summary.txt'),
-    `${String(redactHostIdentifying(human, srcRoot))}\n`,
-    'utf8',
-  );
-  filesCopied += 1;
-
-  // 5. includeRaw: only verified trial IDs, whitelist filenames, nofollow.
-  if (includeRaw) {
-    warnings.push(
-      'includeRaw=true: raw/ may contain secrets — handle as confidential',
+    // Rebuild report/summary from verified results only (not full manifest trials).
+    // Never read or copy source report.json / summary.txt.
+    const { buildReport, formatHumanSummary } = await import('./summary.js');
+    const report = buildReport(manifest, exportResults);
+    const reportBody = redactHostIdentifying(
+      stripPromptBearing(report),
+      srcRoot,
     );
-    for (const r of exportResults) {
-      const id = String(r.id);
-      try {
-        filesCopied += await copyVerifiedTrialRaw(
-          srcRoot,
-          id,
-          destRoot,
-          warnings,
-        );
-      } catch (err) {
-        warnings.push(
-          `raw export skipped for ${id}: ${err instanceof Error ? err.message : String(err)}`,
-        );
+    await writeFile(
+      path.join(stagingRoot, 'report.json'),
+      `${JSON.stringify(reportBody, null, 2)}\n`,
+      'utf8',
+    );
+    filesCopied += 1;
+
+    const human = formatHumanSummary(
+      /** @type {object} */ (reportBody),
+    );
+    await writeFile(
+      path.join(stagingRoot, 'summary.txt'),
+      `${String(redactHostIdentifying(human, srcRoot))}\n`,
+      'utf8',
+    );
+    filesCopied += 1;
+
+    // includeRaw: only verified trial IDs, whitelist filenames, nofollow.
+    if (includeRaw) {
+      warnings.push(
+        'includeRaw=true: raw/ may contain secrets — handle as confidential',
+      );
+      for (const r of exportResults) {
+        const id = String(r.id);
+        try {
+          filesCopied += await copyVerifiedTrialRaw(
+            srcRoot,
+            id,
+            stagingRoot,
+            warnings,
+          );
+        } catch (err) {
+          warnings.push(
+            `raw export skipped for ${id}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
     }
-  }
 
-  await writeFile(
-    path.join(destRoot, 'EXPORT_README.txt'),
-    [
-      'Sanitized campaign export bundle (whitelist)',
-      'source: <campaign> (absolute path redacted)',
-      `includeRaw: ${includeRaw}`,
-      'Only validated manifest, verified result digests, and rebuilt report/summary are exported.',
-      'Source report.json/summary.txt are never copied; they are regenerated from verified evidence.',
-      'Unmanifested results and unverified trials are never exported.',
-      'Prompt-bearing request/output content is never exported.',
-      'Local usernames and absolute paths are redacted.',
-      'Upload/publish is not performed by the harness.',
-      '',
-    ].join('\n'),
-    'utf8',
-  );
-  filesCopied += 1;
+    await writeFile(
+      path.join(stagingRoot, 'EXPORT_README.txt'),
+      [
+        'Sanitized campaign export bundle (whitelist)',
+        'source: <campaign> (absolute path redacted)',
+        `includeRaw: ${includeRaw}`,
+        'Only validated manifest, verified result digests, and rebuilt report/summary are exported.',
+        'Source report.json/summary.txt are never copied; they are regenerated from verified evidence.',
+        'Unmanifested results and unverified trials are never exported.',
+        'Prompt-bearing request/output content is never exported.',
+        'Local usernames and absolute paths are redacted.',
+        'Upload/publish is not performed by the harness.',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    filesCopied += 1;
+
+    // Publish: empty dest may be rmdir'd then rename; nonexistent → rename.
+    // Re-check emptiness so a race cannot merge into stale content.
+    if (destExists) {
+      let entries;
+      try {
+        const st = await lstat(destRoot);
+        if (st.isSymbolicLink() || !st.isDirectory()) {
+          throw new Error(
+            'exportSanitizedBundle: outDir changed during export (fail closed)',
+          );
+        }
+        entries = await readdir(destRoot);
+      } catch (err) {
+        if (err instanceof Error && /fail closed/.test(err.message)) {
+          throw err;
+        }
+        const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+        if (code !== 'ENOENT') throw err;
+        entries = null;
+      }
+      if (entries != null) {
+        if (entries.length > 0) {
+          throw new Error(
+            'exportSanitizedBundle: outDir became non-empty during export (fail closed)',
+          );
+        }
+        await rmdir(destRoot);
+      }
+    }
+    await rename(stagingRoot, destRoot);
+  } catch (err) {
+    // Best-effort staging cleanup; never touch user dest content on failure.
+    await rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
 
   return {
     outDir: destRoot,

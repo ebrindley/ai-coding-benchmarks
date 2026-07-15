@@ -613,6 +613,306 @@ describe('digest evidence binding + tamper', () => {
     }
   });
 
+  it('strict manifest-bound evidence: identity, artifact path, schema, id binding', async () => {
+    const {
+      quarantineRawOutput,
+      writeTrialResult,
+      readTrialResult,
+      buildTrialDigests,
+      computeFinalResultDigest,
+      verifyTrialEvidenceDigests,
+      verifyCampaignEvidenceDigests,
+      computeArtifactDigest,
+    } = await import('../harness/results.js');
+
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-strict-ev-'));
+    try {
+      const trialId = 'trial-strict';
+      const posture = 'c'.repeat(64);
+      const frozen = {
+        id: trialId,
+        experimentId: 'exp-strict',
+        arm: 'arm-a',
+        provider: 'prov',
+        taskId: 'task-1',
+        repetition: 1,
+        scheduleSeed: 7,
+        invocationPath: 'native-cli',
+        requestedModel: 'model-x',
+        postureFingerprint: posture,
+        state: 'completed',
+      };
+
+      const q = await quarantineRawOutput(campaign, trialId, {
+        stdout: 'strict-out\n',
+        stderr: '',
+      });
+      const artDir = path.join(campaign, 'artifacts', trialId);
+      await mkdir(artDir, { recursive: true });
+      await writeFile(path.join(artDir, 'meta.json'), '{"ok":true}\n', 'utf8');
+      const artDig = await computeArtifactDigest(artDir);
+
+      const baseResult = {
+        ...frozen,
+        classification: 'PASS',
+        exitCode: 0,
+        gateResults: [],
+        executionRoot: '/tmp/exec-root',
+        artifactDir: artDir,
+        digests: buildTrialDigests({
+          artifactDigest: artDig,
+          ...q.digests,
+        }),
+      };
+
+      const { result: written } = await writeTrialResult(
+        campaign,
+        trialId,
+        baseResult,
+        { manifestTrial: frozen },
+      );
+      assert.match(written.digests.resultDigest, /^[a-f0-9]{64}$/);
+      assert.equal(written.id, trialId);
+
+      // --- writeTrialResult rejects result.id !== trialId ---
+      await assert.rejects(
+        () =>
+          writeTrialResult(campaign, trialId, {
+            ...baseResult,
+            id: 'other-trial',
+          }),
+        /result\.id.*!== trialId|fail closed/i,
+      );
+
+      // --- unknown-field rejected on write ---
+      await assert.rejects(
+        () =>
+          writeTrialResult(campaign, trialId, {
+            ...baseResult,
+            notInContract: true,
+          }),
+        /additional property|schema validation|fail closed/i,
+      );
+
+      // --- swapped / mismatched identity fails verify when manifestTrial provided ---
+      const swapped = await readTrialResult(campaign, trialId);
+      swapped.arm = 'arm-ATTACKER';
+      // Keep stored resultDigest so identity is the failure mode (not only digest).
+      await writeFile(
+        path.join(campaign, 'results', trialId, 'result.json'),
+        `${JSON.stringify(swapped, null, 2)}\n`,
+        'utf8',
+      );
+      const idBad = await verifyTrialEvidenceDigests(
+        campaign,
+        trialId,
+        swapped,
+        { manifestTrial: frozen },
+      );
+      assert.equal(idBad.ok, false);
+      assert.ok(
+        idBad.mismatches.some(
+          (m) => m === 'identity:arm' || m.includes('arm'),
+        ),
+        String(idBad.mismatches),
+      );
+
+      // Campaign path also binds identity from each manifest row
+      const campIdBad = await verifyCampaignEvidenceDigests(campaign, [
+        { ...frozen, state: 'completed' },
+      ]);
+      assert.equal(campIdBad.ok, false);
+      assert.ok(
+        campIdBad.failures.some((f) =>
+          f.mismatches.some((m) => String(m).includes('arm')),
+        ),
+      );
+
+      // Restore a correct result for further checks
+      const { result: restored } = await writeTrialResult(
+        campaign,
+        trialId,
+        {
+          ...baseResult,
+          // force recompute
+          digests: buildTrialDigests({
+            artifactDigest: artDig,
+            ...q.digests,
+          }),
+        },
+        { manifestTrial: frozen },
+      );
+
+      // --- external / tampered artifactDir is ignored; only campaign/artifacts/<id> ---
+      const external = await mkdtemp(path.join(os.tmpdir(), 'aicb-ext-art-'));
+      try {
+        await writeFile(
+          path.join(external, 'evil.json'),
+          '{"evil":true}\n',
+          'utf8',
+        );
+        const extDig = await computeArtifactDigest(external);
+        // Plant a result that claims external artifactDir and matching-looking digest
+        // for the *external* tree while campaign artifacts stay as originally digested.
+        const tamperedPath = await readTrialResult(campaign, trialId);
+        tamperedPath.artifactDir = external;
+        // If verify trusted artifactDir, it would recompute extDig and mismatch
+        // stored artifactDigest (campaign tree). If it ignores external path and
+        // uses campaign/artifacts/<id>, the original artDig still matches.
+        tamperedPath.digests = {
+          ...tamperedPath.digests,
+          // keep campaign artDig — external must not be trusted
+          artifactDigest: artDig,
+        };
+        // Re-stamp resultDigest for the tampered artifactDir field (exportable field)
+        tamperedPath.digests.resultDigest = computeFinalResultDigest(tamperedPath);
+        await writeFile(
+          path.join(campaign, 'results', trialId, 'result.json'),
+          `${JSON.stringify(tamperedPath, null, 2)}\n`,
+          'utf8',
+        );
+
+        const pathIgnored = await verifyTrialEvidenceDigests(
+          campaign,
+          trialId,
+          tamperedPath,
+          { manifestTrial: frozen },
+        );
+        // campaign artifacts still match artDig → ok (external path ignored)
+        assert.equal(
+          pathIgnored.ok,
+          true,
+          `expected external artifactDir ignored: ${pathIgnored.error}`,
+        );
+        assert.ok(
+          String(pathIgnored.recomputed?.artifactDir || '').includes(
+            path.join('artifacts', trialId),
+          ),
+        );
+        assert.notEqual(extDig, artDig);
+
+        // Empty/missing campaign artifacts while external has content → fail
+        // (proves external is not consulted)
+        await writeFile(
+          path.join(artDir, 'meta.json'),
+          '{"ok":false,"tampered":1}\n',
+          'utf8',
+        );
+        const campChanged = await verifyTrialEvidenceDigests(
+          campaign,
+          trialId,
+          await readTrialResult(campaign, trialId),
+          { manifestTrial: frozen },
+        );
+        assert.equal(campChanged.ok, false);
+        assert.ok(
+          campChanged.mismatches.includes('artifactDigest'),
+          String(campChanged.mismatches),
+        );
+      } finally {
+        await rm(external, { recursive: true, force: true });
+      }
+
+      // Restore campaign artifacts + result
+      await writeFile(path.join(artDir, 'meta.json'), '{"ok":true}\n', 'utf8');
+      const artDig2 = await computeArtifactDigest(artDir);
+      const { result: full } = await writeTrialResult(
+        campaign,
+        trialId,
+        {
+          ...baseResult,
+          executionRoot: '/tmp/exec-root',
+          error: null,
+          digests: buildTrialDigests({
+            artifactDigest: artDig2,
+            ...q.digests,
+          }),
+        },
+        { manifestTrial: frozen },
+      );
+
+      // --- exportable field is covered by resultDigest (changing it breaks digest) ---
+      assert.equal(full.digests.resultDigest, computeFinalResultDigest(full));
+      const mutated = { ...full, executionRoot: '/tmp/ATTACKER-ROOT' };
+      // resultDigest field still the old one
+      assert.notEqual(
+        computeFinalResultDigest(mutated),
+        full.digests.resultDigest,
+      );
+      await writeFile(
+        path.join(campaign, 'results', trialId, 'result.json'),
+        `${JSON.stringify(mutated, null, 2)}\n`,
+        'utf8',
+      );
+      const digBreak = await verifyTrialEvidenceDigests(campaign, trialId, mutated, {
+        manifestTrial: frozen,
+      });
+      assert.equal(digBreak.ok, false);
+      assert.ok(digBreak.mismatches.includes('resultDigest'));
+
+      // --- unknown-field rejected on verify ---
+      const withUnknown = {
+        ...restored,
+        digests: {
+          ...restored.digests,
+          artifactDigest: artDig2,
+        },
+        smuggled: 'nope',
+      };
+      withUnknown.digests.resultDigest = computeFinalResultDigest(withUnknown);
+      const schemaBad = await verifyTrialEvidenceDigests(
+        campaign,
+        trialId,
+        withUnknown,
+        { manifestTrial: frozen },
+      );
+      assert.equal(schemaBad.ok, false);
+      assert.ok(
+        schemaBad.mismatches.includes('schema') ||
+          /additional property|schema/i.test(String(schemaBad.error)),
+        String(schemaBad.error),
+      );
+
+      // rawEvidenceUnavailable still digests full record including the flag
+      const infraId = 'trial-infra-dig';
+      const { result: infraWritten } = await writeTrialResult(campaign, infraId, {
+        id: infraId,
+        experimentId: 'exp-strict',
+        arm: 'arm-a',
+        provider: 'prov',
+        taskId: 'task-1',
+        repetition: 1,
+        scheduleSeed: 7,
+        invocationPath: 'native-cli',
+        requestedModel: 'model-x',
+        postureFingerprint: posture,
+        state: 'failed',
+        classification: 'INFRA_FAIL',
+        exitCode: null,
+        digests: { rawEvidenceUnavailable: true },
+      });
+      assert.equal(
+        infraWritten.digests.resultDigest,
+        computeFinalResultDigest(infraWritten),
+      );
+      assert.equal(infraWritten.digests.rawEvidenceUnavailable, true);
+      // Flip flag off without updating digest → resultDigest mismatch
+      const infraTamper = {
+        ...infraWritten,
+        digests: {
+          ...infraWritten.digests,
+          rawEvidenceUnavailable: false,
+        },
+      };
+      assert.notEqual(
+        computeFinalResultDigest(infraTamper),
+        infraWritten.digests.resultDigest,
+      );
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+    }
+  });
+
   it('summary and export refuse unavailable records and report bypass', async () => {
     const {
       writeTrialResult,

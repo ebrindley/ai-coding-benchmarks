@@ -461,6 +461,133 @@ describe('schema artifacts (trial + report)', () => {
     assert.ok(badType.some((e) => e.includes('schemaVersion')));
   });
 
+  it('writeTrialResult enforces additionalProperties and id binding; read validate option', async () => {
+    const {
+      writeTrialResult,
+      readTrialResult,
+      validateTrialResultSchema,
+      collectManifestIdentityMismatches,
+    } = await import('../harness/results.js');
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-schema-bind-'));
+    try {
+      const trialId = 'bind-1';
+      const manifestTrial = {
+        id: trialId,
+        experimentId: 'exp-bind',
+        arm: 'a1',
+        provider: 'p1',
+        taskId: 'task-bind',
+        repetition: 1,
+        scheduleSeed: 3,
+        invocationPath: 'poetic-adapter',
+        requestedModel: 'm1',
+        postureFingerprint: 'e'.repeat(64),
+      };
+
+      // Mismatched id rejected
+      await assert.rejects(
+        () =>
+          writeTrialResult(campaign, trialId, {
+            id: 'not-bind-1',
+            experimentId: 'exp-bind',
+            arm: 'a1',
+            taskId: 'task-bind',
+            repetition: 1,
+            scheduleSeed: 3,
+            invocationPath: 'poetic-adapter',
+            requestedModel: 'm1',
+            state: 'completed',
+            digests: {},
+          }),
+        /result\.id.*trialId|fail closed/i,
+      );
+
+      // Unknown field rejected
+      await assert.rejects(
+        () =>
+          writeTrialResult(campaign, trialId, {
+            id: trialId,
+            experimentId: 'exp-bind',
+            arm: 'a1',
+            taskId: 'task-bind',
+            repetition: 1,
+            scheduleSeed: 3,
+            invocationPath: 'poetic-adapter',
+            requestedModel: 'm1',
+            state: 'completed',
+            digests: {},
+            sneakyExtra: 1,
+          }),
+        /additional property|schema validation/i,
+      );
+
+      // Identity mismatch against manifestTrial rejected on write
+      await assert.rejects(
+        () =>
+          writeTrialResult(
+            campaign,
+            trialId,
+            {
+              id: trialId,
+              experimentId: 'exp-bind',
+              arm: 'WRONG',
+              provider: 'p1',
+              taskId: 'task-bind',
+              repetition: 1,
+              scheduleSeed: 3,
+              invocationPath: 'poetic-adapter',
+              requestedModel: 'm1',
+              postureFingerprint: 'e'.repeat(64),
+              state: 'completed',
+              digests: {},
+            },
+            { manifestTrial },
+          ),
+        /identity|manifest trial|fail closed/i,
+      );
+
+      const { result } = await writeTrialResult(
+        campaign,
+        trialId,
+        {
+          id: trialId,
+          experimentId: 'exp-bind',
+          arm: 'a1',
+          provider: 'p1',
+          taskId: 'task-bind',
+          repetition: 1,
+          scheduleSeed: 3,
+          invocationPath: 'poetic-adapter',
+          requestedModel: 'm1',
+          postureFingerprint: 'e'.repeat(64),
+          state: 'completed',
+          classification: 'PASS',
+          exitCode: 0,
+          executionRoot: null,
+          digests: {},
+        },
+        { manifestTrial },
+      );
+      assert.equal(result.id, trialId);
+      assert.equal(
+        collectManifestIdentityMismatches(result, manifestTrial).length,
+        0,
+      );
+
+      // Optional validate on read
+      const onDisk = await readTrialResult(campaign, trialId, {
+        validate: true,
+      });
+      assert.equal(onDisk.id, trialId);
+      const schemaErrors = await validateTrialResultSchema(onDisk, {
+        requireRequired: true,
+      });
+      assert.equal(schemaErrors.length, 0, schemaErrors.join('\n'));
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+    }
+  });
+
   it('runCampaign success and infra result.json validate against trial.schema.json', async () => {
     const schema = await loadSchema('trial.schema.json');
     const reportSchema = await loadSchema('report.schema.json');

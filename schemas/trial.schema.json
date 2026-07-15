@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://ai-coding-benchmarks.local/schemas/trial.schema.json",
   "title": "Trial",
-  "description": "Single trial execution record within a campaign. Written by writeTrialResult to results/<trialId>/result.json. Always includes schemaVersion and writtenAt. resolvedModel is never invented from requestedModel; when unavailable, resolvedModel is null and resolvedModelAvailable is false.",
+  "description": "Single trial execution record within a campaign. Written by writeTrialResult to results/<trialId>/result.json. Always includes schemaVersion and writtenAt. additionalProperties is false: runtime writers and verify fail closed on unknown fields. resultDigest covers the entire stored record except digests.resultDigest. resolvedModel is never invented from requestedModel; when unavailable, resolvedModel is null and resolvedModelAvailable is false. artifactDir may be recorded but evidence verify always digests campaign/artifacts/<trialId> and never trusts the stored path. Identity fields (id, experimentId, arm, provider, taskId, repetition, scheduleSeed, invocationPath, requestedModel, postureFingerprint) bind to the frozen manifest trial when verified with manifestTrial.",
   "type": "object",
   "required": [
     "id",
@@ -21,7 +21,8 @@
   "properties": {
     "id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "Must equal destination trialId; writeTrialResult always forces the safe destination id"
     },
     "experimentId": {
       "type": "string",
@@ -33,7 +34,8 @@
       "description": "Arm name from the experiment"
     },
     "provider": {
-      "type": "string"
+      "type": "string",
+      "description": "Provider id from the arm; identity-bound to frozen manifest when present"
     },
     "taskId": {
       "type": "string",
@@ -69,7 +71,8 @@
     },
     "postureFingerprint": {
       "type": ["string", "null"],
-      "pattern": "^[a-f0-9]{64}$"
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "When set on result or frozen manifest row, both sides must match during identity verify"
     },
     "state": {
       "type": "string",
@@ -80,7 +83,16 @@
       "enum": ["PASS", "FAIL", "NO_OP", "INFRA_FAIL", "TIMEOUT", null]
     },
     "classificationReason": {
-      "type": ["string", "null"]
+      "type": ["string", "null"],
+      "description": "Free-form classification note; sanitized export only keeps bounded identifiers"
+    },
+    "reasonCode": {
+      "type": ["string", "null"],
+      "description": "Bounded adapter/outcome reason code (export-safe when identifier-shaped)"
+    },
+    "outcomeKind": {
+      "type": ["string", "null"],
+      "description": "Adapter outcome.kind (e.g. success, timeout, provider_error, refusal)"
     },
     "hashes": {
       "type": "object",
@@ -95,7 +107,7 @@
     "digests": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Evidence binding digests: exact raw stdout/stderr/output bytes, artifact tree, fixture tree, and final-record result envelope. rawEvidenceUnavailable marks infra records without provider raw.",
+      "description": "Evidence binding digests: exact raw stdout/stderr/output bytes, artifact tree, fixture tree, and final-record result envelope. rawEvidenceUnavailable marks infra records without provider raw. resultDigest is recomputed over the full stored record excluding itself.",
       "properties": {
         "resultDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "artifactDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
@@ -106,7 +118,7 @@
         "rawOutputFileSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "rawEvidenceUnavailable": {
           "type": "boolean",
-          "description": "True when INFRA_FAIL path stored no raw provider artifacts (unavailable for report)"
+          "description": "True when INFRA_FAIL path stored no raw provider artifacts (unavailable for report); still included in resultDigest envelope"
         }
       }
     },
@@ -146,10 +158,12 @@
       "type": ["string", "null"]
     },
     "workspaceDir": {
-      "type": ["string", "null"]
+      "type": ["string", "null"],
+      "description": "Per-trial workspace path (external execution root); recorded but not used as digest authority"
     },
     "artifactDir": {
-      "type": ["string", "null"]
+      "type": ["string", "null"],
+      "description": "Recorded artifact path for humans/export; evidence verify always digests campaign/artifacts/<trialId> instead of this value"
     },
     "schemaVersion": {
       "type": "integer",

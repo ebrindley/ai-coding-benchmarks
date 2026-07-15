@@ -245,6 +245,145 @@ function resolveModelEvidence(invocationPath, invokerResult) {
 }
 
 /**
+ * Detect command-not-found / execvp failure from confined spawn wrappers.
+ * sandbox-exec may exit non-zero with stderr and no infraFailure string.
+ *
+ * @param {object | null | undefined} invokerResult
+ * @returns {boolean}
+ */
+function looksLikeCommandNotFound(invokerResult) {
+  if (!invokerResult || typeof invokerResult !== 'object') return false;
+  const r = /** @type {Record<string, unknown>} */ (invokerResult);
+  const infra =
+    typeof r.infraFailure === 'string' ? r.infraFailure : '';
+  if (/ENOENT|command is empty|spawn failed|not found|no such file/i.test(infra)) {
+    return true;
+  }
+  const stdout = r.stdout == null ? '' : String(r.stdout);
+  const stderr = r.stderr == null ? '' : String(r.stderr);
+  // Wrapper-only noise: no provider stdout, stderr is spawn/execvp ENOENT.
+  if (stdout.length > 0) return false;
+  if (
+    /execvp\(\).*failed|spawn\s+\S+\s+ENOENT|\bENOENT\b|No such file or directory/i.test(
+      stderr,
+    )
+  ) {
+    // Prefer non-zero/null exit — successful empty commands must not match.
+    if (r.exitCode == null || Number(r.exitCode) !== 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Normalize invoker results so command-not-found / confinement-style spawn
+ * failures carry an explicit infraFailure for classify + raw availability.
+ * Does not invent model evidence or clear valid provider streams.
+ *
+ * @param {string} invocationPath
+ * @param {object} invokerResult
+ * @returns {object}
+ */
+export function normalizeInvokerInfraSignals(invocationPath, invokerResult) {
+  if (!invokerResult || typeof invokerResult !== 'object') {
+    return invokerResult;
+  }
+  const r = /** @type {Record<string, unknown>} */ (invokerResult);
+  if (typeof r.infraFailure === 'string' && r.infraFailure.trim() !== '') {
+    return invokerResult;
+  }
+  // poetic-adapter already sets infraFailure when raw is missing / bind fails.
+  if (invocationPath === 'poetic-adapter') {
+    return invokerResult;
+  }
+  if (looksLikeCommandNotFound(r)) {
+    const stderr = r.stderr == null ? '' : String(r.stderr).trim();
+    const detail = stderr.slice(0, 240) || 'command not found';
+    return {
+      ...r,
+      // Treat as infra: process never ran the provider binary.
+      infraFailure: `command not found / spawn ENOENT: ${detail}`,
+    };
+  }
+  return invokerResult;
+}
+
+/**
+ * Detect whether provider raw evidence is unavailable for reportable digests.
+ *
+ * Missing/invalid poetic raw, confinement refusal, spawn failures, and
+ * command-not-found must never become verified empty raw digests.
+ *
+ * @param {string} invocationPath
+ * @param {object | null | undefined} invokerResult
+ * @returns {boolean}
+ */
+export function isRawEvidenceUnavailable(invocationPath, invokerResult) {
+  const r =
+    invokerResult && typeof invokerResult === 'object'
+      ? /** @type {Record<string, unknown>} */ (invokerResult)
+      : {};
+  const infra =
+    typeof r.infraFailure === 'string' && r.infraFailure.trim() !== ''
+      ? r.infraFailure
+      : '';
+  const stdout = r.stdout == null ? '' : String(r.stdout);
+  const stderr = r.stderr == null ? '' : String(r.stderr);
+  const hasStreamEvidence = stdout.length > 0 || stderr.length > 0;
+
+  // poetic-adapter: only fully ingested provider raw is reportable evidence.
+  // Missing raw, bind failure, or non-actual marker → unavailable (never empty
+  // quiet-CLI bytes as verified digests).
+  if (invocationPath === 'poetic-adapter') {
+    if (r.providerRawEvidence !== 'actual') return true;
+    // Defensive: actual marker without bound artifact still cannot attribute.
+    if (r.parsedOutput == null && r.success === false) return true;
+    return false;
+  }
+
+  // Command-not-found / execvp ENOENT (including sandbox-exec wrapper stderr).
+  if (looksLikeCommandNotFound(r)) {
+    return true;
+  }
+
+  // Confinement refusal / unconfined refused (all paths).
+  if (
+    infra &&
+    /confinement|campaignDir|unconfined\s+refused|provider spawn requires|execution_unavailable|execution unavailable/i.test(
+      infra,
+    )
+  ) {
+    return true;
+  }
+
+  // Spawn failures / command-not-found / ENOENT-style infra.
+  if (
+    infra &&
+    /spawn failed|process error|ENOENT|not found|command is empty|no such file/i.test(
+      infra,
+    )
+  ) {
+    return true;
+  }
+
+  // exitCode null with infraFailure: process never produced usable streams.
+  if (r.exitCode == null && infra) {
+    return true;
+  }
+
+  // native-cli / poetic-system: invoker failed before usable stream evidence.
+  if (infra && !hasStreamEvidence) {
+    return true;
+  }
+
+  // Explicit execution_unavailable without infra string.
+  if (r.executionUnavailable === true && !hasStreamEvidence) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * @param {object} opts
  * @param {object} opts.experiment
  * @param {string} opts.corpusRoot
@@ -656,7 +795,7 @@ export async function runCampaign(opts) {
           `${JSON.stringify(request, null, 2)}\n`,
         );
 
-        const invokerResult = await invoker({
+        const invokerResultRaw = await invoker({
           poeticBin: arm.poeticBin || process.env.AICB_POETIC_BIN || 'poetic',
           requestPath,
           outputPath,
@@ -674,6 +813,12 @@ export async function runCampaign(opts) {
           scratchDir,
           env: undefined,
         });
+        // Normalize wrapper ENOENT / command-not-found into infraFailure so
+        // classify + raw availability stay honest under confined spawn.
+        const invokerResult = normalizeInvokerInfraSignals(
+          arm.invocationPath,
+          invokerResultRaw,
+        );
 
         // Trusted harness only: copy scratch request/output into campaign storage
         // after the confined provider process has exited. Never follow symlinks
@@ -701,16 +846,32 @@ export async function runCampaign(opts) {
           recordedOutputPath = null;
         }
 
-        const rawQuarantine = await peers.quarantineRawOutput(
-          campaignDir,
-          trial.id,
-          {
-            stdout: invokerResult.stdout,
-            stderr: invokerResult.stderr,
-            // Only pass a path we already nofollow-verified into campaign storage
-            ...(recordedOutputPath ? { outputPath: recordedOutputPath } : {}),
-          },
+        // Raw availability before quarantine: missing/invalid poetic raw,
+        // confinement refusal, spawn failures, and command-not-found must not
+        // become verified empty raw digests.
+        const rawUnavailable = isRawEvidenceUnavailable(
+          arm.invocationPath,
+          invokerResult,
         );
+
+        // Quarantine only when raw is available for reportable digests.
+        // When unavailable, skip quarantine so empty files are not stored as
+        // if they were verified provider evidence (forensics live on the
+        // result classification / infraFailure fields instead).
+        /** @type {{ path?: string, digests?: Record<string, string | null> } | null} */
+        let rawQuarantine = null;
+        if (!rawUnavailable) {
+          rawQuarantine = await peers.quarantineRawOutput(
+            campaignDir,
+            trial.id,
+            {
+              stdout: invokerResult.stdout,
+              stderr: invokerResult.stderr,
+              // Only pass a path we already nofollow-verified into campaign storage
+              ...(recordedOutputPath ? { outputPath: recordedOutputPath } : {}),
+            },
+          );
+        }
 
         // poetic-adapter: only requestId-bound parsedOutput may supply model evidence.
         // Never reopen scratch/campaign outputPath as a fallback.
@@ -813,14 +974,24 @@ export async function runCampaign(opts) {
           trial.expectedFixtureDigest != null
             ? String(trial.expectedFixtureDigest)
             : workspace.fixtureHash;
-        const digests = peers.buildTrialDigests({
-          artifactDigest,
-          fixtureDigest,
-          rawOutputDigest: rawQuarantine.digests?.rawOutputDigest,
-          rawStdoutSha256: rawQuarantine.digests?.rawStdoutSha256,
-          rawStderrSha256: rawQuarantine.digests?.rawStderrSha256,
-          rawOutputFileSha256: rawQuarantine.digests?.rawOutputFileSha256,
-        });
+
+        // When raw is unavailable: mark rawEvidenceUnavailable and omit all
+        // raw* digest claims so verify classifies the record as unavailable
+        // (never "verified empty" provider evidence).
+        const digests = rawUnavailable
+          ? peers.buildTrialDigests({
+              artifactDigest,
+              fixtureDigest,
+              rawEvidenceUnavailable: true,
+            })
+          : peers.buildTrialDigests({
+              artifactDigest,
+              fixtureDigest,
+              rawOutputDigest: rawQuarantine?.digests?.rawOutputDigest,
+              rawStdoutSha256: rawQuarantine?.digests?.rawStdoutSha256,
+              rawStderrSha256: rawQuarantine?.digests?.rawStderrSha256,
+              rawOutputFileSha256: rawQuarantine?.digests?.rawOutputFileSha256,
+            });
 
         // Do not persist manifest-only authority fields on the public result record.
         const {
@@ -828,12 +999,18 @@ export async function runCampaign(opts) {
           fixturePath: _fixPath,
           ...trialPublic
         } = trial;
-        await peers.writeTrialResult(campaignDir, trial.id, {
-          ...trialPublic,
-          ...trialUpdate,
-          exitCode: invokerResult.exitCode,
-          digests,
-        });
+        await peers.writeTrialResult(
+          campaignDir,
+          trial.id,
+          {
+            ...trialPublic,
+            ...trialUpdate,
+            exitCode: invokerResult.exitCode,
+            digests,
+          },
+          // Bind identity to frozen manifest trial row (lane B contract).
+          { manifestTrial: trial },
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         trialUpdate = {
@@ -860,12 +1037,29 @@ export async function runCampaign(opts) {
             fixturePath: _fixPath2,
             ...trialPublicInfra
           } = trial;
-          await peers.writeTrialResult(campaignDir, trial.id, {
-            ...trialPublicInfra,
-            ...trialUpdate,
-            exitCode: null,
-            digests: infraDigests,
-          });
+          await peers.writeTrialResult(
+            campaignDir,
+            trial.id,
+            {
+              ...trialPublicInfra,
+              ...trialUpdate,
+              // Ensure required identity fields exist for schema write
+              experimentId: trial.experimentId ?? trialPublicInfra.experimentId,
+              arm: trial.arm ?? trialPublicInfra.arm,
+              taskId: trial.taskId ?? trialPublicInfra.taskId,
+              repetition: trial.repetition ?? trialPublicInfra.repetition,
+              scheduleSeed: trial.scheduleSeed ?? trialPublicInfra.scheduleSeed,
+              invocationPath:
+                trial.invocationPath ?? trialPublicInfra.invocationPath,
+              requestedModel:
+                trial.requestedModel !== undefined
+                  ? trial.requestedModel
+                  : trialPublicInfra.requestedModel ?? null,
+              exitCode: null,
+              digests: infraDigests,
+            },
+            { manifestTrial: trial },
+          );
         } catch {
           /* best effort */
         }

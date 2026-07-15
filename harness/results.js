@@ -19,6 +19,7 @@ import {
   access,
 } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { SCHEMA_VERSION } from './contracts.js';
 import { assertSafeTrialId, trialPathUnder } from './paths.js';
 import {
@@ -28,6 +29,32 @@ import {
   digestRawOutputBytes,
 } from './digest.js';
 import { copyFileNoFollow, UnsafePathError } from './safe-fs.js';
+
+const TRIAL_SCHEMA_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'schemas',
+  'trial.schema.json',
+);
+
+/** @type {object | null} */
+let cachedTrialSchema = null;
+
+/**
+ * Identity fields bound to the frozen manifest trial row.
+ * postureFingerprint is checked separately when set on either side.
+ */
+const MANIFEST_IDENTITY_FIELDS = Object.freeze([
+  'id',
+  'experimentId',
+  'arm',
+  'provider',
+  'taskId',
+  'repetition',
+  'scheduleSeed',
+  'invocationPath',
+  'requestedModel',
+]);
 
 /**
  * Lexical result dir (sync helper). Prefer resolveTrialResultDir at write boundaries.
@@ -52,6 +79,17 @@ export function trialRawDir(campaignDir, trialId) {
 }
 
 /**
+ * Lexical artifact dir (sync helper). Prefer resolveTrialArtifactDir at verify boundaries.
+ * @param {string} campaignDir
+ * @param {string} trialId
+ * @returns {string}
+ */
+export function trialArtifactDir(campaignDir, trialId) {
+  const id = assertSafeTrialId(trialId);
+  return path.join(campaignDir, 'artifacts', id);
+}
+
+/**
  * Canonical containment for results/<trialId>.
  * @param {string} campaignDir
  * @param {string} trialId
@@ -73,6 +111,355 @@ export async function resolveTrialRawDir(campaignDir, trialId) {
   if (!campaignDir) throw new Error('resolveTrialRawDir: campaignDir is required');
   const rawRoot = path.join(path.resolve(campaignDir), 'raw');
   return trialPathUnder(rawRoot, trialId);
+}
+
+/**
+ * Canonical containment for artifacts/<trialId>.
+ * Verification always digests this path — never trust result.artifactDir.
+ * @param {string} campaignDir
+ * @param {string} trialId
+ * @returns {Promise<string>}
+ */
+export async function resolveTrialArtifactDir(campaignDir, trialId) {
+  if (!campaignDir) throw new Error('resolveTrialArtifactDir: campaignDir is required');
+  const artifactsRoot = path.join(path.resolve(campaignDir), 'artifacts');
+  return trialPathUnder(artifactsRoot, trialId);
+}
+
+/**
+ * Load trial.schema.json (cached).
+ * @returns {Promise<object>}
+ */
+export async function loadTrialSchema() {
+  if (cachedTrialSchema) return cachedTrialSchema;
+  const text = await readFile(TRIAL_SCHEMA_PATH, 'utf8');
+  cachedTrialSchema = JSON.parse(text);
+  return cachedTrialSchema;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} t
+ * @returns {boolean}
+ */
+function matchesJsonSchemaType(value, t) {
+  if (t === 'null') return value === null;
+  if (t === 'array') return Array.isArray(value);
+  if (t === 'integer') {
+    return typeof value === 'number' && Number.isInteger(value);
+  }
+  if (t === 'number') {
+    return typeof value === 'number' && Number.isFinite(value);
+  }
+  if (t === 'object') {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+  }
+  return typeof value === t;
+}
+
+/**
+ * Resolve a local `#/...` $ref against the schema root.
+ * @param {object} root
+ * @param {string} ref
+ * @returns {object}
+ */
+function resolveSchemaRef(root, ref) {
+  if (typeof ref !== 'string' || !ref.startsWith('#/')) {
+    throw new Error(`unsupported $ref: ${ref}`);
+  }
+  const parts = ref.slice(2).split('/');
+  let cur = root;
+  for (const p of parts) {
+    if (cur == null || typeof cur !== 'object' || !(p in cur)) {
+      throw new Error(`$ref not found: ${ref}`);
+    }
+    cur = cur[p];
+  }
+  if (!cur || typeof cur !== 'object') {
+    throw new Error(`$ref target not an object: ${ref}`);
+  }
+  return cur;
+}
+
+/**
+ * Minimal draft-07 subset validator (no deps). Enforces type, required,
+ * properties, enum, const, additionalProperties, items, pattern, min/max,
+ * minLength/maxLength, and local $ref.
+ *
+ * @param {unknown} data
+ * @param {object} schema
+ * @param {object} root
+ * @param {string} [pathStr]
+ * @param {{ requireRequired?: boolean }} [opts]
+ * @returns {string[]}
+ */
+export function validateJsonSchemaSubset(
+  data,
+  schema,
+  root,
+  pathStr = '$',
+  opts = {},
+) {
+  if (!schema || typeof schema !== 'object') return [];
+  const requireRequired = opts.requireRequired !== false;
+
+  if (schema.$ref) {
+    return validateJsonSchemaSubset(
+      data,
+      resolveSchemaRef(root, schema.$ref),
+      root,
+      pathStr,
+      opts,
+    );
+  }
+
+  /** @type {string[]} */
+  const errors = [];
+
+  if (schema.const !== undefined) {
+    if (data !== schema.const) {
+      errors.push(
+        `${pathStr}: expected const ${JSON.stringify(schema.const)}, got ${JSON.stringify(data)}`,
+      );
+    }
+  }
+
+  if (schema.enum) {
+    const ok = schema.enum.some(
+      (e) => e === data || (Number.isNaN(e) && Number.isNaN(data)),
+    );
+    if (!ok) {
+      errors.push(`${pathStr}: value ${JSON.stringify(data)} not in enum`);
+    }
+  }
+
+  if (schema.type !== undefined) {
+    const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+    if (!types.some((t) => matchesJsonSchemaType(data, t))) {
+      errors.push(
+        `${pathStr}: expected type ${types.join('|')}, got ${
+          data === null
+            ? 'null'
+            : Array.isArray(data)
+              ? 'array'
+              : typeof data
+        }`,
+      );
+      return errors;
+    }
+  }
+
+  if (typeof data === 'string') {
+    if (schema.minLength != null && data.length < schema.minLength) {
+      errors.push(
+        `${pathStr}: string shorter than minLength ${schema.minLength}`,
+      );
+    }
+    if (schema.maxLength != null && data.length > schema.maxLength) {
+      errors.push(
+        `${pathStr}: string longer than maxLength ${schema.maxLength}`,
+      );
+    }
+    if (schema.pattern) {
+      const re = new RegExp(schema.pattern);
+      if (!re.test(data)) {
+        errors.push(
+          `${pathStr}: string does not match pattern ${schema.pattern}`,
+        );
+      }
+    }
+    if (schema.format === 'date-time') {
+      if (Number.isNaN(Date.parse(data))) {
+        errors.push(`${pathStr}: invalid date-time`);
+      }
+    }
+  }
+
+  if (typeof data === 'number' && Number.isFinite(data)) {
+    if (schema.minimum != null && data < schema.minimum) {
+      errors.push(`${pathStr}: ${data} < minimum ${schema.minimum}`);
+    }
+    if (schema.maximum != null && data > schema.maximum) {
+      errors.push(`${pathStr}: ${data} > maximum ${schema.maximum}`);
+    }
+  }
+
+  if (Array.isArray(data) && schema.items) {
+    for (let i = 0; i < data.length; i += 1) {
+      errors.push(
+        ...validateJsonSchemaSubset(
+          data[i],
+          schema.items,
+          root,
+          `${pathStr}[${i}]`,
+          opts,
+        ),
+      );
+    }
+  }
+
+  if (
+    data !== null &&
+    typeof data === 'object' &&
+    !Array.isArray(data) &&
+    (schema.properties ||
+      schema.required ||
+      schema.additionalProperties !== undefined)
+  ) {
+    const props = schema.properties || {};
+    if (requireRequired && Array.isArray(schema.required)) {
+      for (const key of schema.required) {
+        if (!(key in /** @type {object} */ (data)) || data[key] === undefined) {
+          errors.push(`${pathStr}: missing required property "${key}"`);
+        }
+      }
+    }
+    for (const [key, value] of Object.entries(data)) {
+      if (value === undefined) continue;
+      if (Object.prototype.hasOwnProperty.call(props, key)) {
+        errors.push(
+          ...validateJsonSchemaSubset(
+            value,
+            props[key],
+            root,
+            `${pathStr}.${key}`,
+            opts,
+          ),
+        );
+      } else if (schema.additionalProperties === false) {
+        errors.push(`${pathStr}: additional property "${key}" not allowed`);
+      } else if (
+        schema.additionalProperties &&
+        typeof schema.additionalProperties === 'object'
+      ) {
+        errors.push(
+          ...validateJsonSchemaSubset(
+            value,
+            schema.additionalProperties,
+            root,
+            `${pathStr}.${key}`,
+            opts,
+          ),
+        );
+      }
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Validate a trial result against trial.schema.json.
+ * Fail closed on unknown fields (additionalProperties: false).
+ *
+ * @param {object} result
+ * @param {{ requireRequired?: boolean }} [opts]
+ *   requireRequired defaults false on write of partial records; verify may
+ *   pass true when a fully stamped public record is expected.
+ * @returns {Promise<string[]>} error messages (empty when valid)
+ */
+export async function validateTrialResultSchema(result, opts = {}) {
+  const schema = await loadTrialSchema();
+  return validateJsonSchemaSubset(result, schema, schema, '$', {
+    requireRequired: opts.requireRequired === true,
+  });
+}
+
+/**
+ * Assert result validates; throw on any schema error.
+ * @param {object} result
+ * @param {{ requireRequired?: boolean, label?: string }} [opts]
+ */
+export async function assertTrialResultSchema(result, opts = {}) {
+  const errors = await validateTrialResultSchema(result, opts);
+  if (errors.length > 0) {
+    const label = opts.label || 'trial result';
+    throw new Error(
+      `${label} failed schema validation (fail closed): ${errors.join('; ')}`,
+    );
+  }
+}
+
+/**
+ * Normalize identity values for comparison (undefined ≡ null).
+ * @param {unknown} v
+ * @returns {unknown}
+ */
+function normalizeIdentityValue(v) {
+  return v === undefined ? null : v;
+}
+
+/**
+ * Compare result identity fields against a frozen manifest trial row.
+ * Always binds `id`. Other MANIFEST_IDENTITY_FIELDS are checked when the
+ * frozen row has them set (real campaign rows carry the full identity).
+ * postureFingerprint is checked when set on either side.
+ *
+ * @param {object} result
+ * @param {object} manifestTrial
+ * @returns {string[]} mismatch field names
+ */
+export function collectManifestIdentityMismatches(result, manifestTrial) {
+  if (!result || typeof result !== 'object') return ['result'];
+  if (!manifestTrial || typeof manifestTrial !== 'object') {
+    return ['manifestTrial'];
+  }
+  /** @type {string[]} */
+  const mismatches = [];
+  const r = /** @type {Record<string, unknown>} */ (result);
+  const m = /** @type {Record<string, unknown>} */ (manifestTrial);
+
+  // Destination / row id must always match.
+  if (String(r.id ?? '') !== String(m.id ?? '')) {
+    mismatches.push('id');
+  }
+
+  for (const field of MANIFEST_IDENTITY_FIELDS) {
+    if (field === 'id') continue;
+    // Only fields frozen on the manifest row are binding authorities.
+    if (!(field in m) || m[field] === undefined) continue;
+    const rv = normalizeIdentityValue(r[field]);
+    const mv = normalizeIdentityValue(m[field]);
+    if (rv !== mv) {
+      mismatches.push(field);
+    }
+  }
+
+  const rp = normalizeIdentityValue(r.postureFingerprint);
+  const mp = normalizeIdentityValue(m.postureFingerprint);
+  // Bind posture when the frozen row carries the field, or when either side
+  // has a non-null fingerprint (swapped/missing posture must not verify).
+  if ('postureFingerprint' in m && m.postureFingerprint !== undefined) {
+    if (rp !== mp) {
+      mismatches.push('postureFingerprint');
+    }
+  } else if (rp != null || mp != null) {
+    // Manifest omitted the field: still fail if the two non-null values differ
+    // when both are present; a result-only fingerprint without a frozen row
+    // field is allowed for partial test manifests.
+    if (rp != null && mp != null && rp !== mp) {
+      mismatches.push('postureFingerprint');
+    }
+  }
+  return mismatches;
+}
+
+/**
+ * @param {object} result
+ * @param {object} manifestTrial
+ * @param {string} [label]
+ */
+export function assertManifestIdentityBinding(
+  result,
+  manifestTrial,
+  label = 'writeTrialResult',
+) {
+  const mismatches = collectManifestIdentityMismatches(result, manifestTrial);
+  if (mismatches.length > 0) {
+    throw new Error(
+      `${label}: result identity does not match frozen manifest trial (fail closed): ${mismatches.join(', ')}`,
+    );
+  }
 }
 
 /**
@@ -131,15 +518,18 @@ function stripGatePreviews(gateResults) {
 /**
  * Write (or overwrite) a trial result.json atomically (dir 0700, file 0600).
  *
- * After defaults/sanitization/timestamps, computes the canonical final-record
+ * After defaults/sanitization/timestamps, enforces trial.schema.json
+ * (additionalProperties: false) and computes the canonical final-record
  * resultDigest over the complete stored envelope (excluding resultDigest itself).
  *
  * @param {string} campaignDir
  * @param {string} trialId
  * @param {object} result trial-shaped result payload
+ * @param {{ manifestTrial?: object }} [opts]
+ *   When manifestTrial is provided, identity fields must match the frozen row.
  * @returns {Promise<{ path: string, result: object }>}
  */
-export async function writeTrialResult(campaignDir, trialId, result) {
+export async function writeTrialResult(campaignDir, trialId, result, opts = {}) {
   if (!campaignDir) throw new Error('writeTrialResult: campaignDir is required');
   if (!trialId) throw new Error('writeTrialResult: trialId is required');
   if (!result || typeof result !== 'object') {
@@ -148,6 +538,16 @@ export async function writeTrialResult(campaignDir, trialId, result) {
 
   // results/ and trial dir are private; path is containment-checked
   const safeId = assertSafeTrialId(trialId);
+
+  // ID binding: reject swapped/mismatched ids; always force destination id.
+  if (result.id != null && String(result.id) !== '') {
+    if (String(result.id) !== safeId) {
+      throw new Error(
+        `writeTrialResult: result.id "${result.id}" !== trialId "${safeId}" (fail closed)`,
+      );
+    }
+  }
+
   await ensurePrivateDir(path.join(path.resolve(campaignDir), 'results'));
   const dir = await resolveTrialResultDir(campaignDir, safeId);
   await ensurePrivateDir(dir);
@@ -161,28 +561,60 @@ export async function writeTrialResult(campaignDir, trialId, result) {
   // resultDigest is always recomputed over the final envelope below.
   delete digestsIn.resultDigest;
 
+  /** @type {Record<string, unknown>} */
   const payload = {
     ...result,
-    id: result.id ?? safeId,
+    id: safeId,
     classification: result.classification ?? null,
     digests: digestsIn,
-    gateResults: stripGatePreviews(result.gateResults) ?? undefined,
     requestedModel: result.requestedModel ?? null,
     // Preserve null — never invent resolved from requested
     resolvedModel:
       result.resolvedModel === undefined ? null : result.resolvedModel,
     postureFingerprint: result.postureFingerprint ?? null,
-    invocationPath: result.invocationPath ?? null,
     schemaVersion: SCHEMA_VERSION,
     writtenAt,
   };
 
+  // Only set gateResults when provided (stripped of secret-bearing previews).
+  if (result.gateResults !== undefined) {
+    payload.gateResults = stripGatePreviews(result.gateResults);
+  } else {
+    delete payload.gateResults;
+  }
+
+  // Drop undefined keys so schema additionalProperties/type checks see the
+  // same shape JSON.stringify will persist.
+  for (const key of Object.keys(payload)) {
+    if (payload[key] === undefined) delete payload[key];
+  }
+
+  // Manifest identity binding (optional but fail-closed when provided).
+  if (opts.manifestTrial != null) {
+    assertManifestIdentityBinding(payload, opts.manifestTrial, 'writeTrialResult');
+  }
+
+  // Schema enforcement before digest: reject unknown fields fail-closed.
+  // requireRequired=false so partial test/infra records may omit optional
+  // identity; additionalProperties:false still rejects undeclared keys.
+  await assertTrialResultSchema(payload, {
+    requireRequired: false,
+    label: 'writeTrialResult',
+  });
+
   // Canonical final-record digest after all defaults/sanitization/timestamps.
+  // Covers the entire strict stored record except digests.resultDigest.
   const resultDigest = computeFinalResultDigest(payload);
   payload.digests = {
     .../** @type {Record<string, unknown>} */ (payload.digests),
     resultDigest,
   };
+
+  // Re-validate with resultDigest stamped (still schema-legal).
+  await assertTrialResultSchema(payload, {
+    requireRequired: false,
+    label: 'writeTrialResult',
+  });
 
   const finalPath = path.join(dir, 'result.json');
   const tmpPath = path.join(dir, 'result.json.tmp');
@@ -197,16 +629,24 @@ export async function writeTrialResult(campaignDir, trialId, result) {
  * Read a previously written trial result.
  * @param {string} campaignDir
  * @param {string} trialId
+ * @param {{ validate?: boolean }} [opts] when validate=true, enforce trial schema
  * @returns {Promise<object>}
  */
-export async function readTrialResult(campaignDir, trialId) {
+export async function readTrialResult(campaignDir, trialId, opts = {}) {
   if (!campaignDir) throw new Error('readTrialResult: campaignDir is required');
   if (!trialId) throw new Error('readTrialResult: trialId is required');
 
   const dir = await resolveTrialResultDir(campaignDir, trialId);
   const p = path.join(dir, 'result.json');
   const text = await readFile(p, 'utf8');
-  return JSON.parse(text);
+  const result = JSON.parse(text);
+  if (opts.validate === true) {
+    await assertTrialResultSchema(result, {
+      requireRequired: true,
+      label: 'readTrialResult',
+    });
+  }
+  return result;
 }
 
 /**
@@ -390,72 +830,35 @@ export async function computeArtifactDigest(artifactDir) {
 }
 
 /**
- * Verify stored trial digests match on-disk raw (and optional artifact) bytes.
- * Fail closed on mismatch — never trust tampered evidence.
- *
- * @param {string} campaignDir
- * @param {string} trialId
- * @param {object} [storedResult] - result object with digests; loaded if omitted
- * @param {{ artifactDir?: string | null }} [opts]
- * @returns {Promise<{
- *   ok: boolean,
- *   trialId: string,
- *   mismatches: string[],
- *   error?: string,
- *   recomputed?: object,
- * }>}
- */
-/**
  * Build the canonical final-record envelope for resultDigest.
- * Includes identity, model evidence, posture, state/classification, gates,
- * timing/exit, hashes, retained paths, and all evidence digests except
- * resultDigest itself. writtenAt/schemaVersion are included so the digest
- * binds the complete stored record.
+ *
+ * Covers the **entire** strict stored record except digests.resultDigest
+ * itself (deterministic via sha256Json/canonicalize). Schema-enforced
+ * writers ensure only declared exportable fields are present; rawEvidenceUnavailable
+ * and every other digests/identity/timing field are included when set.
  *
  * @param {object} result - full trial result after defaults/sanitization
  * @returns {object}
  */
 export function buildFinalResultEnvelope(result) {
-  const r = result && typeof result === 'object' ? result : {};
+  const r =
+    result && typeof result === 'object' && !Array.isArray(result)
+      ? /** @type {Record<string, unknown>} */ (result)
+      : {};
   /** @type {Record<string, unknown>} */
   const digestsIn =
-    r.digests && typeof r.digests === 'object'
+    r.digests && typeof r.digests === 'object' && !Array.isArray(r.digests)
       ? { .../** @type {Record<string, unknown>} */ (r.digests) }
       : {};
   delete digestsIn.resultDigest;
 
-  return {
-    id: r.id ?? null,
-    experimentId: r.experimentId ?? null,
-    arm: r.arm ?? null,
-    provider: r.provider ?? null,
-    taskId: r.taskId ?? null,
-    repetition: r.repetition ?? null,
-    scheduleSeed: r.scheduleSeed ?? null,
-    invocationPath: r.invocationPath ?? null,
-    requestedModel: r.requestedModel ?? null,
-    resolvedModel: r.resolvedModel === undefined ? null : r.resolvedModel,
-    resolvedModelAvailable: r.resolvedModelAvailable ?? false,
-    resolvedModelSource: r.resolvedModelSource ?? null,
-    postureFingerprint: r.postureFingerprint ?? null,
-    state: r.state ?? null,
-    classification: r.classification ?? null,
-    classificationReason: r.classificationReason ?? null,
-    gateResults: r.gateResults ?? [],
-    changedFileCount: r.changedFileCount ?? null,
-    startedAt: r.startedAt ?? null,
-    finishedAt: r.finishedAt ?? null,
-    durationMs: r.durationMs ?? null,
-    exitCode: r.exitCode ?? null,
-    hashes: r.hashes ?? null,
-    workspaceDir: r.workspaceDir ?? null,
-    artifactDir: r.artifactDir ?? null,
-    executionRoot: r.executionRoot ?? null,
-    error: r.error ?? null,
-    digests: digestsIn,
-    schemaVersion: r.schemaVersion ?? null,
-    writtenAt: r.writtenAt ?? null,
-  };
+  /** @type {Record<string, unknown>} */
+  const envelope = { ...r, digests: digestsIn };
+  // Drop undefined so digest matches JSON-persisted shape.
+  for (const key of Object.keys(envelope)) {
+    if (envelope[key] === undefined) delete envelope[key];
+  }
+  return envelope;
 }
 
 /**
@@ -524,6 +927,30 @@ export function isUnavailableForReport(result) {
   return false;
 }
 
+/**
+ * Verify stored trial digests match on-disk raw + campaign artifacts bytes.
+ * Fail closed on mismatch, schema violation, or identity binding failure.
+ * Never trusts result.artifactDir — always digests campaignDir/artifacts/<trialId>.
+ *
+ * @param {string} campaignDir
+ * @param {string} trialId
+ * @param {object} [storedResult] - result object with digests; loaded if omitted
+ * @param {{
+ *   expectedFixtureDigest?: string | null,
+ *   requireFixtureAuthority?: boolean,
+ *   requireFixtureDigest?: boolean,
+ *   manifestTrial?: object | null,
+ * }} [opts]
+ * @returns {Promise<{
+ *   ok: boolean,
+ *   trialId: string,
+ *   mismatches: string[],
+ *   error?: string,
+ *   recomputed?: object,
+ *   unavailable?: boolean,
+ *   reportable?: boolean,
+ * }>}
+ */
 export async function verifyTrialEvidenceDigests(
   campaignDir,
   trialId,
@@ -543,6 +970,41 @@ export async function verifyTrialEvidenceDigests(
         mismatches: ['result'],
         unavailable: false,
         error: `result unreadable for evidence verify: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  // Schema enforcement (unknown fields fail closed).
+  try {
+    await assertTrialResultSchema(result, {
+      requireRequired: false,
+      label: 'verifyTrialEvidenceDigests',
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      trialId: safeId,
+      mismatches: ['schema'],
+      unavailable: false,
+      reportable: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  // Manifest identity binding when frozen row provided.
+  if (opts.manifestTrial != null) {
+    const idMismatches = collectManifestIdentityMismatches(
+      result,
+      opts.manifestTrial,
+    );
+    if (idMismatches.length > 0) {
+      return {
+        ok: false,
+        trialId: safeId,
+        mismatches: idMismatches.map((f) => `identity:${f}`),
+        unavailable: false,
+        reportable: false,
+        error: `manifest identity mismatch (fail closed): ${idMismatches.join(', ')}`,
       };
     }
   }
@@ -685,10 +1147,17 @@ export async function verifyTrialEvidenceDigests(
     mismatches.push('rawOutputFileSha256');
   }
 
-  // Artifact digest is required for reportable trials (cannot skip by deleting key).
-  const artifactDir =
-    opts.artifactDir ??
-    (typeof result.artifactDir === 'string' ? result.artifactDir : null);
+  // Artifact digest: ONLY campaignDir/artifacts/<trialId> (containment-checked).
+  // Never trust result.artifactDir or any caller-supplied external path.
+  let artifactDir = null;
+  try {
+    artifactDir = await resolveTrialArtifactDir(campaignDir, safeId);
+    recomputed.artifactDir = artifactDir;
+  } catch (err) {
+    mismatches.push('artifactDir');
+    recomputed.artifactDirError =
+      err instanceof Error ? err.message : String(err);
+  }
   if (!artifactDir) {
     mismatches.push('artifactDir-missing');
   } else {
@@ -838,11 +1307,12 @@ export async function verifyCampaignEvidenceDigests(
         ? String(meta.expectedFixtureDigest)
         : null;
 
+    // Pass frozen manifest row for identity binding; artifact path is derived
+    // only as campaignDir/artifacts/<trialId> inside verify (never result.artifactDir).
     const v = await verifyTrialEvidenceDigests(campaignDir, id, result, {
       expectedFixtureDigest,
       requireFixtureAuthority: Boolean(expectedFixtureDigest),
-      artifactDir:
-        typeof result.artifactDir === 'string' ? result.artifactDir : null,
+      manifestTrial: meta,
     });
     if (v.unavailable || isUnavailableForReport(result)) {
       // Explicit INFRA_FAIL without raw — not verified, not reportable.

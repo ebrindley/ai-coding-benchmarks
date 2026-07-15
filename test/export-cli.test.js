@@ -187,11 +187,6 @@ describe('export + quarantine + cli', () => {
       await seedVerifiedCampaign(campaign, {
         resultExtras: {
           workspaceDir: path.join(campaign, 'workspaces', 't1'),
-          prompt: 'top-level prompt leak',
-          nested: {
-            request: { prompt: 'nested secret prompt' },
-            stdout: 'leaky',
-          },
         },
       });
       // Plant prompt-bearing artifacts outside the digested tree path used for
@@ -229,23 +224,23 @@ describe('export + quarantine + cli', () => {
       assert.ok(!man.includes('localuser'));
       assert.ok(!man.includes('/Users/localuser'));
       assert.ok(!man.includes('SECRET_TOKEN'));
+      assert.ok(!man.includes('secret prompt'));
 
       const result = await readFile(
         path.join(out, 'results', 't1', 'result.json'),
         'utf8',
       );
       assert.ok(!result.includes('secret prompt'));
-      assert.ok(!result.includes('nested secret'));
-      assert.ok(!result.includes('top-level prompt'));
-      assert.ok(!result.includes('leaky'));
-      // gate stdout/stderr previews never exported
+      assert.ok(!result.includes('secret prompt body'));
+      // gate stdout/stderr previews never exported (stripped on write + whitelist)
       assert.ok(!result.includes('stdoutPreview'));
       assert.ok(!result.includes('must-not-export-preview'));
       assert.ok(result.includes('stdoutDigest'));
       // absolute workspace redacted / omitted
       assert.ok(!result.includes(path.join(campaign, 'workspaces', 't1')));
-      // non-whitelist keys dropped
+      // non-whitelist keys never present (schema write rejects them)
       assert.ok(!result.includes('"nested"'));
+      assert.ok(!result.includes('"prompt"'));
 
       // Report/summary rebuilt (not missing)
       await access(path.join(out, 'report.json'));
@@ -436,16 +431,22 @@ describe('export + quarantine + cli', () => {
 
       // No public bypass: skipEvidenceVerify is removed; stray property must not
       // skip verification (export still succeeds only because evidence is valid).
-      const again = await exportSanitizedBundle({
-        campaignDir: campaign,
-        outDir: out,
-        // stray property — must be ignored, never disable verify
-        skipEvidenceVerify: true,
-      });
-      assert.equal(again.verified, 1);
-      await assert.rejects(() =>
-        access(path.join(out, 'results', 'planted-extra', 'result.json')),
-      );
+      // Destination must be fresh — use a new empty outDir (no merge into stale).
+      const out2 = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-adv-out2-'));
+      try {
+        const again = await exportSanitizedBundle({
+          campaignDir: campaign,
+          outDir: out2,
+          // stray property — must be ignored, never disable verify
+          skipEvidenceVerify: true,
+        });
+        assert.equal(again.verified, 1);
+        await assert.rejects(() =>
+          access(path.join(out2, 'results', 'planted-extra', 'result.json')),
+        );
+      } finally {
+        await rm(out2, { recursive: true, force: true });
+      }
     } finally {
       await rm(campaign, { recursive: true, force: true });
       await rm(out, { recursive: true, force: true });
@@ -634,6 +635,242 @@ describe('export + quarantine + cli', () => {
       await rm(campaign, { recursive: true, force: true });
       await rm(out, { recursive: true, force: true });
       await rm(path.dirname(host), { recursive: true, force: true });
+    }
+  });
+
+  it('verified-only report/export: paused campaign excludes pending+skipped', async () => {
+    const { exportSanitizedBundle } = await import('../harness/export.js');
+    const { buildReport, formatHumanSummary } = await import(
+      '../harness/summary.js'
+    );
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-paused-'));
+    const out = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-paused-out-'));
+    try {
+      // One completed verified trial
+      await seedVerifiedCampaign(campaign, { trialId: 't-done' });
+
+      // Extend manifest with pending + skipped (no results on disk)
+      const man = JSON.parse(
+        await readFile(path.join(campaign, 'manifest.json'), 'utf8'),
+      );
+      man.status = 'paused';
+      man.trials.push(
+        {
+          id: 't-pending',
+          state: 'pending',
+          arm: 'fake',
+          taskId: 'task-2',
+          invocationPath: 'native-cli',
+          requestedModel: 'm',
+        },
+        {
+          id: 't-skipped',
+          state: 'skipped',
+          arm: 'fake',
+          taskId: 'task-3',
+          invocationPath: 'native-cli',
+          requestedModel: 'm',
+          classification: 'INFRA_FAIL',
+        },
+      );
+      await writeFile(
+        path.join(campaign, 'manifest.json'),
+        JSON.stringify(man),
+        'utf8',
+      );
+
+      // buildReport with only verified results must ignore pending/skipped rows
+      // even if a caller mistakenly passes the full manifest.
+      const verifiedOnly = [
+        JSON.parse(
+          await readFile(
+            path.join(campaign, 'results', 't-done', 'result.json'),
+            'utf8',
+          ),
+        ),
+      ];
+      const report = buildReport(man, verifiedOnly);
+      assert.equal(report.totals.n, 1);
+      assert.equal(report.totals.completed, 1);
+      assert.equal(report.classifications.PASS, 1);
+      assert.equal(report.classifications.INFRA_FAIL, 0);
+      // Seeding from manifest must NOT happen: empty results → empty totals
+      // even when the manifest still lists pending/skipped rows.
+      const empty = buildReport(man, []);
+      assert.equal(empty.totals.n, 0);
+      assert.equal(empty.totals.completed, 0);
+      assert.equal(empty.classifications.PASS, 0);
+      assert.equal(empty.classifications.INFRA_FAIL, 0);
+
+      const human = formatHumanSummary(report);
+      assert.ok(human.includes('n=1'));
+      assert.ok(!human.includes('t-pending'));
+      assert.ok(!human.includes('t-skipped'));
+
+      const exp = await exportSanitizedBundle({
+        campaignDir: campaign,
+        outDir: out,
+        includeRaw: false,
+      });
+      assert.equal(exp.verified, 1);
+
+      // Export manifest.trials is exactly the verified set
+      const exportMan = JSON.parse(
+        await readFile(path.join(out, 'manifest.json'), 'utf8'),
+      );
+      assert.deepEqual(
+        exportMan.trials.map((t) => t.id).sort(),
+        ['t-done'],
+      );
+      assert.ok(!exportMan.trials.some((t) => t.id === 't-pending'));
+      assert.ok(!exportMan.trials.some((t) => t.id === 't-skipped'));
+
+      // Only verified result dir
+      const resultIds = await readdir(path.join(out, 'results'));
+      assert.deepEqual(resultIds, ['t-done']);
+
+      const exportReport = JSON.parse(
+        await readFile(path.join(out, 'report.json'), 'utf8'),
+      );
+      assert.equal(exportReport.totals.n, 1);
+      assert.equal(exportReport.totals.completed, 1);
+      assert.equal(exportReport.classifications.PASS, 1);
+      assert.equal(exportReport.classifications.INFRA_FAIL, 0);
+
+      const exportSummary = await readFile(
+        path.join(out, 'summary.txt'),
+        'utf8',
+      );
+      assert.ok(exportSummary.includes('n=1'));
+      assert.ok(!exportSummary.includes('t-pending'));
+      assert.ok(!exportSummary.includes('t-skipped'));
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+      await rm(out, { recursive: true, force: true });
+    }
+  });
+
+  it('export destination safety: equal/nested/nonempty rejected; fresh empty ok', async () => {
+    const { exportSanitizedBundle } = await import('../harness/export.js');
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-dest-'));
+    try {
+      await seedVerifiedCampaign(campaign);
+
+      // Equal campaign/out
+      await assert.rejects(
+        () =>
+          exportSanitizedBundle({
+            campaignDir: campaign,
+            outDir: campaign,
+          }),
+        /must not equal campaignDir|fail closed/i,
+      );
+
+      // out under campaign
+      const underCamp = path.join(campaign, 'exports-out');
+      await mkdir(underCamp, { recursive: true });
+      await assert.rejects(
+        () =>
+          exportSanitizedBundle({
+            campaignDir: campaign,
+            outDir: underCamp,
+          }),
+        /must not be inside campaignDir|fail closed/i,
+      );
+
+      // campaign under out
+      const outer = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-outer-'));
+      try {
+        // Place a campaign-like path under outer (use the real campaign by nesting check:
+        // export with outDir=parent of campaign)
+        await assert.rejects(
+          () =>
+            exportSanitizedBundle({
+              campaignDir: campaign,
+              outDir: path.dirname(campaign),
+            }),
+          /must not be inside outDir|campaignDir must not be inside|fail closed/i,
+        );
+
+        // Preseeded dest with stale result/raw — reject without deleting
+        const stale = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-stale-'));
+        try {
+          await mkdir(path.join(stale, 'results', 'old'), { recursive: true });
+          await writeFile(
+            path.join(stale, 'results', 'old', 'result.json'),
+            '{"id":"old","classification":"PASS"}\n',
+            'utf8',
+          );
+          await mkdir(path.join(stale, 'raw', 'old'), { recursive: true });
+          await writeFile(
+            path.join(stale, 'raw', 'old', 'stdout.txt'),
+            'STALE_RAW_MUST_SURVIVE\n',
+            'utf8',
+          );
+
+          await assert.rejects(
+            () =>
+              exportSanitizedBundle({
+                campaignDir: campaign,
+                outDir: stale,
+              }),
+            /must be empty|pre-existing|fail closed/i,
+          );
+
+          // Stale content preserved (no destructive cleanup)
+          const staleResult = await readFile(
+            path.join(stale, 'results', 'old', 'result.json'),
+            'utf8',
+          );
+          assert.ok(staleResult.includes('"id":"old"'));
+          const staleRaw = await readFile(
+            path.join(stale, 'raw', 'old', 'stdout.txt'),
+            'utf8',
+          );
+          assert.equal(staleRaw, 'STALE_RAW_MUST_SURVIVE\n');
+        } finally {
+          await rm(stale, { recursive: true, force: true });
+        }
+
+        // Successful export to empty fresh dir
+        const fresh = await mkdtemp(path.join(os.tmpdir(), 'aicb-export-fresh-'));
+        try {
+          const exp = await exportSanitizedBundle({
+            campaignDir: campaign,
+            outDir: fresh,
+            includeRaw: false,
+          });
+          assert.equal(exp.verified, 1);
+          await access(path.join(fresh, 'manifest.json'));
+          await access(path.join(fresh, 'report.json'));
+          await access(path.join(fresh, 'summary.txt'));
+          await access(path.join(fresh, 'results', 't1', 'result.json'));
+          await access(path.join(fresh, 'EXPORT_README.txt'));
+        } finally {
+          await rm(fresh, { recursive: true, force: true });
+        }
+
+        // Successful export to a path that does not yet exist
+        const brandNew = path.join(
+          await mkdtemp(path.join(os.tmpdir(), 'aicb-export-parent-')),
+          'bundle-out',
+        );
+        try {
+          const exp2 = await exportSanitizedBundle({
+            campaignDir: campaign,
+            outDir: brandNew,
+            includeRaw: false,
+          });
+          assert.equal(exp2.verified, 1);
+          await access(path.join(brandNew, 'report.json'));
+        } finally {
+          await rm(path.dirname(brandNew), { recursive: true, force: true });
+        }
+      } finally {
+        await rm(outer, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
     }
   });
 
