@@ -95,7 +95,7 @@
     "digests": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Evidence binding digests: exact raw stdout/stderr/output bytes, artifact tree, fixture tree, and result envelope",
+      "description": "Evidence binding digests: exact raw stdout/stderr/output bytes, artifact tree, fixture tree, and final-record result envelope. rawEvidenceUnavailable marks infra records without provider raw.",
       "properties": {
         "resultDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "artifactDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
@@ -103,8 +103,20 @@
         "rawOutputDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "rawStdoutSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "rawStderrSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "rawOutputFileSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        "rawOutputFileSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "rawEvidenceUnavailable": {
+          "type": "boolean",
+          "description": "True when INFRA_FAIL path stored no raw provider artifacts (unavailable for report)"
+        }
       }
+    },
+    "exitCode": {
+      "type": ["integer", "null"],
+      "description": "Invoker process exit code; null when the process never exited cleanly"
+    },
+    "executionRoot": {
+      "type": ["string", "null"],
+      "description": "External execution root for provider workspaces (outside campaign tree)"
     },
     "gateResults": {
       "type": "array",

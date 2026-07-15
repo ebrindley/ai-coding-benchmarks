@@ -7,8 +7,10 @@
  * may have been swapped for a symlink to host content.
  */
 
-import { open, constants } from 'node:fs/promises';
+import { open, constants, lstat, realpath } from 'node:fs/promises';
 import fs from 'node:fs';
+import path from 'node:path';
+import { isPathInside } from './paths.js';
 
 /** Default max bytes for a single safe read (adapter outputs / request JSON). */
 export const DEFAULT_SAFE_READ_MAX_BYTES = 32 * 1024 * 1024;
@@ -163,4 +165,158 @@ export async function isSymlinkPath(filePath) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Ensure every path component from root to candidate is free of symlinks
+ * (ancestors and final link). Fail closed on any symlink in the chain.
+ *
+ * @param {string} rootAbs - trusted root (lexical absolute)
+ * @param {string} candidateAbs - path under root (lexical absolute)
+ * @returns {Promise<void>}
+ */
+export async function assertNoSymlinkPathComponents(rootAbs, candidateAbs) {
+  const root = path.resolve(rootAbs);
+  const candidate = path.resolve(candidateAbs);
+  if (!isPathInside(root, candidate)) {
+    throw new UnsafePathError(
+      `path not under trusted root (fail closed): ${candidate}`,
+      { code: 'NOT_CONTAINED', path: candidate },
+    );
+  }
+  const rel = path.relative(root, candidate);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new UnsafePathError(
+      `path escapes trusted root (fail closed): ${candidate}`,
+      { code: 'ESCAPE', path: candidate },
+    );
+  }
+
+  // Root itself must not be a symlink (or we re-resolve outside trust).
+  try {
+    const rootSt = await lstat(root);
+    if (rootSt.isSymbolicLink()) {
+      throw new UnsafePathError(
+        `trusted root is a symlink (fail closed): ${root}`,
+        { code: 'SYMLINK_ROOT', path: root },
+      );
+    }
+  } catch (err) {
+    if (err instanceof UnsafePathError) throw err;
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code !== 'ENOENT') throw err;
+    throw new UnsafePathError(
+      `trusted root missing (fail closed): ${root}`,
+      { code: 'ROOT_MISSING', path: root },
+    );
+  }
+
+  let cur = root;
+  const parts = rel === '' ? [] : rel.split(path.sep).filter(Boolean);
+  for (const part of parts) {
+    cur = path.join(cur, part);
+    let st;
+    try {
+      st = await lstat(cur);
+    } catch (err) {
+      const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+      if (code === 'ENOENT') {
+        throw new UnsafePathError(
+          `path component missing (fail closed): ${cur}`,
+          { code: 'MISSING', path: cur },
+        );
+      }
+      throw err;
+    }
+    if (st.isSymbolicLink()) {
+      throw new UnsafePathError(
+        `symlink in path (fail closed): ${cur}`,
+        { code: 'SYMLINK', path: cur },
+      );
+    }
+  }
+}
+
+/**
+ * Validate that candidate is exactly the expected path under a trusted root:
+ * lexical + canonical containment, no symlink ancestors/final, regular file.
+ * Then bounded nofollow read.
+ *
+ * @param {string} trustedRoot
+ * @param {string} expectedPath - exact deterministic path required
+ * @param {string} candidatePath - path claimed / to validate (must equal expected)
+ * @param {{ maxBytes?: number }} [opts]
+ * @returns {Promise<Buffer>}
+ */
+export async function readContainedRegularFileNoFollow(
+  trustedRoot,
+  expectedPath,
+  candidatePath,
+  opts = {},
+) {
+  const root = path.resolve(String(trustedRoot));
+  const expected = path.resolve(String(expectedPath));
+  const candidate = path.resolve(String(candidatePath));
+
+  if (candidate !== expected) {
+    throw new UnsafePathError(
+      `path is not the expected deterministic path (fail closed): got ${candidate}, expected ${expected}`,
+      { code: 'PATH_MISMATCH', path: candidate },
+    );
+  }
+  if (!isPathInside(root, expected)) {
+    throw new UnsafePathError(
+      `expected path not under trusted root (fail closed): ${expected}`,
+      { code: 'NOT_CONTAINED', path: expected },
+    );
+  }
+
+  await assertNoSymlinkPathComponents(root, expected);
+
+  let st;
+  try {
+    st = await lstat(expected);
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code === 'ENOENT') {
+      throw new UnsafePathError(
+        `expected regular file missing (fail closed): ${expected}`,
+        { code: 'MISSING', path: expected },
+      );
+    }
+    throw err;
+  }
+  if (st.isSymbolicLink()) {
+    throw new UnsafePathError(
+      `path is a symlink (fail closed): ${expected}`,
+      { code: 'SYMLINK', path: expected },
+    );
+  }
+  if (!st.isFile()) {
+    throw new UnsafePathError(
+      `path is not a regular file (fail closed): ${expected}`,
+      { code: 'NOT_REGULAR', path: expected },
+    );
+  }
+
+  // Canonical containment (after confirming no symlinks, realpath is the path).
+  let realRoot;
+  let realCand;
+  try {
+    realRoot = await realpath(root);
+    realCand = await realpath(expected);
+  } catch (err) {
+    throw new UnsafePathError(
+      `realpath failed during containment check (fail closed): ${err instanceof Error ? err.message : String(err)}`,
+      { code: 'REALPATH', path: expected },
+    );
+  }
+  if (!isPathInside(realRoot, realCand)) {
+    throw new UnsafePathError(
+      `canonical path escapes trusted root (fail closed): ${realCand}`,
+      { code: 'CANONICAL_ESCAPE', path: realCand },
+    );
+  }
+
+  return readFileNoFollow(expected, opts);
 }

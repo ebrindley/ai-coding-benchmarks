@@ -131,6 +131,9 @@ function stripGatePreviews(gateResults) {
 /**
  * Write (or overwrite) a trial result.json atomically (dir 0700, file 0600).
  *
+ * After defaults/sanitization/timestamps, computes the canonical final-record
+ * resultDigest over the complete stored envelope (excluding resultDigest itself).
+ *
  * @param {string} campaignDir
  * @param {string} trialId
  * @param {object} result trial-shaped result payload
@@ -149,11 +152,20 @@ export async function writeTrialResult(campaignDir, trialId, result) {
   const dir = await resolveTrialResultDir(campaignDir, safeId);
   await ensurePrivateDir(dir);
 
+  const writtenAt = new Date().toISOString();
+  /** @type {Record<string, unknown>} */
+  const digestsIn =
+    result.digests && typeof result.digests === 'object'
+      ? { .../** @type {Record<string, unknown>} */ (result.digests) }
+      : {};
+  // resultDigest is always recomputed over the final envelope below.
+  delete digestsIn.resultDigest;
+
   const payload = {
     ...result,
     id: result.id ?? safeId,
     classification: result.classification ?? null,
-    digests: result.digests ?? {},
+    digests: digestsIn,
     gateResults: stripGatePreviews(result.gateResults) ?? undefined,
     requestedModel: result.requestedModel ?? null,
     // Preserve null — never invent resolved from requested
@@ -162,7 +174,14 @@ export async function writeTrialResult(campaignDir, trialId, result) {
     postureFingerprint: result.postureFingerprint ?? null,
     invocationPath: result.invocationPath ?? null,
     schemaVersion: SCHEMA_VERSION,
-    writtenAt: new Date().toISOString(),
+    writtenAt,
+  };
+
+  // Canonical final-record digest after all defaults/sanitization/timestamps.
+  const resultDigest = computeFinalResultDigest(payload);
+  payload.digests = {
+    .../** @type {Record<string, unknown>} */ (payload.digests),
+    resultDigest,
   };
 
   const finalPath = path.join(dir, 'result.json');
@@ -387,18 +406,94 @@ export async function computeArtifactDigest(artifactDir) {
  * }>}
  */
 /**
- * Exact resultDigest envelope used by run.js (must stay in lockstep).
- * @param {object} parts
- * @param {unknown} [parts.classification]
- * @param {unknown} [parts.gateResults]
- * @param {unknown} [parts.exitCode]
+ * Build the canonical final-record envelope for resultDigest.
+ * Includes identity, model evidence, posture, state/classification, gates,
+ * timing/exit, hashes, retained paths, and all evidence digests except
+ * resultDigest itself. writtenAt/schemaVersion are included so the digest
+ * binds the complete stored record.
+ *
+ * @param {object} result - full trial result after defaults/sanitization
+ * @returns {object}
+ */
+export function buildFinalResultEnvelope(result) {
+  const r = result && typeof result === 'object' ? result : {};
+  /** @type {Record<string, unknown>} */
+  const digestsIn =
+    r.digests && typeof r.digests === 'object'
+      ? { .../** @type {Record<string, unknown>} */ (r.digests) }
+      : {};
+  delete digestsIn.resultDigest;
+
+  return {
+    id: r.id ?? null,
+    experimentId: r.experimentId ?? null,
+    arm: r.arm ?? null,
+    provider: r.provider ?? null,
+    taskId: r.taskId ?? null,
+    repetition: r.repetition ?? null,
+    scheduleSeed: r.scheduleSeed ?? null,
+    invocationPath: r.invocationPath ?? null,
+    requestedModel: r.requestedModel ?? null,
+    resolvedModel: r.resolvedModel === undefined ? null : r.resolvedModel,
+    resolvedModelAvailable: r.resolvedModelAvailable ?? false,
+    resolvedModelSource: r.resolvedModelSource ?? null,
+    postureFingerprint: r.postureFingerprint ?? null,
+    state: r.state ?? null,
+    classification: r.classification ?? null,
+    classificationReason: r.classificationReason ?? null,
+    gateResults: r.gateResults ?? [],
+    changedFileCount: r.changedFileCount ?? null,
+    startedAt: r.startedAt ?? null,
+    finishedAt: r.finishedAt ?? null,
+    durationMs: r.durationMs ?? null,
+    exitCode: r.exitCode ?? null,
+    hashes: r.hashes ?? null,
+    workspaceDir: r.workspaceDir ?? null,
+    artifactDir: r.artifactDir ?? null,
+    executionRoot: r.executionRoot ?? null,
+    error: r.error ?? null,
+    digests: digestsIn,
+    schemaVersion: r.schemaVersion ?? null,
+    writtenAt: r.writtenAt ?? null,
+  };
+}
+
+/**
+ * Canonical final-record resultDigest (complete stored envelope).
+ * @param {object} result
  * @returns {string}
  */
-export function computeResultDigest({ classification, gateResults, exitCode }) {
-  return sha256Json({
-    classification: classification ?? null,
-    gateResults: gateResults ?? [],
-    exitCode: exitCode ?? null,
+export function computeFinalResultDigest(result) {
+  return sha256Json(buildFinalResultEnvelope(result));
+}
+
+/**
+ * @deprecated Prefer computeFinalResultDigest over the complete stored result.
+ * Kept for call-site migration; now digests the same final envelope when given
+ * a full result, or a minimal classification/gates/exit envelope for tests.
+ *
+ * @param {object} parts
+ * @returns {string}
+ */
+export function computeResultDigest(parts = {}) {
+  // If caller already has a written-shaped result, use full envelope.
+  if (
+    parts &&
+    typeof parts === 'object' &&
+    (parts.writtenAt != null ||
+      parts.schemaVersion != null ||
+      parts.id != null ||
+      parts.digests != null)
+  ) {
+    return computeFinalResultDigest(parts);
+  }
+  // Minimal legacy path (tests that only pass classification/gates/exit):
+  // still produce a stable digest via the final envelope shape.
+  return computeFinalResultDigest({
+    classification: parts.classification ?? null,
+    gateResults: parts.gateResults ?? [],
+    exitCode: parts.exitCode ?? null,
+    digests: {},
   });
 }
 
@@ -415,6 +510,18 @@ export function isInfraFailureWithoutRawEvidence(result) {
   const d = result.digests;
   if (!d || typeof d !== 'object') return false;
   return d.rawEvidenceUnavailable === true;
+}
+
+/**
+ * True when a result must not enter benchmark reports/summaries/exports.
+ * @param {object} result
+ * @returns {boolean}
+ */
+export function isUnavailableForReport(result) {
+  if (!result || typeof result !== 'object') return true;
+  if (isInfraFailureWithoutRawEvidence(result)) return true;
+  if (result.evidenceUnavailable === true) return true;
+  return false;
 }
 
 export async function verifyTrialEvidenceDigests(
@@ -457,17 +564,34 @@ export async function verifyTrialEvidenceDigests(
   /** @type {Record<string, unknown>} */
   const recomputed = {};
 
-  // Always recompute resultDigest envelope and compare when present (or required).
-  const expectedResultDigest = computeResultDigest({
-    classification: result.classification,
-    gateResults: result.gateResults,
-    exitCode: result.exitCode ?? result.invokerExitCode ?? null,
-  });
+  // Always recompute final-record resultDigest over the complete stored envelope.
+  const expectedResultDigest = computeFinalResultDigest(result);
   recomputed.resultDigest = expectedResultDigest;
   if (stored.resultDigest == null || stored.resultDigest === '') {
     mismatches.push('resultDigest-missing');
   } else if (String(stored.resultDigest) !== expectedResultDigest) {
     mismatches.push('resultDigest');
+  }
+
+  // Fixture digest vs independent frozen authority (manifest trial metadata).
+  // Never merely compare two fields inside the same result.
+  const expectedFixture =
+    opts.expectedFixtureDigest != null &&
+    String(opts.expectedFixtureDigest).trim() !== ''
+      ? String(opts.expectedFixtureDigest)
+      : null;
+  if (expectedFixture) {
+    recomputed.expectedFixtureDigest = expectedFixture;
+    if (stored.fixtureDigest == null || stored.fixtureDigest === '') {
+      mismatches.push('fixtureDigest-missing');
+    } else if (String(stored.fixtureDigest) !== expectedFixture) {
+      mismatches.push('fixtureDigest');
+    }
+  } else if (
+    opts.requireFixtureAuthority === true &&
+    !isInfraFailureWithoutRawEvidence(result)
+  ) {
+    mismatches.push('expectedFixtureDigest-missing');
   }
 
   // Explicit infra-without-raw path: must not count as verified/reportable.
@@ -478,6 +602,7 @@ export async function verifyTrialEvidenceDigests(
         trialId: safeId,
         mismatches,
         unavailable: false,
+        reportable: false,
         recomputed,
         error: `infra-failure evidence integrity failed (fail closed): ${mismatches.join(', ')}`,
       };
@@ -487,6 +612,7 @@ export async function verifyTrialEvidenceDigests(
       trialId: safeId,
       mismatches: [],
       unavailable: true,
+      reportable: false,
       recomputed,
       error:
         'infra-failure without raw artifacts (unavailable; not verified/reportable)',
@@ -502,6 +628,17 @@ export async function verifyTrialEvidenceDigests(
   ]) {
     if (stored[key] == null || stored[key] === '') {
       mismatches.push(`${key}-missing`);
+    }
+  }
+  // fixtureDigest required when an independent frozen authority is provided;
+  // real campaigns always stamp expectedFixtureDigest on trial metadata.
+  if (expectedFixture) {
+    /* already checked above against authority */
+  } else if (stored.fixtureDigest == null || stored.fixtureDigest === '') {
+    // Soft-require when no authority: still prefer presence for reportable trials.
+    // Hard-require only when opts.requireFixtureDigest === true (run/export paths).
+    if (opts.requireFixtureDigest === true) {
+      mismatches.push('fixtureDigest-missing');
     }
   }
 
@@ -581,6 +718,7 @@ export async function verifyTrialEvidenceDigests(
       trialId: safeId,
       mismatches,
       unavailable: false,
+      reportable: false,
       recomputed,
       error: `evidence digest mismatch (fail closed): ${mismatches.join(', ')}`,
     };
@@ -591,21 +729,26 @@ export async function verifyTrialEvidenceDigests(
     trialId: safeId,
     mismatches: [],
     unavailable: false,
+    reportable: true,
     recomputed,
   };
 }
 
 /**
  * Verify evidence digests for all completed/failed trials before report/export.
- * Fail closed on the first mismatch or unreadable evidence when digests present.
+ * Fail closed on mismatch, missing result, or unavailable records when
+ * `failOnUnavailable` is true (default for report/export/summary paths).
  *
  * @param {string} campaignDir
- * @param {object[]} trials - manifest trials (need id + state)
+ * @param {object[]} trials - manifest trials (need id + state; optional expectedFixtureDigest)
  * @param {object[]} [trialResults] - optional preloaded results
+ * @param {{ failOnUnavailable?: boolean }} [opts]
  * @returns {Promise<{
  *   ok: boolean,
  *   verified: number,
  *   skipped: number,
+ *   unavailable: number,
+ *   reportableResults: object[],
  *   failures: Array<{ trialId: string, error: string, mismatches: string[] }>,
  *   error?: string,
  * }>}
@@ -614,13 +757,17 @@ export async function verifyCampaignEvidenceDigests(
   campaignDir,
   trials,
   trialResults,
+  opts = {},
 ) {
+  const failOnUnavailable = opts.failOnUnavailable !== false;
+
   if (!campaignDir) {
     return {
       ok: false,
       verified: 0,
       skipped: 0,
       unavailable: 0,
+      reportableResults: [],
       failures: [],
       error: 'campaignDir is required for evidence verify',
     };
@@ -636,9 +783,19 @@ export async function verifyCampaignEvidenceDigests(
     }
   }
 
+  /** @type {Map<string, object>} */
+  const trialMetaById = new Map();
+  for (const t of trials || []) {
+    if (t && typeof t === 'object' && t.id != null) {
+      trialMetaById.set(String(t.id), t);
+    }
+  }
+
   let verified = 0;
   let skipped = 0;
   let unavailable = 0;
+  /** @type {object[]} */
+  const reportableResults = [];
   /** @type {Array<{ trialId: string, error: string, mismatches: string[] }>} */
   const failures = [];
 
@@ -675,10 +832,32 @@ export async function verifyCampaignEvidenceDigests(
       continue;
     }
 
-    const v = await verifyTrialEvidenceDigests(campaignDir, id, result);
-    if (v.unavailable) {
-      // Explicit INFRA_FAIL without raw — not verified, not silently reportable.
+    const meta = trialMetaById.get(id) || t;
+    const expectedFixtureDigest =
+      meta.expectedFixtureDigest != null
+        ? String(meta.expectedFixtureDigest)
+        : null;
+
+    const v = await verifyTrialEvidenceDigests(campaignDir, id, result, {
+      expectedFixtureDigest,
+      requireFixtureAuthority: Boolean(expectedFixtureDigest),
+      artifactDir:
+        typeof result.artifactDir === 'string' ? result.artifactDir : null,
+    });
+    if (v.unavailable || isUnavailableForReport(result)) {
+      // Explicit INFRA_FAIL without raw — not verified, not reportable.
       unavailable += 1;
+      if (failOnUnavailable) {
+        failures.push({
+          trialId: id,
+          error:
+            v.error ||
+            'unavailable evidence (not reportable; fail closed for report path)',
+          mismatches: v.mismatches?.length
+            ? v.mismatches
+            : ['unavailable'],
+        });
+      }
       continue;
     }
     if (!v.ok) {
@@ -690,6 +869,7 @@ export async function verifyCampaignEvidenceDigests(
       continue;
     }
     verified += 1;
+    reportableResults.push(result);
   }
 
   if (failures.length > 0) {
@@ -698,6 +878,7 @@ export async function verifyCampaignEvidenceDigests(
       verified,
       skipped,
       unavailable,
+      reportableResults,
       failures,
       error: `evidence integrity failed for ${failures.length} trial(s): ${failures
         .map((f) => `${f.trialId}(${f.mismatches.join(',')})`)
@@ -705,9 +886,14 @@ export async function verifyCampaignEvidenceDigests(
     };
   }
 
-  // Unavailable infra records do not block campaign-level ok (they are not
-  // counted as verified/reportable). Callers must not treat unavailable as pass.
-  return { ok: true, verified, skipped, unavailable, failures: [] };
+  return {
+    ok: true,
+    verified,
+    skipped,
+    unavailable,
+    reportableResults,
+    failures: [],
+  };
 }
 
 /**

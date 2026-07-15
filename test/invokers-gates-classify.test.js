@@ -73,6 +73,7 @@ describe('invokers + gates + classify', () => {
         bin,
         `#!/usr/bin/env node
 const fs = require('fs');
+const path = require('path');
 const args = process.argv.slice(2);
 const reqIdx = args.indexOf('--request');
 const outIdx = args.indexOf('--output');
@@ -83,6 +84,13 @@ const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
 // Report modes seen at invoke time (request already written by harness with 0600).
 const reqMode = fs.statSync(reqPath).mode & 0o777;
 const outModeBefore = fs.existsSync(out) ? (fs.statSync(out).mode & 0o777) : null;
+// Actual provider raw: strip only trailing .json (Poetic resolveArtifactQuarantineDir)
+const base = path.basename(path.resolve(out));
+const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
+const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
+fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
+fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'provider-stdout-body\\n');
+fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'provider-stderr-body\\n');
 fs.writeFileSync(out, JSON.stringify({
   schema: 'poetic.provider.invoke.result.v1',
   requestId: req.requestId,
@@ -142,10 +150,16 @@ process.stdout.write('done');
       assert.equal(result.reasonCode, 'ok');
       assert.equal(result.timedOut, false);
       assert.equal(result.infraFailure, undefined);
+      // Actual provider raw ingested (not quiet wrapper CLI stdout "done")
+      assert.equal(result.providerRawEvidence, 'actual');
+      assert.match(result.stdout, /provider-stdout-body/);
+      assert.match(result.stderr, /provider-stderr-body/);
+      assert.ok(!result.stdout.includes('done'));
 
       const written = JSON.parse(await readFile(outputPath, 'utf8'));
       assert.equal(written.receivedRequest.schema, POETIC_INVOKE_REQUEST_SCHEMA);
-      const evidence = parseResolvedModelEvidence(written);
+      // Model evidence from bound parsedOutput only
+      const evidence = parseResolvedModelEvidence(result.parsedOutput);
       assert.equal(evidence.available, true);
       assert.equal(evidence.resolvedModel, 'resolved-from-provider');
 
@@ -197,8 +211,17 @@ process.stdout.write('done');
           bin,
           `#!/usr/bin/env node
 const fs = require('fs');
+const path = require('path');
 const args = process.argv.slice(2);
 const out = args[args.indexOf('--output') + 1];
+const reqPath = args[args.indexOf('--request') + 1];
+const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
+const base = path.basename(path.resolve(out));
+const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
+const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
+fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
+fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'raw-out-${kind}\\n');
+fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'raw-err-${kind}\\n');
 fs.writeFileSync(out, JSON.stringify({
   schema: ${JSON.stringify(POETIC_INVOKE_RESULT_SCHEMA)},
   requestId: 'r-${kind}',
