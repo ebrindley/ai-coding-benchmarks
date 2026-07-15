@@ -318,3 +318,288 @@ describe('isRawEvidenceUnavailable truncation fail-closed', () => {
     assert.equal(digests.rawStderrSha256, undefined);
   });
 });
+
+describe('truncation forces INFRA_FAIL classification (never PASS/FAIL/NO_OP)', () => {
+  it('classifyTrial rawEvidenceUnavailable true forces INFRA_FAIL despite exit 0 + changes + gates', async () => {
+    const { classifyTrial } = await import('../harness/classify.js');
+
+    // Nominally successful path that would otherwise be PASS.
+    const wouldPass = classifyTrial({
+      invokerResult: { exitCode: 0, timedOut: false },
+      gateResults: [
+        {
+          gate: 'tests',
+          exitCode: 0,
+          required: true,
+          status: 'passed',
+          classificationSignal: 'PASS',
+        },
+      ],
+      changedFileCount: 3,
+      timedOut: false,
+    });
+    assert.equal(wouldPass.classification, 'PASS');
+
+    const forced = classifyTrial({
+      invokerResult: { exitCode: 0, timedOut: false },
+      gateResults: [
+        {
+          gate: 'tests',
+          exitCode: 0,
+          required: true,
+          status: 'passed',
+          classificationSignal: 'PASS',
+        },
+      ],
+      changedFileCount: 3,
+      timedOut: false,
+      rawEvidenceUnavailable: true,
+    });
+    assert.equal(forced.classification, 'INFRA_FAIL');
+    assert.equal(forced.evidence.rawEvidenceUnavailable, true);
+    assert.match(forced.reason, /raw evidence unavailable/i);
+    assert.ok(forced.evidence.signals.includes('INFRA_FAIL'));
+  });
+
+  it('rawEvidenceUnavailable forces INFRA_FAIL over FAIL, NO_OP, and TIMEOUT', async () => {
+    const { classifyTrial } = await import('../harness/classify.js');
+
+    assert.equal(
+      classifyTrial({
+        invokerResult: { exitCode: 1, timedOut: false },
+        gateResults: [
+          {
+            gate: 'tests',
+            exitCode: 1,
+            required: true,
+            status: 'failed',
+            classificationSignal: 'FAIL',
+          },
+        ],
+        changedFileCount: 2,
+        timedOut: false,
+        rawEvidenceUnavailable: true,
+      }).classification,
+      'INFRA_FAIL',
+    );
+
+    assert.equal(
+      classifyTrial({
+        invokerResult: { exitCode: 0, timedOut: false },
+        gateResults: [],
+        changedFileCount: 0,
+        timedOut: false,
+        rawEvidenceUnavailable: true,
+      }).classification,
+      'INFRA_FAIL',
+    );
+
+    // Timeout coexists with raw unavailable: still INFRA_FAIL before write
+    // (TIMEOUT must not win when digests would be non-reportable).
+    const withTimeout = classifyTrial({
+      invokerResult: { exitCode: 0, timedOut: true },
+      gateResults: [],
+      changedFileCount: 1,
+      timedOut: true,
+      rawEvidenceUnavailable: true,
+    });
+    assert.equal(withTimeout.classification, 'INFRA_FAIL');
+    assert.ok(
+      withTimeout.evidence.signals.includes('TIMEOUT'),
+      'timeout still recorded as a signal for evidence',
+    );
+    assert.ok(withTimeout.evidence.signals.includes('INFRA_FAIL'));
+    assert.equal(withTimeout.evidence.forcedInfraFailForRawUnavailable, true);
+  });
+
+  it('nominally successful oversized native-cli → INFRA_FAIL + non-reportable digests', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-trunc-class-native-'));
+    try {
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
+      const bin = await writeExecutable(
+        dir,
+        'big-ok',
+        `#!/usr/bin/env node
+process.stdout.write('A'.repeat(${TINY_CAPTURE_LIMIT + 40}));
+process.exit(0);
+`,
+      );
+
+      const { invokeNativeCli } = await import(
+        '../harness/invokers/native-cli.js'
+      );
+      const { isRawEvidenceUnavailable } = await import('../harness/run.js');
+      const { classifyTrial } = await import('../harness/classify.js');
+      const {
+        buildTrialDigests,
+        isUnavailableForReport,
+        hasRawEvidenceUnavailableFlag,
+      } = await import('../harness/results.js');
+
+      const invokerResult = await invokeNativeCli({
+        command: bin,
+        args: [],
+        cwd: dir,
+        campaignDir,
+        timeoutMs: 10_000,
+        captureLimit: TINY_CAPTURE_LIMIT,
+        prompt: '',
+      });
+      assert.equal(invokerResult.exitCode, 0, invokerResult.infraFailure || '');
+      assert.equal(invokerResult.rawTruncated, true);
+
+      const rawUnavailable = isRawEvidenceUnavailable('native-cli', invokerResult);
+      assert.equal(rawUnavailable, true);
+
+      // Mirror run.js: classify with flag, then store digests without raw claims.
+      const classified = classifyTrial({
+        invokerResult,
+        gateResults: [
+          {
+            gate: 'tests',
+            exitCode: 0,
+            required: true,
+            status: 'passed',
+            classificationSignal: 'PASS',
+          },
+        ],
+        changedFileCount: 2,
+        timedOut: false,
+        rawEvidenceUnavailable: rawUnavailable,
+      });
+      assert.equal(classified.classification, 'INFRA_FAIL');
+      assert.notEqual(classified.classification, 'PASS');
+      assert.notEqual(classified.classification, 'FAIL');
+      assert.notEqual(classified.classification, 'NO_OP');
+
+      const digests = buildTrialDigests({
+        artifactDigest: 'a'.repeat(64),
+        fixtureDigest: 'b'.repeat(64),
+        rawEvidenceUnavailable: true,
+      });
+      const storedShape = {
+        classification: classified.classification,
+        digests,
+      };
+      assert.equal(hasRawEvidenceUnavailableFlag(storedShape), true);
+      assert.equal(isUnavailableForReport(storedShape), true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('nominally successful oversized poetic-system → INFRA_FAIL + non-reportable digests', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-trunc-class-poetic-'));
+    try {
+      const campaignDir = path.join(dir, '_campaign');
+      await mkdir(campaignDir, { recursive: true, mode: 0o700 });
+      const bin = await writeExecutable(
+        dir,
+        'fake-poetic',
+        `#!/usr/bin/env node
+process.stdout.write('P'.repeat(${TINY_CAPTURE_LIMIT + 17}));
+process.exit(0);
+`,
+      );
+
+      const { invokePoeticSystem } = await import(
+        '../harness/invokers/poetic-system.js'
+      );
+      const { isRawEvidenceUnavailable } = await import('../harness/run.js');
+      const { classifyTrial } = await import('../harness/classify.js');
+      const {
+        buildTrialDigests,
+        isUnavailableForReport,
+      } = await import('../harness/results.js');
+
+      const invokerResult = await invokePoeticSystem({
+        poeticBin: bin,
+        prompt: 'do something',
+        provider: 'test-provider',
+        model: 'test-model',
+        cwd: dir,
+        campaignDir,
+        timeoutMs: 10_000,
+        captureLimit: TINY_CAPTURE_LIMIT,
+      });
+      assert.equal(invokerResult.exitCode, 0, invokerResult.infraFailure || '');
+      assert.equal(invokerResult.rawTruncated, true);
+
+      const rawUnavailable = isRawEvidenceUnavailable(
+        'poetic-system',
+        invokerResult,
+      );
+      assert.equal(rawUnavailable, true);
+
+      const classified = classifyTrial({
+        invokerResult,
+        gateResults: [],
+        changedFileCount: 1,
+        timedOut: false,
+        rawEvidenceUnavailable: rawUnavailable,
+      });
+      assert.equal(classified.classification, 'INFRA_FAIL');
+
+      const digests = buildTrialDigests({ rawEvidenceUnavailable: true });
+      assert.equal(
+        isUnavailableForReport({
+          classification: classified.classification,
+          digests,
+        }),
+        true,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('poetic-adapter truncated capture metadata → unavailable + INFRA_FAIL (not PASS)', async () => {
+    const { isRawEvidenceUnavailable } = await import('../harness/run.js');
+    const { classifyTrial } = await import('../harness/classify.js');
+    const {
+      buildTrialDigests,
+      isUnavailableForReport,
+    } = await import('../harness/results.js');
+
+    // Adapter path with actual marker but truncated stream retention:
+    // truncation is checked before adapter-specific rules.
+    const invokerResult = {
+      exitCode: 0,
+      success: true,
+      outcomeKind: 'success',
+      providerRawEvidence: 'actual',
+      stdout: 'prefix-only',
+      stderr: '',
+      stdoutTruncatedChars: 50,
+      rawTruncated: true,
+    };
+    assert.equal(
+      isRawEvidenceUnavailable('poetic-adapter', invokerResult),
+      true,
+    );
+
+    const classified = classifyTrial({
+      invokerResult,
+      gateResults: [
+        {
+          gate: 'tests',
+          exitCode: 0,
+          required: true,
+          status: 'passed',
+        },
+      ],
+      changedFileCount: 4,
+      timedOut: false,
+      rawEvidenceUnavailable: true,
+    });
+    assert.equal(classified.classification, 'INFRA_FAIL');
+    assert.equal(
+      isUnavailableForReport({
+        classification: classified.classification,
+        digests: buildTrialDigests({ rawEvidenceUnavailable: true }),
+      }),
+      true,
+    );
+  });
+});

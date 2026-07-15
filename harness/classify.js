@@ -2,7 +2,9 @@
  * Trial classification for the external benchmark harness.
  *
  * Classifications: PASS, FAIL, NO_OP, INFRA_FAIL, TIMEOUT
- * Precedence (highest wins): TIMEOUT > INFRA_FAIL > NO_OP > FAIL > PASS
+ * Default precedence (highest wins): TIMEOUT > INFRA_FAIL > NO_OP > FAIL > PASS
+ * Exception: rawEvidenceUnavailable true always stores INFRA_FAIL (including
+ * when a TIMEOUT signal is also present).
  */
 
 import {
@@ -110,16 +112,25 @@ function invokerNonZero(invokerResult) {
  *
  * Rules:
  * - TIMEOUT if any timeout (trial flag, invoker, or gate)
- * - INFRA_FAIL if invoker/gate infraFailure or confinement unavailable
+ * - INFRA_FAIL if invoker/gate infraFailure, confinement unavailable, or
+ *   rawEvidenceUnavailable (truncation / missing raw / spawn failure, etc.)
  * - NO_OP if completed with zero meaningful file changes (changedFileCount === 0)
  * - FAIL if any required gate non-zero / failed, or invoker non-zero without infra
  * - PASS otherwise
+ *
+ * Invariant: when rawEvidenceUnavailable is true, classification is always
+ * INFRA_FAIL — never PASS, FAIL, NO_OP, or TIMEOUT. Timeout signals may still
+ * be recorded in evidence.signals/reasons, but the stored classification is
+ * INFRA_FAIL so write-path reportability stays stable.
  *
  * @param {object} input
  * @param {object | null | undefined} [input.invokerResult]
  * @param {Array<Record<string, unknown>> | null | undefined} [input.gateResults]
  * @param {number | null | undefined} [input.changedFileCount]
  * @param {boolean | null | undefined} [input.timedOut]
+ * @param {boolean | null | undefined} [input.rawEvidenceUnavailable]
+ *   When true, force INFRA_FAIL regardless of provider exit, gates, file
+ *   changes, or timeout.
  * @returns {ClassificationResult}
  */
 export function classifyTrial({
@@ -127,6 +138,7 @@ export function classifyTrial({
   gateResults,
   changedFileCount,
   timedOut,
+  rawEvidenceUnavailable,
 }) {
   /** @type {Classification[]} */
   const signals = [];
@@ -141,6 +153,7 @@ export function classifyTrial({
       invokerResult && typeof invokerResult === 'object'
         ? /** @type {Record<string, unknown>} */ (invokerResult).exitCode ?? null
         : null,
+    rawEvidenceUnavailable: rawEvidenceUnavailable === true,
     gateStatuses: [],
   };
 
@@ -163,6 +176,14 @@ export function classifyTrial({
   }
 
   // --- INFRA_FAIL ---
+  // Raw unavailable (truncation, missing poetic raw, command-not-found, etc.)
+  // forces INFRA_FAIL before write — including when timeout is also true.
+  if (rawEvidenceUnavailable === true) {
+    signals.push('INFRA_FAIL');
+    reasons.push(
+      'raw evidence unavailable (truncated capture, missing raw, or non-reportable invoker output)',
+    );
+  }
   const invInfra = invokerInfraFailure(invokerResult);
   if (invInfra) {
     signals.push('INFRA_FAIL');
@@ -235,7 +256,12 @@ export function classifyTrial({
     reasons.push('invoker and required executable gates succeeded');
   }
 
-  const classification = pickHighestClassification(signals);
+  // rawEvidenceUnavailable outranks default precedence (including TIMEOUT):
+  // always store INFRA_FAIL so the write path never claims TIMEOUT/PASS/FAIL/NO_OP.
+  const classification =
+    rawEvidenceUnavailable === true
+      ? 'INFRA_FAIL'
+      : pickHighestClassification(signals);
   const reason =
     reasons.length > 0
       ? reasons.filter((r, i, arr) => arr.indexOf(r) === i).join('; ')
@@ -248,6 +274,9 @@ export function classifyTrial({
       ...evidence,
       signals: [...new Set(signals)],
       precedence: CLASSIFICATION_PRECEDENCE[classification],
+      ...(rawEvidenceUnavailable === true
+        ? { forcedInfraFailForRawUnavailable: true }
+        : {}),
     },
   };
 }

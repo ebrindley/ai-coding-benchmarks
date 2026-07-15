@@ -1143,4 +1143,182 @@ describe('digest evidence binding + tamper', () => {
       await rm(out, { recursive: true, force: true });
     }
   });
+
+  it('stored PASS with rawEvidenceUnavailable true is unavailable, nonreportable, and export-excluded', async () => {
+    const {
+      buildTrialDigests,
+      verifyTrialEvidenceDigests,
+      verifyCampaignEvidenceDigests,
+      isUnavailableForReport,
+      hasRawEvidenceUnavailableFlag,
+      isInfraFailureWithoutRawEvidence,
+    } = await import('../harness/results.js');
+    const { main } = await import('../harness/cli.js');
+    const { exportSanitizedBundle } = await import('../harness/export.js');
+    const { buildReport } = await import('../harness/summary.js');
+
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-pass-unavail-'));
+    const out = await mkdtemp(path.join(os.tmpdir(), 'aicb-pass-unavail-out-'));
+    try {
+      // Deliberately mislabeled: classification PASS but digests flag unavailable.
+      // Reportability must key on the flag, not classification.
+      const frozenPass = completeManifestTrial({
+        id: 't-pass-unavail',
+        experimentId: 'exp-pass-unavail',
+        arm: 'a',
+        provider: 'fake',
+        taskId: 't',
+        state: 'completed',
+      });
+      await writeFile(
+        path.join(campaign, 'manifest.json'),
+        JSON.stringify({
+          campaignId: 'pass-unavail',
+          schemaVersion: 1,
+          status: 'completed',
+          experimentId: 'exp-pass-unavail',
+          lock: { held: false, owner: null },
+          trials: [frozenPass],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
+        'utf8',
+      );
+
+      const { result: stored } = await writeCompleteTrial(
+        campaign,
+        't-pass-unavail',
+        {
+          experimentId: 'exp-pass-unavail',
+          arm: 'a',
+          provider: 'fake',
+          taskId: 't',
+          state: 'completed',
+          classification: 'PASS',
+          exitCode: 0,
+          digests: {
+            ...buildTrialDigests({}),
+            rawEvidenceUnavailable: true,
+          },
+        },
+        { manifestTrial: frozenPass },
+      );
+
+      assert.equal(stored.classification, 'PASS');
+      assert.equal(stored.digests.rawEvidenceUnavailable, true);
+      assert.equal(hasRawEvidenceUnavailableFlag(stored), true);
+      // Old helper required INFRA_FAIL — must not be the only gate.
+      assert.equal(isInfraFailureWithoutRawEvidence(stored), false);
+      // Direct fail-closed on the digest flag, independent of classification.
+      assert.equal(isUnavailableForReport(stored), true);
+
+      const v = await verifyTrialEvidenceDigests(
+        campaign,
+        't-pass-unavail',
+        stored,
+        { manifestTrial: frozenPass },
+      );
+      assert.equal(v.ok, false);
+      assert.equal(v.unavailable, true);
+      assert.equal(v.reportable, false);
+      assert.match(String(v.error), /unavailable|not verified|not reportable/i);
+
+      const camp = await verifyCampaignEvidenceDigests(campaign, [frozenPass]);
+      assert.equal(camp.ok, false);
+      assert.equal(camp.unavailable, 1);
+      assert.equal(camp.reportableResults.length, 0);
+      assert.equal(camp.verified, 0);
+
+      // Summary/report must not treat it as a PASS cell.
+      const report = buildReport(
+        { campaignId: 'pass-unavail', trials: [frozenPass] },
+        camp.reportableResults,
+      );
+      assert.equal(report.totals?.n ?? 0, 0);
+      assert.notEqual(report.classifications?.PASS, 1);
+
+      const summaryCode = await main([
+        'summary',
+        '--campaign',
+        campaign,
+        '--json',
+      ]);
+      assert.equal(summaryCode, 1);
+
+      await assert.rejects(
+        () =>
+          exportSanitizedBundle({
+            campaignDir: campaign,
+            outDir: out,
+            includeRaw: false,
+          }),
+        /fail closed|unavailable|evidence integrity|no verified reportable/i,
+      );
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+      await rm(out, { recursive: true, force: true });
+    }
+  });
+
+  it('PASS + rawEvidenceUnavailable + mismatched resultDigest still unavailable and nonreportable', async () => {
+    const {
+      buildTrialDigests,
+      verifyTrialEvidenceDigests,
+      isUnavailableForReport,
+    } = await import('../harness/results.js');
+
+    const campaign = await mkdtemp(
+      path.join(os.tmpdir(), 'aicb-pass-unavail-mismatch-'),
+    );
+    try {
+      const frozen = completeManifestTrial({
+        id: 't-pass-mismatch',
+        state: 'completed',
+      });
+      const { result: written } = await writeCompleteTrial(
+        campaign,
+        't-pass-mismatch',
+        {
+          state: 'completed',
+          classification: 'PASS',
+          exitCode: 0,
+          digests: {
+            ...buildTrialDigests({}),
+            rawEvidenceUnavailable: true,
+          },
+        },
+        { manifestTrial: frozen },
+      );
+
+      // Coexist with another integrity failure: tamper resultDigest after write.
+      const tampered = {
+        ...written,
+        digests: {
+          ...written.digests,
+          resultDigest: '0'.repeat(64),
+          rawEvidenceUnavailable: true,
+        },
+      };
+      assert.equal(tampered.classification, 'PASS');
+      assert.equal(isUnavailableForReport(tampered), true);
+
+      const v = await verifyTrialEvidenceDigests(
+        campaign,
+        't-pass-mismatch',
+        tampered,
+        { manifestTrial: frozen },
+      );
+      assert.equal(v.ok, false);
+      // Flag alone forces unavailable true even when mismatches coexist.
+      assert.equal(v.unavailable, true);
+      assert.equal(v.reportable, false);
+      assert.ok(
+        v.mismatches.includes('resultDigest'),
+        `expected resultDigest mismatch retained, got ${JSON.stringify(v.mismatches)}`,
+      );
+      assert.match(String(v.error), /unavailable|integrity/i);
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+    }
+  });
 });

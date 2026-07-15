@@ -932,8 +932,27 @@ export function computeResultDigest(parts = {}) {
 }
 
 /**
+ * True when digests declare raw evidence unavailable (truncation, missing raw,
+ * spawn failure, etc.). Independent of classification — a mislabeled PASS with
+ * this flag is still non-reportable.
+ *
+ * @param {object} result
+ * @returns {boolean}
+ */
+export function hasRawEvidenceUnavailableFlag(result) {
+  if (!result || typeof result !== 'object') return false;
+  const d = result.digests;
+  if (!d || typeof d !== 'object') return false;
+  return d.rawEvidenceUnavailable === true;
+}
+
+/**
  * Whether a stored result is an explicit infra-failure without raw artifacts.
  * Such records are "unavailable" for reportability — never silently verified.
+ *
+ * Prefer hasRawEvidenceUnavailableFlag / isUnavailableForReport for
+ * reportability gates: those check the digest flag directly so a misleading
+ * classification cannot take a missing-digest route instead of unavailability.
  *
  * @param {object} result
  * @returns {boolean}
@@ -941,19 +960,21 @@ export function computeResultDigest(parts = {}) {
 export function isInfraFailureWithoutRawEvidence(result) {
   if (!result || typeof result !== 'object') return false;
   if (result.classification !== 'INFRA_FAIL') return false;
-  const d = result.digests;
-  if (!d || typeof d !== 'object') return false;
-  return d.rawEvidenceUnavailable === true;
+  return hasRawEvidenceUnavailableFlag(result);
 }
 
 /**
  * True when a result must not enter benchmark reports/summaries/exports.
+ * Fail-closed on digests.rawEvidenceUnavailable true, independent of
+ * classification (PASS/FAIL/NO_OP mislabels included).
+ *
  * @param {object} result
  * @returns {boolean}
  */
 export function isUnavailableForReport(result) {
   if (!result || typeof result !== 'object') return true;
-  if (isInfraFailureWithoutRawEvidence(result)) return true;
+  // Direct fail-closed: the digest flag alone makes a record non-reportable.
+  if (hasRawEvidenceUnavailableFlag(result)) return true;
   if (result.evidenceUnavailable === true) return true;
   return false;
 }
@@ -1090,33 +1111,28 @@ export async function verifyTrialEvidenceDigests(
     }
   } else if (
     opts.requireFixtureAuthority === true &&
-    !isInfraFailureWithoutRawEvidence(result)
+    !hasRawEvidenceUnavailableFlag(result)
   ) {
     mismatches.push('expectedFixtureDigest-missing');
   }
 
-  // Explicit infra-without-raw path: must not count as verified/reportable.
-  if (isInfraFailureWithoutRawEvidence(result)) {
-    if (mismatches.length > 0) {
-      return {
-        ok: false,
-        trialId: safeId,
-        mismatches,
-        unavailable: false,
-        reportable: false,
-        recomputed,
-        error: `infra-failure evidence integrity failed (fail closed): ${mismatches.join(', ')}`,
-      };
-    }
+  // Explicit raw-unavailable path: must not count as verified/reportable.
+  // Keyed on digests.rawEvidenceUnavailable alone — independent of
+  // classification and of any coexisting integrity mismatches. Mismatches may
+  // still be retained for diagnostics, but unavailable stays true and
+  // reportable stays false (never unavailable:false for a raw-unavailable record).
+  if (hasRawEvidenceUnavailableFlag(result)) {
     return {
       ok: false,
       trialId: safeId,
-      mismatches: [],
+      mismatches,
       unavailable: true,
       reportable: false,
       recomputed,
       error:
-        'infra-failure without raw artifacts (unavailable; not verified/reportable)',
+        mismatches.length > 0
+          ? `raw evidence unavailable with integrity failures (fail closed): ${mismatches.join(', ')}`
+          : 'raw evidence unavailable (unavailable; not verified/reportable)',
     };
   }
 
@@ -1354,7 +1370,7 @@ export async function verifyCampaignEvidenceDigests(
       manifestTrial: meta,
     });
     if (v.unavailable || isUnavailableForReport(result)) {
-      // Explicit INFRA_FAIL without raw — not verified, not reportable.
+      // rawEvidenceUnavailable (any classification) — not verified, not reportable.
       unavailable += 1;
       if (failOnUnavailable) {
         failures.push({

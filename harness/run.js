@@ -930,12 +930,29 @@ export async function runCampaign(opts) {
           changedFileCount = null;
         }
 
-        const classified = peers.classifyTrial({
+        // rawUnavailable must reach classifyTrial so truncation / missing raw
+        // never stores as PASS/FAIL/NO_OP when the invoker nominally succeeded.
+        let classified = peers.classifyTrial({
           invokerResult,
           gateResults: safeGateResults,
           changedFileCount,
           timedOut: Boolean(invokerResult.timedOut),
+          rawEvidenceUnavailable: rawUnavailable,
         });
+        // Defense in depth: raw unavailable always stores INFRA_FAIL before write
+        // (including when timeout is also true — never TIMEOUT/PASS/FAIL/NO_OP).
+        if (rawUnavailable && classified.classification !== 'INFRA_FAIL') {
+          classified = {
+            classification: 'INFRA_FAIL',
+            reason: `raw evidence unavailable (forced INFRA_FAIL; prior ${classified.classification}): ${classified.reason}`,
+            evidence: {
+              ...classified.evidence,
+              rawEvidenceUnavailable: true,
+              forcedInfraFail: true,
+              priorClassification: classified.classification,
+            },
+          };
+        }
 
         const finishedAt = new Date().toISOString();
         trialUpdate = {

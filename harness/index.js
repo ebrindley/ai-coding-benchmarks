@@ -122,6 +122,7 @@ export {
   computeResultDigest,
   computeFinalResultDigest,
   buildFinalResultEnvelope,
+  hasRawEvidenceUnavailableFlag,
   isInfraFailureWithoutRawEvidence,
   isUnavailableForReport,
 } from './results.js';
