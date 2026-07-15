@@ -1,6 +1,7 @@
 /**
  * Complete trial result / manifest row builders for strict schema tests.
- * Production write/load/verify require the full required field set.
+ * Production write/load/verify require the full required field set and a
+ * complete frozen manifestTrial on every write/verify boundary.
  */
 
 /**
@@ -54,12 +55,35 @@ export function completeTrialResult(overrides = {}) {
 }
 
 /**
- * writeTrialResult with a complete required-field payload.
+ * Build the default frozen identity row that matches a complete payload.
+ * @param {object} payload
+ * @param {string} trialId
+ * @returns {object}
+ */
+export function frozenFromPayload(payload, trialId) {
+  return completeManifestTrial({
+    id: trialId,
+    experimentId: payload.experimentId,
+    arm: payload.arm,
+    provider: payload.provider,
+    taskId: payload.taskId,
+    repetition: payload.repetition,
+    scheduleSeed: payload.scheduleSeed,
+    invocationPath: payload.invocationPath,
+    requestedModel: payload.requestedModel,
+    postureFingerprint: payload.postureFingerprint,
+    state: payload.state,
+  });
+}
+
+/**
+ * writeTrialResult with a complete required-field payload and frozen row.
  *
  * @param {string} campaignDir
  * @param {string} trialId
- * @param {object} [partial] - trial fields; may include skipManifestTrial:true
- * @param {{ manifestTrial?: object | null }} [opts]
+ * @param {object} [partial]
+ * @param {{ manifestTrial?: object }} [opts]
+ * @returns {Promise<{ path: string, result: object, manifestTrial: object }>}
  */
 export async function writeCompleteTrial(
   campaignDir,
@@ -68,27 +92,13 @@ export async function writeCompleteTrial(
   opts = {},
 ) {
   const { writeTrialResult } = await import('../../harness/results.js');
-  const { skipManifestTrial, ...fields } = partial;
-  const payload = completeTrialResult({ ...fields, id: trialId });
-  /** @type {{ manifestTrial?: object }} */
-  const writeOpts = { ...opts };
-  if (skipManifestTrial === true) {
-    // Explicit opt-out for tests that exercise write without frozen row.
-    delete writeOpts.manifestTrial;
-  } else if (writeOpts.manifestTrial == null) {
-    writeOpts.manifestTrial = completeManifestTrial({
-      id: trialId,
-      experimentId: payload.experimentId,
-      arm: payload.arm,
-      provider: payload.provider,
-      taskId: payload.taskId,
-      repetition: payload.repetition,
-      scheduleSeed: payload.scheduleSeed,
-      invocationPath: payload.invocationPath,
-      requestedModel: payload.requestedModel,
-      postureFingerprint: payload.postureFingerprint,
-      state: payload.state,
-    });
-  }
-  return writeTrialResult(campaignDir, trialId, payload, writeOpts);
+  const payload = completeTrialResult({ ...partial, id: trialId });
+  const manifestTrial =
+    opts.manifestTrial != null
+      ? opts.manifestTrial
+      : frozenFromPayload(payload, trialId);
+  const written = await writeTrialResult(campaignDir, trialId, payload, {
+    manifestTrial,
+  });
+  return { ...written, manifestTrial };
 }

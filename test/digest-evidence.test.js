@@ -109,16 +109,22 @@ describe('digest evidence binding + tamper', () => {
         artifactDigest: artDig,
         ...q.digests,
       });
-      await writeCompleteTrial(campaign, 'trial-a', {
-        id: 'trial-a',
-        classification: 'PASS',
-        exitCode: 0,
-        gateResults: [],
-        artifactDir: artDir,
-        digests,
-      });
+      const { manifestTrial: frozenA } = await writeCompleteTrial(
+        campaign,
+        'trial-a',
+        {
+          id: 'trial-a',
+          classification: 'PASS',
+          exitCode: 0,
+          gateResults: [],
+          artifactDir: artDir,
+          digests,
+        },
+      );
 
-      const ok = await verifyTrialEvidenceDigests(campaign, 'trial-a');
+      const ok = await verifyTrialEvidenceDigests(campaign, 'trial-a', null, {
+        manifestTrial: frozenA,
+      });
       assert.equal(ok.ok, true);
 
       // Tamper on-disk raw stdout
@@ -128,7 +134,9 @@ describe('digest evidence binding + tamper', () => {
         'utf8',
       );
 
-      const bad = await verifyTrialEvidenceDigests(campaign, 'trial-a');
+      const bad = await verifyTrialEvidenceDigests(campaign, 'trial-a', null, {
+        manifestTrial: frozenA,
+      });
       assert.equal(bad.ok, false);
       assert.ok(bad.mismatches.includes('rawOutputDigest'));
       assert.match(String(bad.error), /fail closed|mismatch/i);
@@ -157,22 +165,21 @@ describe('digest evidence binding + tamper', () => {
       await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
       const { computeArtifactDigest } = await import('../harness/results.js');
       const artDig = await computeArtifactDigest(artDir);
-      await writeCompleteTrial(campaign, 'trial-b', {
-        id: 'trial-b',
-        classification: 'FAIL',
-        exitCode: 1,
-        gateResults: [],
-        artifactDir: artDir,
-        digests: buildTrialDigests({
-          resultDigest: computeResultDigest({
-            classification: 'FAIL',
-            gateResults: [],
-            exitCode: 1,
+      const { manifestTrial: frozenB } = await writeCompleteTrial(
+        campaign,
+        'trial-b',
+        {
+          id: 'trial-b',
+          classification: 'FAIL',
+          exitCode: 1,
+          gateResults: [],
+          artifactDir: artDir,
+          digests: buildTrialDigests({
+            artifactDigest: artDig,
+            ...q.digests,
           }),
-          artifactDigest: artDig,
-          ...q.digests,
-        }),
-      });
+        },
+      );
 
       // Mutate digests in result.json while leaving raw bytes intact
       const result = await readTrialResult(campaign, 'trial-b');
@@ -187,7 +194,9 @@ describe('digest evidence binding + tamper', () => {
         'utf8',
       );
 
-      const bad = await verifyTrialEvidenceDigests(campaign, 'trial-b');
+      const bad = await verifyTrialEvidenceDigests(campaign, 'trial-b', result, {
+        manifestTrial: frozenB,
+      });
       assert.equal(bad.ok, false);
       assert.ok(
         bad.mismatches.includes('rawOutputDigest') ||
@@ -366,18 +375,21 @@ describe('digest evidence binding + tamper', () => {
       await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
       const { computeArtifactDigest: cad3 } = await import('../harness/results.js');
       const artDig = await cad3(artDir);
-      await writeCompleteTrial(campaign, 't-good', {
-        id: 't-good',
-        classification: 'PASS',
-        exitCode: 0,
-        gateResults: [],
-        artifactDir: artDir,
-        digests: buildTrialDigests({
-          resultDigest: goodDigest,
-          artifactDigest: artDig,
-          ...q.digests,
-        }),
-      });
+      const { manifestTrial: frozenGood } = await writeCompleteTrial(
+        campaign,
+        't-good',
+        {
+          id: 't-good',
+          classification: 'PASS',
+          exitCode: 0,
+          gateResults: [],
+          artifactDir: artDir,
+          digests: buildTrialDigests({
+            artifactDigest: artDig,
+            ...q.digests,
+          }),
+        },
+      );
 
       // Tamper resultDigest only
       const { readTrialResult } = await import('../harness/results.js');
@@ -388,23 +400,20 @@ describe('digest evidence binding + tamper', () => {
         `${JSON.stringify(r, null, 2)}\n`,
         'utf8',
       );
-      const tamper = await verifyTrialEvidenceDigests(campaign, 't-good');
+      const tamper = await verifyTrialEvidenceDigests(campaign, 't-good', r, {
+        manifestTrial: frozenGood,
+      });
       assert.equal(tamper.ok, false);
       assert.ok(tamper.mismatches.includes('resultDigest'));
 
       // Missing result file for completed trial
       const missing = await verifyCampaignEvidenceDigests(campaign, [
-        { id: 'no-such-trial', state: 'completed' },
+        completeManifestTrial({ id: 'no-such-trial', state: 'completed' }),
       ]);
       assert.equal(missing.ok, false);
       assert.ok(missing.failures.some((f) => f.mismatches.includes('result')));
 
       // INFRA_FAIL without raw: unavailable (not verified)
-      const infraDigest = computeResultDigest({
-        classification: 'INFRA_FAIL',
-        gateResults: [],
-        exitCode: null,
-      });
       const frozenInfra = completeManifestTrial({
         id: 't-infra',
         state: 'failed',
@@ -423,7 +432,12 @@ describe('digest evidence binding + tamper', () => {
         },
         { manifestTrial: frozenInfra },
       );
-      const infra = await verifyTrialEvidenceDigests(campaign, 't-infra');
+      const infra = await verifyTrialEvidenceDigests(
+        campaign,
+        't-infra',
+        null,
+        { manifestTrial: frozenInfra },
+      );
       assert.equal(infra.ok, false);
       assert.equal(infra.unavailable, true);
       assert.equal(infra.mismatches.length, 0);
@@ -453,22 +467,26 @@ describe('digest evidence binding + tamper', () => {
         stdout: 'z\n',
         stderr: '',
       });
-      await writeCompleteTrial(campaign, 't-no-art', {
-        id: 't-no-art',
-        classification: 'PASS',
-        exitCode: 0,
-        gateResults: [],
-        digests: buildTrialDigests({
-          resultDigest: computeResultDigest({
-            classification: 'PASS',
-            gateResults: [],
-            exitCode: 0,
+      const { manifestTrial: frozenNoArt } = await writeCompleteTrial(
+        campaign,
+        't-no-art',
+        {
+          id: 't-no-art',
+          classification: 'PASS',
+          exitCode: 0,
+          gateResults: [],
+          digests: buildTrialDigests({
+            ...q2.digests,
+            // deliberately omit artifactDigest
           }),
-          ...q2.digests,
-          // deliberately omit artifactDigest
-        }),
-      });
-      const noArt = await verifyTrialEvidenceDigests(campaign, 't-no-art');
+        },
+      );
+      const noArt = await verifyTrialEvidenceDigests(
+        campaign,
+        't-no-art',
+        null,
+        { manifestTrial: frozenNoArt },
+      );
       assert.equal(noArt.ok, false);
       assert.ok(
         noArt.mismatches.some((m) => m.includes('artifactDigest')),
@@ -503,37 +521,38 @@ describe('digest evidence binding + tamper', () => {
       const artDig = await computeArtifactDigest(artDir);
       const frozenFixture = 'a'.repeat(64);
 
-      const { result: written } = await writeCompleteTrial(campaign, 't-env', {
-        id: 't-env',
-        experimentId: 'exp-1',
-        arm: 'arm-a',
-        provider: 'p',
-        taskId: 'task-1',
-        repetition: 1,
-        scheduleSeed: 9,
-        invocationPath: 'native-cli',
-        requestedModel: 'm-req',
-        resolvedModel: 'm-res',
-        resolvedModelAvailable: true,
-        resolvedModelSource: 'invoker-explicit',
-        postureFingerprint: 'b'.repeat(64),
-        state: 'completed',
-        classification: 'PASS',
-        classificationReason: 'ok',
-        exitCode: 0,
-        gateResults: [],
-        changedFileCount: 1,
-        startedAt: '2026-07-15T00:00:00.000Z',
-        finishedAt: '2026-07-15T00:00:01.000Z',
-        durationMs: 1000,
-        hashes: { fixtureHash: frozenFixture },
-        artifactDir: artDir,
-        digests: buildTrialDigests({
-          artifactDigest: artDig,
-          fixtureDigest: frozenFixture,
-          ...q.digests,
-        }),
-      });
+      const { result: written, manifestTrial: frozenEnv } =
+        await writeCompleteTrial(campaign, 't-env', {
+          id: 't-env',
+          experimentId: 'exp-1',
+          arm: 'arm-a',
+          provider: 'p',
+          taskId: 'task-1',
+          repetition: 1,
+          scheduleSeed: 9,
+          invocationPath: 'native-cli',
+          requestedModel: 'm-req',
+          resolvedModel: 'm-res',
+          resolvedModelAvailable: true,
+          resolvedModelSource: 'invoker-explicit',
+          postureFingerprint: 'b'.repeat(64),
+          state: 'completed',
+          classification: 'PASS',
+          classificationReason: 'ok',
+          exitCode: 0,
+          gateResults: [],
+          changedFileCount: 1,
+          startedAt: '2026-07-15T00:00:00.000Z',
+          finishedAt: '2026-07-15T00:00:01.000Z',
+          durationMs: 1000,
+          hashes: { fixtureHash: frozenFixture },
+          artifactDir: artDir,
+          digests: buildTrialDigests({
+            artifactDigest: artDig,
+            fixtureDigest: frozenFixture,
+            ...q.digests,
+          }),
+        });
 
       assert.match(written.digests.resultDigest, /^[a-f0-9]{64}$/);
       // Recompute from stored record must match (full envelope, not partial)
@@ -548,28 +567,62 @@ describe('digest evidence binding + tamper', () => {
         `${JSON.stringify(onDisk, null, 2)}\n`,
         'utf8',
       );
-      const modelTamper = await verifyTrialEvidenceDigests(campaign, 't-env');
+      const modelTamper = await verifyTrialEvidenceDigests(
+        campaign,
+        't-env',
+        onDisk,
+        { manifestTrial: frozenEnv },
+      );
       assert.equal(modelTamper.ok, false);
       assert.ok(modelTamper.mismatches.includes('resultDigest'));
 
       // Restore and check fixture authority vs independent expectedFixtureDigest
-      await writeCompleteTrial(campaign, 't-env', {
-        ...written,
-        digests: {
-          ...written.digests,
-          // omit resultDigest — rewrite recomputes
+      await writeCompleteTrial(
+        campaign,
+        't-env',
+        {
+          experimentId: 'exp-1',
+          arm: 'arm-a',
+          provider: 'p',
+          taskId: 'task-1',
+          scheduleSeed: 9,
+          requestedModel: 'm-req',
+          resolvedModel: 'm-res',
+          resolvedModelAvailable: true,
+          resolvedModelSource: 'invoker-explicit',
+          postureFingerprint: 'b'.repeat(64),
+          classification: 'PASS',
+          exitCode: 0,
+          gateResults: [],
+          digests: buildTrialDigests({
+            artifactDigest: artDig,
+            fixtureDigest: frozenFixture,
+            ...q.digests,
+          }),
         },
-      });
-      // Drop stored resultDigest field by re-read after rewrite
+        { manifestTrial: frozenEnv },
+      );
       const restored = await readTrialResult(campaign, 't-env');
-      const good = await verifyTrialEvidenceDigests(campaign, 't-env', restored, {
-        expectedFixtureDigest: frozenFixture,
-      });
+      const good = await verifyTrialEvidenceDigests(
+        campaign,
+        't-env',
+        restored,
+        {
+          expectedFixtureDigest: frozenFixture,
+          manifestTrial: frozenEnv,
+        },
+      );
       assert.equal(good.ok, true);
 
-      const badFix = await verifyTrialEvidenceDigests(campaign, 't-env', restored, {
-        expectedFixtureDigest: 'c'.repeat(64),
-      });
+      const badFix = await verifyTrialEvidenceDigests(
+        campaign,
+        't-env',
+        restored,
+        {
+          expectedFixtureDigest: 'c'.repeat(64),
+          manifestTrial: frozenEnv,
+        },
+      );
       assert.equal(badFix.ok, false);
       assert.ok(badFix.mismatches.includes('fixtureDigest'));
 
@@ -708,24 +761,65 @@ describe('digest evidence binding + tamper', () => {
       assert.match(written.digests.resultDigest, /^[a-f0-9]{64}$/);
       assert.equal(written.id, trialId);
 
+      // --- writeTrialResult rejects missing manifestTrial ---
+      await assert.rejects(
+        () => writeTrialResult(campaign, trialId, baseResult),
+        /manifestTrial.*required|fail closed/i,
+      );
+
       // --- writeTrialResult rejects result.id !== trialId ---
       await assert.rejects(
         () =>
-          writeTrialResult(campaign, trialId, {
-            ...baseResult,
-            id: 'other-trial',
-          }),
+          writeTrialResult(
+            campaign,
+            trialId,
+            {
+              ...baseResult,
+              id: 'other-trial',
+            },
+            { manifestTrial: frozen },
+          ),
         /result\.id.*!== trialId|fail closed/i,
       );
 
       // --- unknown-field rejected on write ---
       await assert.rejects(
         () =>
-          writeTrialResult(campaign, trialId, {
-            ...baseResult,
-            notInContract: true,
-          }),
+          writeTrialResult(
+            campaign,
+            trialId,
+            {
+              ...baseResult,
+              notInContract: true,
+            },
+            { manifestTrial: frozen },
+          ),
         /additional property|schema validation|fail closed/i,
+      );
+
+      // --- scheduleSeed type mismatch (number vs string) is exact ---
+      await assert.rejects(
+        () =>
+          writeTrialResult(
+            campaign,
+            trialId,
+            { ...baseResult, scheduleSeed: '7' },
+            { manifestTrial: frozen },
+          ),
+        /identity|scheduleSeed|fail closed/i,
+      );
+      const seedTypeBad = await verifyTrialEvidenceDigests(
+        campaign,
+        trialId,
+        { ...written, scheduleSeed: '7' },
+        {
+          manifestTrial: frozen,
+        },
+      );
+      assert.equal(seedTypeBad.ok, false);
+      assert.ok(
+        seedTypeBad.mismatches.some((m) => String(m).includes('scheduleSeed')),
+        String(seedTypeBad.mismatches),
       );
 
       // --- swapped / mismatched identity fails verify when manifestTrial provided ---
@@ -909,22 +1003,26 @@ describe('digest evidence binding + tamper', () => {
 
       // rawEvidenceUnavailable still digests full record including the flag
       const infraId = 'trial-infra-dig';
-      const { result: infraWritten } = await writeCompleteTrial(campaign, infraId, {
-        id: infraId,
-        experimentId: 'exp-strict',
-        arm: 'arm-a',
-        provider: 'prov',
-        taskId: 'task-1',
-        repetition: 1,
-        scheduleSeed: 7,
-        invocationPath: 'native-cli',
-        requestedModel: 'model-x',
-        postureFingerprint: posture,
-        state: 'failed',
-        classification: 'INFRA_FAIL',
-        exitCode: null,
-        digests: { rawEvidenceUnavailable: true },
-      });
+      const { result: infraWritten } = await writeCompleteTrial(
+        campaign,
+        infraId,
+        {
+          id: infraId,
+          experimentId: 'exp-strict',
+          arm: 'arm-a',
+          provider: 'prov',
+          taskId: 'task-1',
+          repetition: 1,
+          scheduleSeed: 7,
+          invocationPath: 'native-cli',
+          requestedModel: 'model-x',
+          postureFingerprint: posture,
+          state: 'failed',
+          classification: 'INFRA_FAIL',
+          exitCode: null,
+          digests: { rawEvidenceUnavailable: true },
+        },
+      );
       assert.equal(
         infraWritten.digests.resultDigest,
         computeFinalResultDigest(infraWritten),

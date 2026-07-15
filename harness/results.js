@@ -375,11 +375,17 @@ export async function validateTrialResultSchema(result, opts = {}) {
  * Assert result validates; throw on any schema error.
  * Always enforces required properties (no production opt-out).
  * @param {object} result
- * @param {{ label?: string }} [opts]
+ * @param {{ label?: string, requireRequired?: boolean }} [opts]
  */
 export async function assertTrialResultSchema(result, opts = {}) {
+  // Propagate requireRequired:false as an explicit rejection (same as validate).
+  if (opts.requireRequired === false) {
+    throw new Error(
+      'assertTrialResultSchema: requireRequired:false is not permitted (fail closed)',
+    );
+  }
   const errors = await validateTrialResultSchema(result, {
-    // Always strict — ignore any requireRequired:false attempt
+    requireRequired: true,
   });
   if (errors.length > 0) {
     const label = opts.label || 'trial result';
@@ -391,6 +397,7 @@ export async function assertTrialResultSchema(result, opts = {}) {
 
 /**
  * Normalize identity values for comparison (undefined ≡ null).
+ * Types are otherwise preserved — numeric 1 and string "1" are distinct.
  * @param {unknown} v
  * @returns {unknown}
  */
@@ -401,8 +408,8 @@ function normalizeIdentityValue(v) {
 /**
  * Compare result identity fields against a frozen manifest trial row.
  * Every MANIFEST_IDENTITY_FIELDS entry must be present on the frozen row
- * (authority) and equal the result. Partial test rows fail closed with
- * `manifest:<field>` rather than silently skipping.
+ * (authority) and equal the result with exact type-sensitive comparison.
+ * Partial test rows fail closed with `manifest:<field>`.
  *
  * @param {object} result
  * @param {object} manifestTrial
@@ -431,13 +438,7 @@ export function collectManifestIdentityMismatches(result, manifestTrial) {
     }
     const rv = normalizeIdentityValue(r[field]);
     const mv = normalizeIdentityValue(m[field]);
-    // Stringify scalar ids for stable compare (numbers vs string seeds etc.)
-    if (field === 'repetition' || field === 'scheduleSeed') {
-      if (String(rv) !== String(mv)) {
-        mismatches.push(field);
-      }
-      continue;
-    }
+    // Exact equality: do not coerce number/string (1 !== "1").
     if (rv !== mv) {
       mismatches.push(field);
     }
@@ -526,8 +527,8 @@ function stripGatePreviews(gateResults) {
  * @param {string} campaignDir
  * @param {string} trialId
  * @param {object} result trial-shaped result payload
- * @param {{ manifestTrial?: object }} [opts]
- *   When manifestTrial is provided, identity fields must match the frozen row.
+ * @param {{ manifestTrial: object }} opts
+ *   manifestTrial is required: complete frozen identity authority for the row.
  * @returns {Promise<{ path: string, result: object }>}
  */
 export async function writeTrialResult(campaignDir, trialId, result, opts = {}) {
@@ -535,6 +536,11 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
   if (!trialId) throw new Error('writeTrialResult: trialId is required');
   if (!result || typeof result !== 'object') {
     throw new Error('writeTrialResult: result is required');
+  }
+  if (opts.manifestTrial == null || typeof opts.manifestTrial !== 'object') {
+    throw new Error(
+      'writeTrialResult: complete manifestTrial identity authority is required (fail closed)',
+    );
   }
 
   // results/ and trial dir are private; path is containment-checked
@@ -617,10 +623,12 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
     if (payload[key] === undefined) delete payload[key];
   }
 
-  // Manifest identity binding (fail-closed when provided; requires full frozen row).
-  if (opts.manifestTrial != null) {
-    assertManifestIdentityBinding(payload, opts.manifestTrial, 'writeTrialResult');
-  }
+  // Manifest identity binding — always required, full frozen row, exact types.
+  assertManifestIdentityBinding(
+    payload,
+    opts.manifestTrial,
+    'writeTrialResult',
+  );
 
   // Strict schema enforcement: required properties + additionalProperties:false.
   await assertTrialResultSchema(payload, {
@@ -651,16 +659,14 @@ export async function writeTrialResult(campaignDir, trialId, result, opts = {}) 
 
 /**
  * Read a previously written trial result.
- * Always enforces trial.schema.json (required + additionalProperties) unless
- * opts.validate === false is explicitly requested for forensic recovery only.
- * Production call sites must not pass validate:false.
+ * Always enforces trial.schema.json (required + additionalProperties).
+ * There is no validate opt-out.
  *
  * @param {string} campaignDir
  * @param {string} trialId
- * @param {{ validate?: boolean }} [opts]
  * @returns {Promise<object>}
  */
-export async function readTrialResult(campaignDir, trialId, opts = {}) {
+export async function readTrialResult(campaignDir, trialId) {
   if (!campaignDir) throw new Error('readTrialResult: campaignDir is required');
   if (!trialId) throw new Error('readTrialResult: trialId is required');
 
@@ -668,12 +674,9 @@ export async function readTrialResult(campaignDir, trialId, opts = {}) {
   const p = path.join(dir, 'result.json');
   const text = await readFile(p, 'utf8');
   const result = JSON.parse(text);
-  // Default strict: only explicit validate:false skips (tests/forensics).
-  if (opts.validate !== false) {
-    await assertTrialResultSchema(result, {
-      label: 'readTrialResult',
-    });
-  }
+  await assertTrialResultSchema(result, {
+    label: 'readTrialResult',
+  });
   return result;
 }
 
@@ -967,8 +970,9 @@ export function isUnavailableForReport(result) {
  *   expectedFixtureDigest?: string | null,
  *   requireFixtureAuthority?: boolean,
  *   requireFixtureDigest?: boolean,
- *   manifestTrial?: object | null,
- * }} [opts]
+ *   manifestTrial: object,
+ * }} opts
+ *   manifestTrial is required: complete frozen identity authority.
  * @returns {Promise<{
  *   ok: boolean,
  *   trialId: string,
@@ -1018,37 +1022,30 @@ export async function verifyTrialEvidenceDigests(
     };
   }
 
-  // Manifest identity binding: required for campaign verify (always passed).
-  // Missing frozen authority fails closed.
-  if (opts.manifestTrial == null) {
-    // Standalone verify without manifestTrial is allowed only when caller
-    // explicitly opts out; campaign path always supplies the frozen row.
-    if (opts.requireManifestTrial === true) {
-      return {
-        ok: false,
-        trialId: safeId,
-        mismatches: ['manifestTrial'],
-        unavailable: false,
-        reportable: false,
-        error:
-          'manifest trial identity authority missing (fail closed)',
-      };
-    }
-  } else {
-    const idMismatches = collectManifestIdentityMismatches(
-      result,
-      opts.manifestTrial,
-    );
-    if (idMismatches.length > 0) {
-      return {
-        ok: false,
-        trialId: safeId,
-        mismatches: idMismatches.map((f) => `identity:${f}`),
-        unavailable: false,
-        reportable: false,
-        error: `manifest identity mismatch (fail closed): ${idMismatches.join(', ')}`,
-      };
-    }
+  // Manifest identity binding is always required (complete frozen row).
+  if (opts.manifestTrial == null || typeof opts.manifestTrial !== 'object') {
+    return {
+      ok: false,
+      trialId: safeId,
+      mismatches: ['manifestTrial'],
+      unavailable: false,
+      reportable: false,
+      error: 'manifest trial identity authority missing (fail closed)',
+    };
+  }
+  const idMismatches = collectManifestIdentityMismatches(
+    result,
+    opts.manifestTrial,
+  );
+  if (idMismatches.length > 0) {
+    return {
+      ok: false,
+      trialId: safeId,
+      mismatches: idMismatches.map((f) => `identity:${f}`),
+      unavailable: false,
+      reportable: false,
+      error: `manifest identity mismatch (fail closed): ${idMismatches.join(', ')}`,
+    };
   }
 
   if (!result.digests || typeof result.digests !== 'object') {
@@ -1354,7 +1351,6 @@ export async function verifyCampaignEvidenceDigests(
     const v = await verifyTrialEvidenceDigests(campaignDir, id, result, {
       expectedFixtureDigest,
       requireFixtureAuthority: Boolean(expectedFixtureDigest),
-      requireManifestTrial: true,
       manifestTrial: meta,
     });
     if (v.unavailable || isUnavailableForReport(result)) {

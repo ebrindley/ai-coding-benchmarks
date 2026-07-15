@@ -506,34 +506,55 @@ describe('schema artifacts (trial + report)', () => {
         postureFingerprint: 'e'.repeat(64),
       });
 
+      // Missing manifestTrial rejected
+      await assert.rejects(
+        () => writeTrialResult(campaign, trialId, base),
+        /manifestTrial.*required|fail closed/i,
+      );
+
       // Mismatched id rejected
       await assert.rejects(
         () =>
-          writeTrialResult(campaign, trialId, {
-            ...base,
-            id: 'not-bind-1',
-          }),
+          writeTrialResult(
+            campaign,
+            trialId,
+            {
+              ...base,
+              id: 'not-bind-1',
+            },
+            { manifestTrial },
+          ),
         /result\.id.*trialId|fail closed/i,
       );
 
       // Unknown field rejected
       await assert.rejects(
         () =>
-          writeTrialResult(campaign, trialId, {
-            ...base,
-            sneakyExtra: 1,
-          }),
+          writeTrialResult(
+            campaign,
+            trialId,
+            {
+              ...base,
+              sneakyExtra: 1,
+            },
+            { manifestTrial },
+          ),
         /additional property|schema validation/i,
       );
 
       // Missing required property rejected on write
       await assert.rejects(
         () =>
-          writeTrialResult(campaign, trialId, {
-            id: trialId,
-            digests: {},
-          }),
-        /missing required|schema validation|fail closed/i,
+          writeTrialResult(
+            campaign,
+            trialId,
+            {
+              id: trialId,
+              digests: {},
+            },
+            { manifestTrial },
+          ),
+        /missing required|schema validation|identity|fail closed/i,
       );
 
       // Identity mismatch against manifestTrial rejected on write
@@ -591,12 +612,12 @@ describe('schema artifacts (trial + report)', () => {
 
       // Restore valid result for verify path
       await writeCompleteTrial(campaign, trialId, base, { manifestTrial });
-      // Verify without frozen authority fails when required
+      // Verify without frozen authority always fails closed
       const noAuth = await verifyTrialEvidenceDigests(
         campaign,
         trialId,
         undefined,
-        { requireManifestTrial: true },
+        {},
       );
       assert.equal(noAuth.ok, false);
       assert.ok(
@@ -604,9 +625,14 @@ describe('schema artifacts (trial + report)', () => {
           /manifest/i.test(String(noAuth.error)),
       );
 
-      // requireRequired:false is not permitted
+      // requireRequired:false is not permitted on validate or assert
+      const { assertTrialResultSchema } = await import('../harness/results.js');
       await assert.rejects(
         () => validateTrialResultSchema(onDisk, { requireRequired: false }),
+        /not permitted|fail closed/i,
+      );
+      await assert.rejects(
+        () => assertTrialResultSchema(onDisk, { requireRequired: false }),
         /not permitted|fail closed/i,
       );
     } finally {
