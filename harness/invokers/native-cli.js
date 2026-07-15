@@ -58,8 +58,8 @@ function assertHarnessEnv(env, opts = {}) {
  * @property {string} [signal]
  * @property {string} [promptTransport]
  * @property {boolean} [promptFileUsed] - true when prompt-file transport was used (path not returned; cleaned up)
- * @property {number} [stdoutTruncatedChars] - chars discarded above capture limit
- * @property {number} [stderrTruncatedChars] - chars discarded above capture limit
+ * @property {number} [stdoutTruncatedChars] - bytes discarded above capture limit (legacy field name)
+ * @property {number} [stderrTruncatedChars] - bytes discarded above capture limit (legacy field name)
  * @property {boolean} [rawTruncated] - true when either stream was truncated
  */
 
@@ -306,6 +306,9 @@ export async function invokeNativeCli({
       timedOut: result.timedOut,
       stdout: result.stdout,
       stderr: result.stderr,
+      // Exact retained raw bytes for quarantine digests (chunk-boundary safe).
+      ...(result.stdoutBytes != null ? { stdoutBytes: result.stdoutBytes } : {}),
+      ...(result.stderrBytes != null ? { stderrBytes: result.stderrBytes } : {}),
       promptTransport: transport,
       // Do not return the now-stale absolute prompt path after cleanup.
       ...(promptTempDir ? { promptFileUsed: true } : {}),

@@ -21,8 +21,8 @@ import { spawnControlled } from './spawn-controlled.js';
  * @property {string} [signal]
  * @property {string[]} [argv]
  * @property {null} [resolvedModel]
- * @property {number} [stdoutTruncatedChars] - chars discarded above capture limit
- * @property {number} [stderrTruncatedChars] - chars discarded above capture limit
+ * @property {number} [stdoutTruncatedChars] - bytes discarded above capture limit (legacy field name)
+ * @property {number} [stderrTruncatedChars] - bytes discarded above capture limit (legacy field name)
  * @property {boolean} [rawTruncated] - true when either stream was truncated
  */
 
@@ -218,6 +218,9 @@ export async function invokePoeticSystem({
     timedOut: result.timedOut,
     stdout: result.stdout,
     stderr: result.stderr,
+    // Exact retained raw bytes for quarantine digests (chunk-boundary safe).
+    ...(result.stdoutBytes != null ? { stdoutBytes: result.stdoutBytes } : {}),
+    ...(result.stderrBytes != null ? { stderrBytes: result.stderrBytes } : {}),
     argv: args,
     confinedArgv: result.confinedArgv,
     resolvedModel: null,

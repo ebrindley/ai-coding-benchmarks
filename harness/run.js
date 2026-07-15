@@ -16,6 +16,9 @@ import {
   parseResolvedModelEvidence,
 } from './invokers/index.js';
 import {
+  extractProtocolEvidence,
+} from './results.js';
+import {
   assertCampaignFilesystemBoundary,
   readFileNoFollow,
   writeFileAtomicNoFollow,
@@ -898,12 +901,22 @@ export async function runCampaign(opts) {
         /** @type {{ path?: string, digests?: Record<string, string | null> } | null} */
         let rawQuarantine = null;
         if (!rawUnavailable) {
+          // Prefer exact retained raw bytes when invokers provide them so
+          // quarantine digests match subprocess/file bytes (not re-encoded text).
+          const rawStdout =
+            invokerResult.stdoutBytes != null
+              ? invokerResult.stdoutBytes
+              : invokerResult.stdout;
+          const rawStderr =
+            invokerResult.stderrBytes != null
+              ? invokerResult.stderrBytes
+              : invokerResult.stderr;
           rawQuarantine = await peers.quarantineRawOutput(
             campaignDir,
             trial.id,
             {
-              stdout: invokerResult.stdout,
-              stderr: invokerResult.stderr,
+              stdout: rawStdout,
+              stderr: rawStderr,
               // Only pass a path we already nofollow-verified into campaign storage
               ...(recordedOutputPath ? { outputPath: recordedOutputPath } : {}),
             },
@@ -979,6 +992,13 @@ export async function runCampaign(opts) {
           };
         }
 
+        // Neutral protocol evidence (outcomeKind/reasonCode) — separate from
+        // transport exitCode. Bounded identifiers only; no raw provider text.
+        const protocolEvidence = extractProtocolEvidence(
+          arm.invocationPath,
+          invokerResult,
+        );
+
         const finishedAt = new Date().toISOString();
         trialUpdate = {
           state:
@@ -1000,6 +1020,8 @@ export async function runCampaign(opts) {
               sandboxMode: arm.sandboxMode,
               extra: arm.posture,
             }),
+          // Versioned neutral invocation protocol evidence (not exit status).
+          ...protocolEvidence,
           hashes: {
             fixtureHash: workspace.fixtureHash,
             promptHash: sha256Buffer(
@@ -1059,6 +1081,7 @@ export async function runCampaign(opts) {
           {
             ...trialPublic,
             ...trialUpdate,
+            // Transport exit only — refusal/provider/infra live in protocol fields.
             exitCode: invokerResult.exitCode,
             digests,
           },

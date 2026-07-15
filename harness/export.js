@@ -58,6 +58,10 @@ const RESULT_WHITELIST_KEYS = new Set([
   'classificationReason',
   'reasonCode',
   'outcomeKind',
+  'protocolEvidenceVersion',
+  'protocolSchema',
+  // Transport exit status only (integer); never free-form provider text.
+  'exitCode',
   'hashes',
   'digests',
   'gateResults',
@@ -77,6 +81,7 @@ const RESULT_WHITELIST_KEYS = new Set([
 const BOUNDED_IDENTIFIER_KEYS = new Set([
   'reasonCode',
   'outcomeKind',
+  'protocolSchema',
   'classificationReason',
   'classification',
   'infraFailure',

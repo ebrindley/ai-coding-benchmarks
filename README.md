@@ -53,6 +53,24 @@ treated as secret-bearing, quarantined under the campaign directory, excluded
 from default sanitized export, and should not be committed. Upload/publish of
 results remains external to this repository.
 
+### Neutral protocol evidence (poetic-adapter)
+
+For `poetic-adapter` trials the harness persists versioned, neutral invocation
+outcome fields on each trial result — separate from transport `exitCode`:
+
+- `outcomeKind` — bounded kind (`success`, `timeout`, `provider_error`,
+  `refusal`, `aborted`, `internal_error`, …)
+- `reasonCode` — bounded code (`SUCCESS`, `MODEL_UNRESOLVED`,
+  `PROVIDER_TIMEOUT`, `PROVIDER_ERROR`, …)
+- `protocolEvidenceVersion` — currently `1`
+- `protocolSchema` — `poetic.provider.invoke.result.v1`
+
+These fields are export-safe bounded identifiers only (no raw provider text).
+New reportable poetic-adapter records without them fail closed at evidence
+verify. Subprocess capture joins raw byte chunks before UTF-8 decode so
+multi-byte sequences split across chunk boundaries are not corrupted; invalid
+UTF-8 bytes may still be replaced when a string view is required.
+
 Tests and self-validation use fake executables only; they do not call live
 providers or download fixture dependencies.
 

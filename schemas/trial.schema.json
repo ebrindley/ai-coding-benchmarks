@@ -97,11 +97,23 @@
     },
     "reasonCode": {
       "type": ["string", "null"],
-      "description": "Bounded adapter/outcome reason code (export-safe when identifier-shaped)"
+      "pattern": "^[A-Za-z0-9._-]{1,128}$",
+      "description": "Bounded neutral protocol reason code (e.g. SUCCESS, MODEL_UNRESOLVED, PROVIDER_TIMEOUT). Pattern applies only when a string is present. Free-form provider text is never stored here."
     },
     "outcomeKind": {
       "type": ["string", "null"],
-      "description": "Adapter outcome.kind (e.g. success, timeout, provider_error, refusal)"
+      "pattern": "^[A-Za-z0-9._-]{1,128}$",
+      "description": "Bounded neutral protocol outcome kind (e.g. success, timeout, provider_error, refusal). Independent of transport exitCode. Pattern applies only when a string is present."
+    },
+    "protocolEvidenceVersion": {
+      "type": ["integer", "null"],
+      "enum": [1, null],
+      "description": "Version of the neutral invocation protocol evidence envelope persisted on this trial. Required (value 1) for new reportable poetic-adapter records; null/absent allowed for older records and non-adapter paths where the contract permits."
+    },
+    "protocolSchema": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9._-]{1,128}$",
+      "description": "Stable schema id for protocol evidence (e.g. poetic.provider.invoke.result.v1). Bounded identifier only; never free-form text. Pattern applies only when a string is present."
     },
     "hashes": {
       "type": "object",
@@ -133,7 +145,7 @@
     },
     "exitCode": {
       "type": ["integer", "null"],
-      "description": "Invoker process exit code; null when the process never exited cleanly"
+      "description": "Transport process exit code only; not a substitute for outcomeKind/reasonCode. null when the process never exited cleanly."
     },
     "executionRoot": {
       "type": ["string", "null"],

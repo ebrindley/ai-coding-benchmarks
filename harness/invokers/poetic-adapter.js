@@ -1257,6 +1257,8 @@ export function expectedProviderRawPaths(outputPath, requestId) {
  *   ok: boolean,
  *   stdout: string,
  *   stderr: string,
+ *   stdoutBytes?: Buffer,
+ *   stderrBytes?: Buffer,
  *   unavailable?: boolean,
  *   error?: string,
  * }>}
@@ -1274,6 +1276,9 @@ export async function ingestProviderRawEvidence(outputPath, requestId, opts = {}
   }
 
   try {
+    // Full-file Buffer reads (no streaming chunk boundaries). Exact bytes are
+    // retained for quarantine digests; string forms are one UTF-8 decode.
+    // Invalid UTF-8 still becomes U+FFFD in the string view only.
     const stdoutBuf = await readContainedRegularFileNoFollow(
       paths.scratchRoot,
       paths.stdoutPath,
@@ -1288,6 +1293,8 @@ export async function ingestProviderRawEvidence(outputPath, requestId, opts = {}
     );
     return {
       ok: true,
+      stdoutBytes: stdoutBuf,
+      stderrBytes: stderrBuf,
       stdout: stdoutBuf.toString('utf8'),
       stderr: stderrBuf.toString('utf8'),
     };
@@ -1532,8 +1539,11 @@ export async function invokePoeticAdapter({
       expectedRequestId,
     );
     if (raw.ok) {
+      // Prefer exact raw bytes for quarantine/digest; string is decode view.
       base.stdout = raw.stdout;
       base.stderr = raw.stderr;
+      base.stdoutBytes = raw.stdoutBytes;
+      base.stderrBytes = raw.stderrBytes;
       base.providerRawEvidence = 'actual';
     } else {
       base.stdout = '';

@@ -9,12 +9,22 @@
  *
  * Captured stdout/stderr are bounded. On timeout, the process group/tree is
  * terminated where the platform supports detached process groups.
+ *
+ * Capture fidelity: streams are collected as raw Buffer chunks and joined
+ * before a single UTF-8 decode, so multi-byte sequences split across chunk
+ * boundaries are not corrupted. Capture limits are applied in bytes.
+ *
+ * Remaining limitation: once decoded to a JS string for invoker consumers,
+ * invalid UTF-8 byte sequences are replaced (U+FFFD). Digests of string
+ * quarantine therefore match the decoded text re-encoded as UTF-8, not the
+ * original invalid bytes. Prefer Buffer passthrough when callers need exact
+ * raw bytes (see stdoutBytes/stderrBytes).
  */
 
 import { spawn } from 'node:child_process';
 import { wrapProviderCommand } from './provider-confine.js';
 
-/** Default max chars retained per stream (rest discarded, length recorded). */
+/** Default max bytes retained per stream (rest discarded, length recorded). */
 export const DEFAULT_CAPTURE_LIMIT = 256 * 1024;
 
 /**
@@ -23,10 +33,12 @@ export const DEFAULT_CAPTURE_LIMIT = 256 * 1024;
  * @property {boolean} timedOut
  * @property {string} stdout
  * @property {string} stderr
+ * @property {Buffer} [stdoutBytes] - exact retained raw bytes (pre-string decode)
+ * @property {Buffer} [stderrBytes] - exact retained raw bytes (pre-string decode)
  * @property {string} [infraFailure]
  * @property {string} [signal]
- * @property {number} [stdoutTruncatedChars]
- * @property {number} [stderrTruncatedChars]
+ * @property {number} [stdoutTruncatedChars] - bytes discarded above capture limit
+ * @property {number} [stderrTruncatedChars] - bytes discarded above capture limit
  * @property {boolean} [executionUnavailable]
  * @property {string[]} [confinedArgv]
  * @property {string} [confinedCommand]
@@ -55,23 +67,36 @@ export function resolveHarnessEnv(env) {
 }
 
 /**
- * Append to a bounded buffer.
- * @param {{ text: string, truncated: number }} buf
- * @param {string} chunk
- * @param {number} limit
+ * Append raw bytes to a bounded byte buffer (chunk-boundary safe).
+ * @param {{ chunks: Buffer[], length: number, truncated: number }} buf
+ * @param {Buffer} chunk
+ * @param {number} limit - max bytes retained
  */
-function appendBounded(buf, chunk, limit) {
-  if (buf.text.length >= limit) {
+function appendBoundedBytes(buf, chunk, limit) {
+  if (!Buffer.isBuffer(chunk) || chunk.length === 0) return;
+  if (buf.length >= limit) {
     buf.truncated += chunk.length;
     return;
   }
-  const room = limit - buf.text.length;
+  const room = limit - buf.length;
   if (chunk.length <= room) {
-    buf.text += chunk;
+    buf.chunks.push(chunk);
+    buf.length += chunk.length;
   } else {
-    buf.text += chunk.slice(0, room);
+    buf.chunks.push(chunk.subarray(0, room));
+    buf.length += room;
     buf.truncated += chunk.length - room;
   }
+}
+
+/**
+ * @param {{ chunks: Buffer[], length: number, truncated: number }} buf
+ * @returns {Buffer}
+ */
+function concatBoundedBytes(buf) {
+  if (buf.chunks.length === 0) return Buffer.alloc(0);
+  if (buf.chunks.length === 1) return buf.chunks[0];
+  return Buffer.concat(buf.chunks, buf.length);
 }
 
 /**
@@ -176,14 +201,30 @@ export function spawnRaw({
       return;
     }
 
-    /** @type {{ text: string, truncated: number }} */
-    const outBuf = { text: '', truncated: 0 };
-    /** @type {{ text: string, truncated: number }} */
-    const errBuf = { text: '', truncated: 0 };
+    /** @type {{ chunks: Buffer[], length: number, truncated: number }} */
+    const outBuf = { chunks: [], length: 0, truncated: 0 };
+    /** @type {{ chunks: Buffer[], length: number, truncated: number }} */
+    const errBuf = { chunks: [], length: 0, truncated: 0 };
     let timedOut = false;
     /** @type {NodeJS.Timeout | null} */
     let timer = null;
     let settled = false;
+
+    /**
+     * @returns {{ stdout: string, stderr: string, stdoutBytes: Buffer, stderrBytes: Buffer }}
+     */
+    const materializeStreams = () => {
+      const stdoutBytes = concatBoundedBytes(outBuf);
+      const stderrBytes = concatBoundedBytes(errBuf);
+      // Single decode after join: multi-byte sequences split across chunk
+      // boundaries stay intact. Invalid UTF-8 still becomes U+FFFD in strings.
+      return {
+        stdoutBytes,
+        stderrBytes,
+        stdout: stdoutBytes.toString('utf8'),
+        stderr: stderrBytes.toString('utf8'),
+      };
+    };
 
     const finish = (/** @type {SpawnResult} */ result) => {
       if (settled) return;
@@ -201,36 +242,44 @@ export function spawnRaw({
       resolve(result);
     };
 
+    // Collect raw Buffer chunks (no setEncoding) so UTF-8 is decoded once
+    // after concatenation, not per chunk boundary.
     if (child.stdout) {
-      child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk) => {
-        appendBounded(outBuf, String(chunk), limit);
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        appendBoundedBytes(outBuf, buf, limit);
       });
     }
     if (child.stderr) {
-      child.stderr.setEncoding('utf8');
       child.stderr.on('data', (chunk) => {
-        appendBounded(errBuf, String(chunk), limit);
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        appendBoundedBytes(errBuf, buf, limit);
       });
     }
 
     child.on('error', (err) => {
+      const streams = materializeStreams();
       finish({
         exitCode: null,
         timedOut: false,
-        stdout: outBuf.text,
-        stderr: errBuf.text,
+        stdout: streams.stdout,
+        stderr: streams.stderr,
+        stdoutBytes: streams.stdoutBytes,
+        stderrBytes: streams.stderrBytes,
         infraFailure: `process error: ${err.message}`,
       });
     });
 
     child.on('close', (code, signal) => {
+      const streams = materializeStreams();
       /** @type {SpawnResult} */
       const result = {
         exitCode: code,
         timedOut,
-        stdout: outBuf.text,
-        stderr: errBuf.text,
+        stdout: streams.stdout,
+        stderr: streams.stderr,
+        stdoutBytes: streams.stdoutBytes,
+        stderrBytes: streams.stderrBytes,
       };
       if (signal) {
         result.signal = signal;
