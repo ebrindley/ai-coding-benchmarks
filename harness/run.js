@@ -15,6 +15,7 @@ import { computePostureFingerprint } from './posture.js';
 import {
   parseResolvedModelEvidence,
 } from './invokers/index.js';
+import { readFileNoFollow, readTextNoFollow, UnsafePathError } from './safe-fs.js';
 
 /**
  * Best-effort chmod for private modes (ignore platforms that lack mode bits).
@@ -206,10 +207,12 @@ export function tasksByIdFromLoad(loaded) {
  */
 async function resolveModelEvidence(invocationPath, invokerResult, outputPath) {
   if (invocationPath === 'poetic-adapter') {
+    // Prefer already-parsed invoker artifact (never re-open a path that may be a symlink).
     let artifact = invokerResult?.parsedOutput ?? null;
     if (!artifact && outputPath) {
       try {
-        const text = await readFile(outputPath, 'utf8');
+        // Fail closed on symlink/special files — do not fall back to following links.
+        const text = await readTextNoFollow(String(outputPath));
         artifact = JSON.parse(text);
       } catch {
         artifact = null;
@@ -644,21 +647,29 @@ export async function runCampaign(opts) {
         });
 
         // Trusted harness only: copy scratch request/output into campaign storage
-        // after the confined provider process has exited.
+        // after the confined provider process has exited. Never follow symlinks
+        // (provider may replace scratch files with links to host content).
         try {
-          const reqBody = await readFile(requestPath);
+          const reqBody = await readFileNoFollow(requestPath);
           await peers.writePrivateFile(campaignRequestPath, reqBody);
-        } catch {
-          /* request may be missing on hard failure */
+        } catch (err) {
+          if (err instanceof UnsafePathError) {
+            log(`scratch request refused (unsafe path): ${err.message}`);
+          }
+          /* missing or unsafe request */
         }
-        let recordedOutputPath = outputPath;
+        /** @type {string | null} */
+        let recordedOutputPath = null;
         try {
-          await access(outputPath);
-          const outBody = await readFile(outputPath);
+          const outBody = await readFileNoFollow(outputPath);
           await peers.writePrivateFile(campaignOutputPath, outBody);
           recordedOutputPath = campaignOutputPath;
-        } catch {
-          /* output may be absent on infra failure */
+        } catch (err) {
+          if (err instanceof UnsafePathError) {
+            log(`scratch output refused (unsafe path): ${err.message}`);
+          }
+          // Do not fall back to reading invokerResult.outputPath if it may be a symlink.
+          recordedOutputPath = null;
         }
 
         const rawQuarantine = await peers.quarantineRawOutput(
@@ -667,13 +678,15 @@ export async function runCampaign(opts) {
           {
             stdout: invokerResult.stdout,
             stderr: invokerResult.stderr,
-            outputPath: invokerResult.outputPath || recordedOutputPath,
+            // Only pass a path we already nofollow-verified into campaign storage
+            ...(recordedOutputPath ? { outputPath: recordedOutputPath } : {}),
           },
         );
 
         const modelEv = await resolveModelEvidence(
           arm.invocationPath,
           invokerResult,
+          // Prefer parsedOutput from invoker; only open campaign copy (trusted write)
           recordedOutputPath,
         );
 

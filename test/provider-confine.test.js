@@ -14,7 +14,7 @@ import {
   readFile,
   chmod,
   rm,
-  realpath,
+  access,
 } from 'node:fs/promises';
 
 describe('provider confinement', () => {
@@ -151,7 +151,6 @@ describe('provider confinement', () => {
         confinement: conf,
         timeoutMs: 10_000,
       });
-      // Non-zero exit, empty, or infra failure — must not return secret body
       assert.ok(
         readCamp.exitCode !== 0 ||
           readCamp.executionUnavailable ||
@@ -159,28 +158,46 @@ describe('provider confinement', () => {
       );
       assert.ok(!(readCamp.stdout || '').includes('campaign-secret-body'));
 
-      // Workspace write/read must succeed
+      // Argv-safe workspace write/read: no shell. Trusted harness seeds a file in
+      // the workspace *before* spawn; confined child must /bin/cp it to the marker
+      // and later /bin/cat it back (no harness write fallback after spawn).
+      const seed = path.join(workspace, 'seed.txt');
+      await writeFile(seed, 'workspace-ok\n', 'utf8');
+      const cpBin = (await access('/bin/cp').then(() => '/bin/cp').catch(() => null))
+        || (await access('/usr/bin/cp').then(() => '/usr/bin/cp').catch(() => null));
+      if (!cpBin) {
+        t.skip('/bin/cp unavailable for workspace probe');
+        return;
+      }
+
       const writeWs = await spawnControlled({
-        command: '/bin/sh',
-        args: ['-c', `echo workspace-ok > "${marker}"`],
+        command: cpBin,
+        args: [seed, marker],
         cwd: workspace,
         campaignDir: campaign,
         confine: true,
         confinement: conf,
         timeoutMs: 10_000,
       });
-      // sh -c under confinement: on sandbox-exec allow-default this should work
-      if (writeWs.exitCode === 0) {
-        assert.equal(
-          (await readFile(marker, 'utf8')).trim(),
-          'workspace-ok',
-        );
-      } else {
-        // Some seatbelt profiles may still block /bin/sh -c path forms; use printf via write in node from harness instead
-        // Document: workspace bind is present; probe uses direct write from harness as fallback assertion of tree separation
-        await writeFile(marker, 'workspace-ok\n', 'utf8');
-        assert.equal((await readFile(marker, 'utf8')).trim(), 'workspace-ok');
-      }
+      assert.equal(
+        writeWs.exitCode,
+        0,
+        `confined cp must succeed in workspace: ${writeWs.infraFailure || writeWs.stderr || writeWs.stdout}`,
+      );
+      assert.equal(writeWs.executionUnavailable, undefined);
+      await access(marker);
+
+      const readWs = await spawnControlled({
+        command: '/bin/cat',
+        args: [marker],
+        cwd: workspace,
+        campaignDir: campaign,
+        confine: true,
+        confinement: conf,
+        timeoutMs: 10_000,
+      });
+      assert.equal(readWs.exitCode, 0, readWs.infraFailure || readWs.stderr);
+      assert.equal((readWs.stdout || '').trim(), 'workspace-ok');
     } finally {
       await rm(campaign, { recursive: true, force: true });
       await rm(workspace, { recursive: true, force: true });

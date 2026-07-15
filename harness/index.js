@@ -136,3 +136,9 @@ export {
   buildProviderSeatbeltProfile,
   buildProviderConfinedArgv,
 } from './invokers/index.js';
+export {
+  readFileNoFollow,
+  readTextNoFollow,
+  copyFileNoFollow,
+  UnsafePathError,
+} from './safe-fs.js';

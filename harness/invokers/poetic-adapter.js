@@ -17,6 +17,7 @@
 import { writeFile, mkdir, readFile, lstat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { spawnControlled } from './spawn-controlled.js';
+import { readTextNoFollow, UnsafePathError } from '../safe-fs.js';
 
 /** Bridge result schema id. */
 export const POETIC_INVOKE_RESULT_SCHEMA = 'poetic.provider.invoke.result.v1';
@@ -360,8 +361,21 @@ async function readAndParseOutput(outputPath) {
 
   let text;
   try {
-    text = await readFile(outputPath, 'utf8');
+    // No-follow read: refuse symlink-swapped output after provider exit.
+    text = await readTextNoFollow(outputPath);
   } catch (err) {
+    if (err instanceof UnsafePathError) {
+      return {
+        valid: false,
+        success: false,
+        outcomeKind: null,
+        reasonCode: null,
+        timedOut: false,
+        infraFailure: err.message,
+        parseError: err.code || 'unsafe-path',
+        artifact: null,
+      };
+    }
     const message = err instanceof Error ? err.message : String(err);
     return {
       valid: false,

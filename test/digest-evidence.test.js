@@ -90,12 +90,18 @@ describe('digest evidence binding + tamper', () => {
         stdout: 'original-stdout\n',
         stderr: 'e\n',
       });
+      const artDir = path.join(campaign, 'artifacts', 'trial-a');
+      await mkdir(artDir, { recursive: true });
+      await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
+      const { computeArtifactDigest } = await import('../harness/results.js');
+      const artDig = await computeArtifactDigest(artDir);
       const digests = buildTrialDigests({
         resultDigest: computeResultDigest({
           classification: 'PASS',
           gateResults: [],
           exitCode: 0,
         }),
+        artifactDigest: artDig,
         ...q.digests,
       });
       await writeTrialResult(campaign, 'trial-a', {
@@ -103,6 +109,7 @@ describe('digest evidence binding + tamper', () => {
         classification: 'PASS',
         exitCode: 0,
         gateResults: [],
+        artifactDir: artDir,
         digests,
       });
 
@@ -140,17 +147,24 @@ describe('digest evidence binding + tamper', () => {
       const q = await quarantineRawOutput(campaign, 'trial-b', {
         stdout: 'body\n',
       });
+      const artDir = path.join(campaign, 'artifacts', 'trial-b');
+      await mkdir(artDir, { recursive: true });
+      await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
+      const { computeArtifactDigest } = await import('../harness/results.js');
+      const artDig = await computeArtifactDigest(artDir);
       await writeTrialResult(campaign, 'trial-b', {
         id: 'trial-b',
         classification: 'FAIL',
         exitCode: 1,
         gateResults: [],
+        artifactDir: artDir,
         digests: buildTrialDigests({
           resultDigest: computeResultDigest({
             classification: 'FAIL',
             gateResults: [],
             exitCode: 1,
           }),
+          artifactDigest: artDig,
           ...q.digests,
         }),
       });
@@ -198,17 +212,24 @@ describe('digest evidence binding + tamper', () => {
         stdout: 'export-raw\n',
         stderr: '',
       });
+      const artDir = path.join(campaign, 'artifacts', 't1');
+      await mkdir(artDir, { recursive: true });
+      await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
+      const { computeArtifactDigest: cad } = await import('../harness/results.js');
+      const artDig = await cad(artDir);
       await writeTrialResult(campaign, 't1', {
         id: 't1',
         classification: 'PASS',
         exitCode: 0,
         gateResults: [],
+        artifactDir: artDir,
         digests: buildTrialDigests({
           resultDigest: computeResultDigest({
             classification: 'PASS',
             gateResults: [],
             exitCode: 0,
           }),
+          artifactDigest: artDig,
           ...q.digests,
         }),
       });
@@ -271,17 +292,24 @@ describe('digest evidence binding + tamper', () => {
         stdout: 'x\n',
         stderr: '',
       });
+      const artDir = path.join(campaign, 'artifacts', 't1');
+      await mkdir(artDir, { recursive: true });
+      await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
+      const { computeArtifactDigest: cad2 } = await import('../harness/results.js');
+      const artDig = await cad2(artDir);
       await writeTrialResult(campaign, 't1', {
         id: 't1',
         classification: 'PASS',
         exitCode: 0,
         gateResults: [],
+        artifactDir: artDir,
         digests: buildTrialDigests({
           resultDigest: computeResultDigest({
             classification: 'PASS',
             gateResults: [],
             exitCode: 0,
           }),
+          artifactDigest: artDig,
           ...q.digests,
         }),
       });
@@ -334,13 +362,20 @@ describe('digest evidence binding + tamper', () => {
         gateResults: [],
         exitCode: 0,
       });
+      const artDir = path.join(campaign, 'artifacts', 't-good');
+      await mkdir(artDir, { recursive: true });
+      await writeFile(path.join(artDir, 'meta.json'), '{}\n', 'utf8');
+      const { computeArtifactDigest: cad3 } = await import('../harness/results.js');
+      const artDig = await cad3(artDir);
       await writeTrialResult(campaign, 't-good', {
         id: 't-good',
         classification: 'PASS',
         exitCode: 0,
         gateResults: [],
+        artifactDir: artDir,
         digests: buildTrialDigests({
           resultDigest: goodDigest,
+          artifactDigest: artDig,
           ...q.digests,
         }),
       });
@@ -392,6 +427,33 @@ describe('digest evidence binding + tamper', () => {
       assert.equal(campInfra.ok, true);
       assert.equal(campInfra.verified, 0);
       assert.equal(campInfra.unavailable, 1);
+
+      // Missing artifactDigest fails closed for reportable trials
+      const q2 = await quarantineRawOutput(campaign, 't-no-art', {
+        stdout: 'z\n',
+        stderr: '',
+      });
+      await writeTrialResult(campaign, 't-no-art', {
+        id: 't-no-art',
+        classification: 'PASS',
+        exitCode: 0,
+        gateResults: [],
+        digests: buildTrialDigests({
+          resultDigest: computeResultDigest({
+            classification: 'PASS',
+            gateResults: [],
+            exitCode: 0,
+          }),
+          ...q2.digests,
+          // deliberately omit artifactDigest
+        }),
+      });
+      const noArt = await verifyTrialEvidenceDigests(campaign, 't-no-art');
+      assert.equal(noArt.ok, false);
+      assert.ok(
+        noArt.mismatches.some((m) => m.includes('artifactDigest')),
+        String(noArt.mismatches),
+      );
     } finally {
       await rm(campaign, { recursive: true, force: true });
     }

@@ -15,7 +15,6 @@ import {
   readFile,
   rename,
   writeFile,
-  copyFile,
   chmod,
   access,
 } from 'node:fs/promises';
@@ -28,6 +27,7 @@ import {
   digestArtifactDir,
   digestRawOutputBytes,
 } from './digest.js';
+import { copyFileNoFollow, UnsafePathError } from './safe-fs.js';
 
 /**
  * Lexical result dir (sync helper). Prefer resolveTrialResultDir at write boundaries.
@@ -305,13 +305,15 @@ export async function quarantineRawOutput(campaignDir, trialId, raw = {}) {
   if (raw.outputPath) {
     try {
       const dest = path.join(dir, 'output.json');
-      await copyFile(raw.outputPath, dest);
+      // Never follow a provider-swapped symlink to host content.
+      await copyFileNoFollow(String(raw.outputPath), dest);
       await tryChmod(dest, 0o600);
-    } catch {
-      await writePrivateFile(
-        path.join(dir, 'output-missing.txt'),
-        'source not copied (path omitted from quarantine metadata)\n',
-      );
+    } catch (err) {
+      const note =
+        err instanceof UnsafePathError
+          ? `source refused (unsafe path / symlink): ${err.code}\n`
+          : 'source not copied (path omitted from quarantine metadata)\n';
+      await writePrivateFile(path.join(dir, 'output-missing.txt'), note);
     }
   }
 
@@ -491,11 +493,12 @@ export async function verifyTrialEvidenceDigests(
     };
   }
 
-  // Reportable completed/failed trials require full raw + result bindings.
+  // Reportable completed/failed trials require full result + raw + artifact bindings.
   for (const key of [
     'rawOutputDigest',
     'rawStdoutSha256',
     'rawStderrSha256',
+    'artifactDigest',
   ]) {
     if (stored[key] == null || stored[key] === '') {
       mismatches.push(`${key}-missing`);
@@ -545,25 +548,30 @@ export async function verifyTrialEvidenceDigests(
     mismatches.push('rawOutputFileSha256');
   }
 
-  // Artifact digests when stored (required key when present).
+  // Artifact digest is required for reportable trials (cannot skip by deleting key).
   const artifactDir =
     opts.artifactDir ??
     (typeof result.artifactDir === 'string' ? result.artifactDir : null);
-  if (stored.artifactDigest != null) {
-    if (!artifactDir) {
-      mismatches.push('artifactDir-missing');
-    } else {
-      try {
-        const art = await computeArtifactDigest(artifactDir);
-        recomputed.artifactDigest = art;
-        if (art != null && stored.artifactDigest !== art) {
-          mismatches.push('artifactDigest');
-        }
-      } catch (err) {
+  if (!artifactDir) {
+    mismatches.push('artifactDir-missing');
+  } else {
+    try {
+      const art = await computeArtifactDigest(artifactDir);
+      recomputed.artifactDigest = art;
+      if (art == null) {
+        mismatches.push('artifactDigest-unavailable');
+      } else if (
+        stored.artifactDigest != null &&
+        stored.artifactDigest !== art
+      ) {
         mismatches.push('artifactDigest');
-        recomputed.artifactDigestError =
-          err instanceof Error ? err.message : String(err);
+      } else if (stored.artifactDigest == null || stored.artifactDigest === '') {
+        mismatches.push('artifactDigest-missing');
       }
+    } catch (err) {
+      mismatches.push('artifactDigest');
+      recomputed.artifactDigestError =
+        err instanceof Error ? err.message : String(err);
     }
   }
 
