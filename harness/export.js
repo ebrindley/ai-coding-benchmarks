@@ -1,22 +1,20 @@
 /**
- * Sanitized campaign export bundle (whitelist-based).
+ * Sanitized campaign export bundle (whitelist-based, fail-closed).
  *
  * Default export includes only:
- * - sanitized manifest.json
- * - results/<id>/result.json (digests/metadata only)
- * - report.json / summary.txt
+ * - sanitized manifest.json (from validated loadManifest)
+ * - results/<id>/result.json for verified reportable trials only
+ * - report.json / summary.txt rebuilt from verified results
  * - EXPORT_README.txt
  *
- * Never exports: raw/, prompt-bearing request/output (even nested),
- * workspaces, locks, tmp files, local usernames, absolute paths,
- * free-form reason strings (quarantine only). Adapter reasonCode /
- * outcome fields are constrained to bounded identifier syntax.
+ * Never exports: unmanifested results, source report/summary as-is,
+ * prompt-bearing request/output, workspaces, locks, free-form secrets.
+ * includeRaw copies only whitelisted raw files for verified trial IDs
+ * via nofollow regular-file I/O (never follows symlinks).
  */
 
 import {
   mkdir,
-  readdir,
-  readFile,
   writeFile,
 } from 'node:fs/promises';
 import path from 'node:path';
@@ -26,6 +24,8 @@ import {
   isBoundedIdentifier,
   sanitizeBoundedIdentifier,
 } from './gates.js';
+import { assertSafeTrialId, trialPathUnder } from './paths.js';
+import { copyFileNoFollow, UnsafePathError } from './safe-fs.js';
 
 /** Top-level result keys allowed in sanitized export (whitelist). */
 const RESULT_WHITELIST_KEYS = new Set([
@@ -99,6 +99,17 @@ const PROMPT_BEARING_KEYS = new Set([
   'detail',
   'details',
   'errorMessage',
+]);
+
+/**
+ * Expected raw quarantine filenames (whitelist). Never enumerate arbitrary names.
+ */
+export const EXPORT_RAW_FILE_WHITELIST = Object.freeze([
+  'stdout.txt',
+  'stderr.txt',
+  'output.json',
+  'meta.json',
+  'output-missing.txt',
 ]);
 
 /**
@@ -265,17 +276,144 @@ function sanitizeResult(result, campaignDir) {
 }
 
 /**
+ * Sanitize a loaded campaign manifest for export (no absolute paths / usernames).
+ * @param {object} manifest
+ * @param {string} srcRoot
+ * @returns {object}
+ */
+function sanitizeManifestForExport(manifest, srcRoot) {
+  /** @type {Record<string, unknown>} */
+  const sanitizedManifest = {
+    campaignId: manifest.campaignId,
+    schemaVersion: manifest.schemaVersion,
+    status: manifest.status,
+    experimentId: manifest.experimentId ?? null,
+    lock: { held: false, owner: null, acquiredAt: null, path: null },
+    trials: Array.isArray(manifest.trials)
+      ? manifest.trials.map((t) => {
+          if (!t || typeof t !== 'object') return t;
+          const {
+            id,
+            state,
+            arm,
+            taskId,
+            repetition,
+            invocationPath,
+            requestedModel,
+            resolvedModel,
+            postureFingerprint,
+            classification,
+            provider,
+            scheduleSeed,
+          } = t;
+          return {
+            id,
+            state,
+            arm,
+            taskId,
+            repetition,
+            invocationPath,
+            requestedModel,
+            resolvedModel,
+            postureFingerprint,
+            classification,
+            provider,
+            scheduleSeed,
+          };
+        })
+      : [],
+    corpusRevision: manifest.corpusRevision ?? null,
+    harnessRevision: manifest.harnessRevision ?? null,
+    host: manifest.host
+      ? (() => {
+          const h = { ...manifest.host };
+          delete h.user;
+          delete h.username;
+          return h;
+        })()
+      : undefined,
+    scheduleSeed: manifest.scheduleSeed ?? null,
+    createdAt: manifest.createdAt,
+    updatedAt: manifest.updatedAt,
+    completedAt: manifest.completedAt ?? null,
+  };
+  return /** @type {object} */ (
+    redactHostIdentifying(stripPromptBearing(sanitizedManifest), srcRoot)
+  );
+}
+
+/**
+ * Copy whitelisted raw files for a verified trial with nofollow + containment.
+ * Rejects symlink/unsafe material rather than following it.
+ *
+ * @param {string} campaignDir
+ * @param {string} trialId
+ * @param {string} destRoot
+ * @param {string[]} warnings
+ * @returns {Promise<number>} files copied
+ */
+async function copyVerifiedTrialRaw(campaignDir, trialId, destRoot, warnings) {
+  const safeId = assertSafeTrialId(trialId);
+  const rawRoot = path.join(path.resolve(campaignDir), 'raw');
+  const srcDir = await trialPathUnder(rawRoot, safeId);
+  const destDir = path.join(destRoot, 'raw', safeId);
+  await mkdir(destDir, { recursive: true });
+
+  let copied = 0;
+  for (const fname of EXPORT_RAW_FILE_WHITELIST) {
+    const from = path.join(srcDir, fname);
+    // Containment: lexical join under srcDir must stay under raw root
+    if (!from.startsWith(srcDir + path.sep) && from !== srcDir) {
+      warnings.push(`raw path refused for ${safeId}/${fname}: not under trial raw dir`);
+      continue;
+    }
+    const to = path.join(destDir, fname);
+    try {
+      await copyFileNoFollow(from, to);
+      copied += 1;
+    } catch (err) {
+      if (err instanceof UnsafePathError) {
+        warnings.push(
+          `raw refused (unsafe/symlink) for ${safeId}/${fname}: ${err.code || err.message}`,
+        );
+        continue;
+      }
+      const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+      if (code === 'ENOENT') {
+        // Optional raw file missing is fine
+        continue;
+      }
+      warnings.push(
+        `raw copy failed for ${safeId}/${fname}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return copied;
+}
+
+/**
+ * Fail-closed sanitized export.
+ *
+ * Always verifies evidence. Exports only verified reportable trial results
+ * that correspond to manifest terminal trials. Rebuilds report/summary from
+ * those results; never reads source report.json / summary.txt.
+ *
  * @param {object} opts
  * @param {string} opts.campaignDir
  * @param {string} opts.outDir
  * @param {boolean} [opts.includeRaw=false]
+ * @returns {Promise<{
+ *   outDir: string,
+ *   filesCopied: number,
+ *   includeRaw: boolean,
+ *   verified: number,
+ *   warnings: string[],
+ * }>}
  */
 export async function exportSanitizedBundle({
   campaignDir,
   outDir,
   includeRaw = false,
-  /** @type {boolean} [skipEvidenceVerify=false] */
-  skipEvidenceVerify = false,
 }) {
   if (!campaignDir) {
     throw new Error('exportSanitizedBundle: campaignDir is required');
@@ -290,203 +428,138 @@ export async function exportSanitizedBundle({
   const warnings = [];
   let filesCopied = 0;
 
-  // Before export: full evidence gate (resultDigest envelope, raw/artifact,
-  // fixture authority). Unavailable/unverified records fail closed — no export.
-  if (!skipEvidenceVerify) {
-    const { verifyCampaignEvidenceDigests } = await import('./results.js');
-    /** @type {object[]} */
-    let trials = [];
-    try {
-      const manifest = JSON.parse(
-        await readFile(path.join(srcRoot, 'manifest.json'), 'utf8'),
-      );
-      trials = Array.isArray(manifest.trials) ? manifest.trials : [];
-    } catch {
-      trials = [];
-    }
-    if (trials.length > 0) {
-      const check = await verifyCampaignEvidenceDigests(srcRoot, trials, undefined, {
-        failOnUnavailable: true,
-      });
-      if (!check.ok) {
-        throw new Error(
-          check.error ||
-            'exportSanitizedBundle: evidence digest verification failed (fail closed)',
-        );
-      }
-      // Existing report.json is never trusted without the gate above; export
-      // still copies report only when evidence is fully verified.
-      if (check.unavailable > 0) {
-        throw new Error(
-          'exportSanitizedBundle: unavailable trial evidence present (fail closed; no benchmark export)',
-        );
-      }
-    }
+  // 1–2. Require a valid manifest (no silent continue without one).
+  const { loadManifest } = await import('./manifest.js');
+  let manifest;
+  try {
+    manifest = await loadManifest(srcRoot);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `exportSanitizedBundle: valid campaign manifest required (fail closed): ${message}`,
+    );
+  }
+
+  const trials = Array.isArray(manifest.trials) ? manifest.trials : [];
+  const terminal = trials.filter(
+    (t) => t && (t.state === 'completed' || t.state === 'failed'),
+  );
+  if (terminal.length === 0) {
+    throw new Error(
+      'exportSanitizedBundle: no completed/failed trials eligible for export (fail closed)',
+    );
+  }
+
+  // 3. Full evidence gate; only verified reportable results are exported.
+  const { verifyCampaignEvidenceDigests } = await import('./results.js');
+  const evidence = await verifyCampaignEvidenceDigests(
+    srcRoot,
+    trials,
+    undefined,
+    { failOnUnavailable: true },
+  );
+  if (!evidence.ok) {
+    throw new Error(
+      evidence.error ||
+        'exportSanitizedBundle: evidence digest verification failed (fail closed)',
+    );
+  }
+  if (evidence.unavailable > 0) {
+    throw new Error(
+      'exportSanitizedBundle: unavailable trial evidence present (fail closed; no benchmark export)',
+    );
+  }
+
+  const reportable = Array.isArray(evidence.reportableResults)
+    ? evidence.reportableResults
+    : [];
+  if (reportable.length === 0) {
+    throw new Error(
+      'exportSanitizedBundle: no verified reportable results to export (fail closed)',
+    );
+  }
+
+  // Only IDs that are both manifest-terminal and verified reportable.
+  /** @type {Set<string>} */
+  const terminalIds = new Set(terminal.map((t) => String(t.id)));
+  const exportResults = reportable.filter(
+    (r) => r && r.id != null && terminalIds.has(String(r.id)),
+  );
+  if (exportResults.length === 0) {
+    throw new Error(
+      'exportSanitizedBundle: verified results do not match manifest terminal trials (fail closed)',
+    );
   }
 
   await mkdir(destRoot, { recursive: true });
 
-  // Whitelist: manifest.json
-  try {
-    const manifest = JSON.parse(
-      await readFile(path.join(srcRoot, 'manifest.json'), 'utf8'),
-    );
-    /** @type {Record<string, unknown>} */
-    const sanitizedManifest = {
-      campaignId: manifest.campaignId,
-      schemaVersion: manifest.schemaVersion,
-      status: manifest.status,
-      experimentId: manifest.experimentId ?? null,
-      lock: { held: false, owner: null, acquiredAt: null, path: null },
-      trials: Array.isArray(manifest.trials)
-        ? manifest.trials.map((t) => {
-            if (!t || typeof t !== 'object') return t;
-            const {
-              id,
-              state,
-              arm,
-              taskId,
-              repetition,
-              invocationPath,
-              requestedModel,
-              resolvedModel,
-              postureFingerprint,
-              classification,
-              provider,
-              scheduleSeed,
-            } = t;
-            return {
-              id,
-              state,
-              arm,
-              taskId,
-              repetition,
-              invocationPath,
-              requestedModel,
-              resolvedModel,
-              postureFingerprint,
-              classification,
-              provider,
-              scheduleSeed,
-            };
-          })
-        : [],
-      corpusRevision: manifest.corpusRevision ?? null,
-      harnessRevision: manifest.harnessRevision ?? null,
-      host: manifest.host
-        ? (() => {
-            const h = { ...manifest.host };
-            delete h.user;
-            delete h.username;
-            return h;
-          })()
-        : undefined,
-      scheduleSeed: manifest.scheduleSeed ?? null,
-      createdAt: manifest.createdAt,
-      updatedAt: manifest.updatedAt,
-      completedAt: manifest.completedAt ?? null,
-    };
-    const redacted = redactHostIdentifying(
-      stripPromptBearing(sanitizedManifest),
-      srcRoot,
-    );
+  // Sanitized manifest
+  const redactedManifest = sanitizeManifestForExport(manifest, srcRoot);
+  await writeFile(
+    path.join(destRoot, 'manifest.json'),
+    `${JSON.stringify(redactedManifest, null, 2)}\n`,
+    'utf8',
+  );
+  filesCopied += 1;
+
+  // 3. Export ONLY verified reportable results — never readdir results/.
+  for (const raw of exportResults) {
+    const id = assertSafeTrialId(String(raw.id));
+    const clean = sanitizeResult(raw, srcRoot);
+    const destDir = path.join(destRoot, 'results', id);
+    await mkdir(destDir, { recursive: true });
     await writeFile(
-      path.join(destRoot, 'manifest.json'),
-      `${JSON.stringify(redacted, null, 2)}\n`,
+      path.join(destDir, 'result.json'),
+      `${JSON.stringify(clean, null, 2)}\n`,
       'utf8',
     );
     filesCopied += 1;
-  } catch (err) {
-    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
-    if (code !== 'ENOENT') throw err;
-    warnings.push('manifest.json missing; export continues without it');
   }
 
-  // Whitelist: results/*/result.json
-  try {
-    const trialDirs = await readdir(path.join(srcRoot, 'results'), {
-      withFileTypes: true,
-    });
-    for (const entry of trialDirs) {
-      if (!entry.isDirectory()) continue;
-      try {
-        const raw = JSON.parse(
-          await readFile(
-            path.join(srcRoot, 'results', entry.name, 'result.json'),
-            'utf8',
-          ),
-        );
-        const clean = sanitizeResult(raw, srcRoot);
-        const destDir = path.join(destRoot, 'results', entry.name);
-        await mkdir(destDir, { recursive: true });
-        await writeFile(
-          path.join(destDir, 'result.json'),
-          `${JSON.stringify(clean, null, 2)}\n`,
-          'utf8',
-        );
-        filesCopied += 1;
-      } catch (err) {
-        const code = /** @type {NodeJS.ErrnoException} */ (err).code;
-        if (code === 'ENOENT') continue;
-        warnings.push(
-          `skipped result ${entry.name}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-  } catch (err) {
-    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
-    if (code !== 'ENOENT') throw err;
-  }
+  // 4. Rebuild report/summary from validated manifest + verified results.
+  // Never read or copy source report.json / summary.txt.
+  const { buildReport, formatHumanSummary } = await import('./summary.js');
+  const report = buildReport(manifest, exportResults);
+  const reportBody = redactHostIdentifying(
+    stripPromptBearing(report),
+    srcRoot,
+  );
+  await writeFile(
+    path.join(destRoot, 'report.json'),
+    `${JSON.stringify(reportBody, null, 2)}\n`,
+    'utf8',
+  );
+  filesCopied += 1;
 
-  // Whitelist: report.json / summary.txt
-  for (const name of ['report.json', 'summary.txt']) {
-    try {
-      const text = await readFile(path.join(srcRoot, name), 'utf8');
-      let body = text;
-      if (name.endsWith('.json')) {
-        try {
-          body = `${JSON.stringify(
-            redactHostIdentifying(stripPromptBearing(JSON.parse(text)), srcRoot),
-            null,
-            2,
-          )}\n`;
-        } catch {
-          body = String(redactHostIdentifying(text, srcRoot));
-        }
-      } else {
-        body = String(redactHostIdentifying(text, srcRoot));
-      }
-      await writeFile(path.join(destRoot, name), body, 'utf8');
-      filesCopied += 1;
-    } catch (err) {
-      const code = /** @type {NodeJS.ErrnoException} */ (err).code;
-      if (code !== 'ENOENT') throw err;
-    }
-  }
+  const human = formatHumanSummary(
+    /** @type {object} */ (reportBody),
+  );
+  await writeFile(
+    path.join(destRoot, 'summary.txt'),
+    `${String(redactHostIdentifying(human, srcRoot))}\n`,
+    'utf8',
+  );
+  filesCopied += 1;
 
-  // Default: never copy artifacts/ or raw/
+  // 5. includeRaw: only verified trial IDs, whitelist filenames, nofollow.
   if (includeRaw) {
     warnings.push(
       'includeRaw=true: raw/ may contain secrets — handle as confidential',
     );
-    try {
-      const { copyFile: cp } = await import('node:fs/promises');
-      const rawSrc = path.join(srcRoot, 'raw');
-      const trialDirs = await readdir(rawSrc, { withFileTypes: true });
-      for (const entry of trialDirs) {
-        if (!entry.isDirectory()) continue;
-        const files = await readdir(path.join(rawSrc, entry.name));
-        for (const fname of files) {
-          const from = path.join(rawSrc, entry.name, fname);
-          const toDir = path.join(destRoot, 'raw', entry.name);
-          await mkdir(toDir, { recursive: true });
-          await cp(from, path.join(toDir, fname));
-          filesCopied += 1;
-        }
+    for (const r of exportResults) {
+      const id = String(r.id);
+      try {
+        filesCopied += await copyVerifiedTrialRaw(
+          srcRoot,
+          id,
+          destRoot,
+          warnings,
+        );
+      } catch (err) {
+        warnings.push(
+          `raw export skipped for ${id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
-    } catch (err) {
-      const code = /** @type {NodeJS.ErrnoException} */ (err).code;
-      if (code !== 'ENOENT') throw err;
     }
   }
 
@@ -496,7 +569,9 @@ export async function exportSanitizedBundle({
       'Sanitized campaign export bundle (whitelist)',
       'source: <campaign> (absolute path redacted)',
       `includeRaw: ${includeRaw}`,
-      'Only manifest, results digests, and report/summary are exported by default.',
+      'Only validated manifest, verified result digests, and rebuilt report/summary are exported.',
+      'Source report.json/summary.txt are never copied; they are regenerated from verified evidence.',
+      'Unmanifested results and unverified trials are never exported.',
       'Prompt-bearing request/output content is never exported.',
       'Local usernames and absolute paths are redacted.',
       'Upload/publish is not performed by the harness.',
@@ -510,6 +585,7 @@ export async function exportSanitizedBundle({
     outDir: destRoot,
     filesCopied,
     includeRaw: Boolean(includeRaw),
+    verified: exportResults.length,
     warnings,
   };
 }
