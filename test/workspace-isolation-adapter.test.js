@@ -145,6 +145,105 @@ describe('capability isolation: workspaces outside campaign tree', () => {
       await rm(campaignDir, { recursive: true, force: true });
     }
   });
+
+  it('runCampaign: requestId-mismatched adapter artifact with tempting model does not attribute', async () => {
+    const { runCampaign } = await import('../harness/run.js');
+    const { readTrialResult } = await import('../harness/results.js');
+    const campaignDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-model-bind-'));
+    const binDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-fake-poetic-'));
+    try {
+      // Fake Poetic: writes a full success artifact with WRONG requestId and a
+      // tempting resolved model id on disk. Harness must clear parsedOutput and
+      // never reopen outputPath to attribute that model.
+      const bin = path.join(binDir, 'fake-poetic');
+      await writeFile(
+        bin,
+        `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const args = process.argv.slice(2);
+const out = args[args.indexOf('--output') + 1];
+const base = path.basename(path.resolve(out));
+const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
+// Plant tempting model under wrong requestId + also write provider raw so a
+// naive path reader could still find success-shaped content.
+const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', 'stale-other-request');
+fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
+fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'planted\\n');
+fs.writeFileSync(path.join(rawDir, 'stderr.txt'), '');
+fs.writeFileSync(out, JSON.stringify({
+  schema: 'poetic.provider.invoke.result.v1',
+  requestId: 'stale-other-request',
+  outcome: { kind: 'success', reasonCode: 'ok' },
+  model: {
+    resolved: {
+      availability: 'available',
+      value: 'TEMPTING-MODEL-MUST-NOT-ATTRIBUTE'
+    }
+  }
+}));
+process.exit(0);
+`,
+        'utf8',
+      );
+      await chmod(bin, 0o755);
+
+      const result = await runCampaign({
+        experiment: {
+          id: 'model-bind-run',
+          schemaVersion: 1,
+          suiteId: 'cli-comparison',
+          taskIds: ['greenfield-003-js-event-emitter'],
+          repetitions: 1,
+          seed: 77,
+          timeoutMs: 15_000,
+          arms: [
+            {
+              name: 'adapter-mismatch',
+              provider: 'fake',
+              model: 'requested-arm-model',
+              invocationPath: 'poetic-adapter',
+              poeticBin: bin,
+            },
+          ],
+        },
+        corpusRoot: path.join(REPO, 'benchmarks'),
+        campaignDir,
+        harnessRoot: REPO,
+        execute: true,
+        resume: false,
+        maxTrials: 1,
+      });
+
+      assert.ok(result.manifest);
+      const trialId = result.manifest.trials[0].id;
+      const stored = await readTrialResult(campaignDir, trialId);
+
+      // Requested model may remain; resolved must never come from the mismatched artifact.
+      assert.equal(stored.requestedModel, 'requested-arm-model');
+      assert.equal(stored.resolvedModel, null);
+      assert.equal(stored.resolvedModelAvailable, false);
+      assert.ok(
+        stored.resolvedModelSource === 'unavailable' ||
+          stored.resolvedModelSource === 'absent',
+        `source=${stored.resolvedModelSource}`,
+      );
+      assert.notEqual(
+        stored.resolvedModel,
+        'TEMPTING-MODEL-MUST-NOT-ATTRIBUTE',
+      );
+      // Classification is infra/fail — never a clean PASS attributed to the planted model
+      assert.notEqual(stored.classification, 'PASS');
+      const body = JSON.stringify(stored);
+      assert.ok(
+        !body.includes('TEMPTING-MODEL-MUST-NOT-ATTRIBUTE'),
+        'tempting model must not appear on stored trial result',
+      );
+    } finally {
+      await rm(campaignDir, { recursive: true, force: true });
+      await rm(binDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('fresh adapter result binding', () => {

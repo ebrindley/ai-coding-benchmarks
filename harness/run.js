@@ -15,7 +15,7 @@ import { computePostureFingerprint } from './posture.js';
 import {
   parseResolvedModelEvidence,
 } from './invokers/index.js';
-import { readFileNoFollow, readTextNoFollow, UnsafePathError } from './safe-fs.js';
+import { readFileNoFollow, UnsafePathError } from './safe-fs.js';
 
 /**
  * Best-effort chmod for private modes (ignore platforms that lack mode bits).
@@ -200,23 +200,24 @@ export function tasksByIdFromLoad(loaded) {
 
 /**
  * Resolve model evidence honestly after an invoker returns.
+ *
+ * poetic-adapter: model evidence comes ONLY from the invoker's fully validated,
+ * requestId-bound `parsedOutput`. Never reopen outputPath/campaign copies as a
+ * fallback (stale/mismatched artifacts may still sit on disk).
+ *
  * @param {string} invocationPath
  * @param {object} invokerResult
- * @param {string} [outputPath]
- * @returns {Promise<{ resolvedModel: string | null, resolvedModelAvailable: boolean, resolvedModelSource: string }>}
+ * @returns {{ resolvedModel: string | null, resolvedModelAvailable: boolean, resolvedModelSource: string }}
  */
-async function resolveModelEvidence(invocationPath, invokerResult, outputPath) {
+function resolveModelEvidence(invocationPath, invokerResult) {
   if (invocationPath === 'poetic-adapter') {
-    // Prefer already-parsed invoker artifact (never re-open a path that may be a symlink).
-    let artifact = invokerResult?.parsedOutput ?? null;
-    if (!artifact && outputPath) {
-      try {
-        // Fail closed on symlink/special files — do not fall back to following links.
-        const text = await readTextNoFollow(String(outputPath));
-        artifact = JSON.parse(text);
-      } catch {
-        artifact = null;
-      }
+    const artifact = invokerResult?.parsedOutput ?? null;
+    if (artifact == null) {
+      return {
+        resolvedModel: null,
+        resolvedModelAvailable: false,
+        resolvedModelSource: 'unavailable',
+      };
     }
     const parsed = parseResolvedModelEvidence(artifact);
     return {
@@ -711,11 +712,11 @@ export async function runCampaign(opts) {
           },
         );
 
-        const modelEv = await resolveModelEvidence(
+        // poetic-adapter: only requestId-bound parsedOutput may supply model evidence.
+        // Never reopen scratch/campaign outputPath as a fallback.
+        const modelEv = resolveModelEvidence(
           arm.invocationPath,
           invokerResult,
-          // Prefer parsedOutput from invoker; only open campaign copy (trusted write)
-          recordedOutputPath,
         );
 
         const oracleRoot = path.join(suiteDir, 'oracles');
