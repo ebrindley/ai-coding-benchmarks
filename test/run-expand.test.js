@@ -14,6 +14,28 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CORPUS = path.join(REPO, 'benchmarks');
 
 describe('runCampaign expansion', () => {
+  it('resolveSuiteLocation rejects suitePath/suiteId outside corpusRoot', async () => {
+    const { resolveSuiteLocation } = await import('../harness/run.js');
+    await assert.rejects(
+      () =>
+        resolveSuiteLocation(
+          { suitePath: path.join(os.tmpdir(), 'outside-suite.yaml') },
+          CORPUS,
+        ),
+      /escape|outside|PATH_ESCAPE|fail closed/i,
+    );
+    await assert.rejects(
+      () =>
+        resolveSuiteLocation({ suiteId: '../escape' }, CORPUS),
+      /unsafe|suiteId|escape|traversal/i,
+    );
+    await assert.rejects(
+      () =>
+        resolveSuiteLocation({ suiteId: '/abs/suite' }, CORPUS),
+      /absolute suiteId|not allowed/i,
+    );
+  });
+
   it('expands over real corpus without execute', async () => {
     const {
       runCampaign,
@@ -22,12 +44,14 @@ describe('runCampaign expansion', () => {
     } = await import('../harness/run.js');
     const { loadCorpusTasks, loadSuite } = await import('../harness/load.js');
 
-    const { suitePath, suiteDir } = resolveSuiteLocation(
+    const { suitePath, suiteDir } = await resolveSuiteLocation(
       { suiteId: 'cli-comparison' },
       CORPUS,
     );
     assert.ok(suitePath.endsWith(`${path.sep}cli-comparison${path.sep}suite.yaml`));
-    assert.equal(suiteDir, path.join(CORPUS, 'cli-comparison'));
+    // suiteDir is realpath-canonical (macOS /var -> /private/var); compare via realpath.
+    const { realpath } = await import('node:fs/promises');
+    assert.equal(suiteDir, await realpath(path.join(CORPUS, 'cli-comparison')));
 
     const suite = await loadSuite(suitePath);
     const loaded = await loadCorpusTasks(suiteDir, {

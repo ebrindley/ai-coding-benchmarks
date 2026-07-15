@@ -37,32 +37,38 @@ expectedOutcome:
     - id: 101st-request-blocked
       description: 101st request within window returns 429
       substantiation: test
+      evidenceGate: tests
       artifactRef: test/rate-limiter.test.js::blocks-101st-request
 
     - id: window-reset-correct
       description: Window resets exactly at 60000ms, not 60001ms
       substantiation: test
+      evidenceGate: tests
       artifactRef: test/rate-limiter.test.js::window-reset-timing
 
     - id: retry-after-header
       description: 429 response includes correct Retry-After header
       substantiation: test
+      evidenceGate: tests
       artifactRef: test/rate-limiter.test.js::retry-after-header
 
     - id: clock-injection
       description: Implementation accepts clock function via options
       substantiation: static
+      evidenceGate: clock-injection
       artifactRef: scripts/check-clock-injection.js
 
     - id: existing-tests-pass
       description: All existing tests still pass
       substantiation: test
+      evidenceGate: tests
       artifactRef: npm test exits 0
 
   niceToHave:
     - id: per-ip-isolation
       description: Different IPs have independent limits
       substantiation: test
+      evidenceGate: tests
       artifactRef: test/rate-limiter.test.js::per-ip-isolation
 
   successCriteria:
@@ -93,9 +99,15 @@ eligibilityGates:
     expectedExitCode: 0
     order: 4
 
+  - gate: clock-injection
+    check: Implementation accepts clock function via options
+    command: node scripts/check-clock-injection.js
+    expectedExitCode: 0
+    order: 5
+
   - gate: requirements
     check: All must_have items substantiated by test results
-    order: 5
+    order: 6
 
 scoring:
   delivery:

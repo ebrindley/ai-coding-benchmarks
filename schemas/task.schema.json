@@ -106,8 +106,26 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
-        "substantiation": { "type": "string" },
-        "artifactRef": { "type": "string" }
+        "substantiation": {
+          "type": "string",
+          "description": "Evidence kind: test|tests (default evidenceGate=tests) or static/other requiring explicit evidenceGate|gate|oraclePath"
+        },
+        "artifactRef": {
+          "type": "string",
+          "description": "Metadata-only evidence reference (test path/command or static script path). Not executed by evaluateRequirements; pass/fail comes from the bound evidenceGate/gate/oraclePath result."
+        },
+        "evidenceGate": {
+          "type": "string",
+          "description": "Explicit eligibility gate name that must pass to substantiate this item"
+        },
+        "gate": {
+          "type": "string",
+          "description": "Alias for evidenceGate (explicit gate name binding)"
+        },
+        "oraclePath": {
+          "type": "string",
+          "description": "Optional oracle path binding (relative to suite oracles/) for static/oracle evidence"
+        }
       }
     },
     "eligibilityGate": {
@@ -141,7 +159,7 @@
         },
         "oraclePath": {
           "type": "string",
-          "description": "Optional path to oracle script relative to suite oracles/"
+          "description": "Commandless oracle: path relative to suite oracles/ only. Harness builds node|bash <absPath> under confinement; declared command is never rewritten."
         }
       }
     }

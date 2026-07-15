@@ -40,6 +40,50 @@ describe('export + quarantine + cli', () => {
     }
   });
 
+  it('result and private file helpers enforce 0700/0600 (posix)', async () => {
+    if (process.platform === 'win32') return;
+    const {
+      ensurePrivateDir,
+      writePrivateFile,
+      writeTrialResult,
+    } = await import('../harness/results.js');
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-modes-'));
+    try {
+      const art = path.join(campaign, 'artifacts', 't1');
+      await ensurePrivateDir(art);
+      const stArt = await stat(art);
+      assert.equal(stArt.mode & 0o777, 0o700);
+
+      const req = path.join(art, 'request.json');
+      await writePrivateFile(req, '{"prompt":"secret"}\n');
+      const stReq = await stat(req);
+      assert.equal(stReq.mode & 0o777, 0o600);
+
+      await writeTrialResult(campaign, 't1', {
+        id: 't1',
+        classification: 'PASS',
+        gateResults: [
+          {
+            gate: 'tests',
+            status: 'passed',
+            stdoutPreview: 'must-not-persist',
+            stdoutDigest: 'd'.repeat(64),
+          },
+        ],
+      });
+      const resDir = path.join(campaign, 'results', 't1');
+      assert.equal((await stat(resDir)).mode & 0o777, 0o700);
+      const resFile = path.join(resDir, 'result.json');
+      assert.equal((await stat(resFile)).mode & 0o777, 0o600);
+      const body = await readFile(resFile, 'utf8');
+      assert.ok(!body.includes('must-not-persist'));
+      assert.ok(!body.includes('stdoutPreview'));
+      assert.ok(body.includes('stdoutDigest'));
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+    }
+  });
+
   it('export omits raw, request artifacts, usernames, and absolute paths', async () => {
     const { exportSanitizedBundle } = await import('../harness/export.js');
     const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-camp-'));
@@ -136,6 +180,10 @@ describe('export + quarantine + cli', () => {
       assert.ok(!result.includes('nested secret'));
       assert.ok(!result.includes('top-level prompt'));
       assert.ok(!result.includes('leaky'));
+      // gate stdout/stderr previews never exported
+      assert.ok(!result.includes('stdoutPreview'));
+      assert.ok(!result.includes('should be stripped'));
+      assert.ok(result.includes('stdoutDigest'));
       // absolute workspace redacted / omitted
       assert.ok(!result.includes(path.join(campaign, 'workspaces', 't1')));
       // non-whitelist keys dropped

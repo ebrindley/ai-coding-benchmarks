@@ -4,6 +4,15 @@
  *
  * invocationPath (experiment arms): 'poetic-adapter' | 'native-cli' | 'poetic-system'
  * Trial classification precedence: TIMEOUT > INFRA_FAIL > NO_OP > FAIL > PASS
+ *
+ * Poetic adapter bridge:
+ * - request schema: poetic.provider.invoke.request.v1
+ * - result schema:  poetic.provider.invoke.result.v1
+ * - result.outcome.kind: success | timeout | provider_error | refusal | aborted | internal_error
+ * - Bridge may exit 0 after writing the artifact; harness maps outcome.kind/reasonCode
+ *   and never treats non-success kinds as PASS.
+ *
+ * native-cli prompt delivery: promptTransport 'stdin' (default) | 'prompt-file'
  */
 
 export const SCHEMA_VERSION = 1;

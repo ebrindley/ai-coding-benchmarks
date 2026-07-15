@@ -50,7 +50,10 @@ export function pickHighestClassification(signals) {
 function invokerTimedOut(invokerResult) {
   if (!invokerResult || typeof invokerResult !== 'object') return false;
   const r = /** @type {Record<string, unknown>} */ (invokerResult);
-  return r.timedOut === true;
+  if (r.timedOut === true) return true;
+  // Adapter outcome.kind === 'timeout' even if timedOut flag was dropped
+  if (r.outcomeKind === 'timeout') return true;
+  return false;
 }
 
 /**
@@ -63,8 +66,30 @@ function invokerInfraFailure(invokerResult) {
   if (typeof r.infraFailure === 'string' && r.infraFailure.trim() !== '') {
     return r.infraFailure;
   }
+  if (typeof r.providerFailure === 'string' && r.providerFailure.trim() !== '') {
+    return `provider failure: ${r.providerFailure}`;
+  }
   if (r.status === 'execution_unavailable') {
     return 'invoker execution_unavailable';
+  }
+  // Adapter / invoker reported explicit non-success without infraFailure string
+  if (r.success === false) {
+    const kind =
+      r.outcomeKind != null && String(r.outcomeKind).trim() !== ''
+        ? String(r.outcomeKind)
+        : 'non-success';
+    // timeout is handled separately (TIMEOUT precedence)
+    if (kind === 'timeout') return null;
+    return `invoker non-success outcome: ${kind}`;
+  }
+  if (
+    r.outcomeKind != null &&
+    String(r.outcomeKind).trim() !== '' &&
+    String(r.outcomeKind) !== 'success'
+  ) {
+    const kind = String(r.outcomeKind);
+    if (kind === 'timeout') return null;
+    return `invoker outcome.kind: ${kind}`;
   }
   return null;
 }

@@ -4,7 +4,7 @@
  * Resumable and deterministic.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, chmod, access } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,19 @@ import { computePostureFingerprint } from './posture.js';
 import {
   parseResolvedModelEvidence,
 } from './invokers/index.js';
+
+/**
+ * Best-effort chmod for private modes (ignore platforms that lack mode bits).
+ * @param {string} p
+ * @param {number} mode
+ */
+async function tryChmod(p, mode) {
+  try {
+    await chmod(p, mode);
+  } catch {
+    /* ignore */
+  }
+}
 
 /**
  * Lazy-load peer modules.
@@ -30,13 +43,23 @@ async function loadPeers() {
       saveManifest,
       updateTrial,
       listResumableTrials,
+      computeCampaignInputDigests,
+      compareInputDigests,
     },
     { createIsolatedWorkspace },
     { getInvoker, buildInvocationRequest },
-    { runGates, detectConfinement },
+    { runGates, detectConfinement, sanitizeGateResultsForStorage },
     { classifyTrial },
-    { writeTrialResult, quarantineRawOutput, ensurePrivateDir },
+    { writeTrialResult, quarantineRawOutput, ensurePrivateDir, writePrivateFile },
     { buildReport, formatHumanSummary },
+    {
+      assertSafeTrialId,
+      assertSafeCampaignId,
+      assertSafeIdSegment,
+      assertInsideRoot,
+      resolveUnder,
+      trialPathUnder,
+    },
   ] = await Promise.all([
     import('./load.js'),
     import('./schedule.js'),
@@ -48,6 +71,7 @@ async function loadPeers() {
     import('./classify.js'),
     import('./results.js'),
     import('./summary.js'),
+    import('./paths.js'),
   ]);
 
   return {
@@ -62,40 +86,73 @@ async function loadPeers() {
     saveManifest,
     updateTrial,
     listResumableTrials,
+    computeCampaignInputDigests,
+    compareInputDigests,
     createIsolatedWorkspace,
     getInvoker,
     buildInvocationRequest,
     runGates,
     detectConfinement,
+    sanitizeGateResultsForStorage,
     classifyTrial,
     writeTrialResult,
     quarantineRawOutput,
     ensurePrivateDir,
+    writePrivateFile,
     buildReport,
     formatHumanSummary,
+    assertSafeTrialId,
+    assertSafeCampaignId,
+    assertSafeIdSegment,
+    assertInsideRoot,
+    resolveUnder,
+    trialPathUnder,
   };
 }
 
 /**
- * Resolve suite path and suite-dir corpus root from experiment + corpusRoot.
+ * Resolve suite path and suite-dir under the declared corpusRoot.
+ * Fail-closed: suitePath/suiteId must stay inside corpusRoot after lexical + realpath.
+ *
  * @param {object} experiment
  * @param {string} corpusRoot
- * @returns {{ suitePath: string, suiteDir: string }}
+ * @param {{ assertInsideRoot?: typeof import('./paths.js').assertInsideRoot, assertSafeIdSegment?: typeof import('./paths.js').assertSafeIdSegment }} [pathHelpers]
+ * @returns {Promise<{ suitePath: string, suiteDir: string }>}
  */
-export function resolveSuiteLocation(experiment, corpusRoot) {
+export async function resolveSuiteLocation(experiment, corpusRoot, pathHelpers) {
+  const { assertInsideRoot, assertSafeIdSegment } =
+    pathHelpers ?? (await import('./paths.js'));
+
   const root = path.resolve(corpusRoot);
+  /** @type {string} */
   let suitePath;
-  if (experiment.suitePath != null) {
-    suitePath = path.isAbsolute(experiment.suitePath)
-      ? experiment.suitePath
-      : path.resolve(root, experiment.suitePath);
-  } else if (experiment.suiteId) {
-    suitePath = path.join(root, experiment.suiteId, 'suite.yaml');
+  if (experiment.suitePath != null && String(experiment.suitePath).trim() !== '') {
+    const raw = String(experiment.suitePath);
+    // Absolute paths only accepted when still inside corpusRoot (assertInsideRoot enforces).
+    suitePath = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(root, raw);
+  } else if (experiment.suiteId != null && String(experiment.suiteId).trim() !== '') {
+    // suiteId is one or more relative segments under corpusRoot — reject absolute/empty.
+    const suiteId = String(experiment.suiteId);
+    if (path.isAbsolute(suiteId)) {
+      throw new Error(`absolute suiteId is not allowed: "${suiteId}"`);
+    }
+    // Reject traversal segments; multi-segment relative ids are joined then contained.
+    for (const seg of suiteId.split(/[/\\]+/).filter(Boolean)) {
+      assertSafeIdSegment(seg, { label: 'suiteId segment' });
+    }
+    suitePath = path.resolve(root, suiteId, 'suite.yaml');
   } else {
     // corpusRoot itself may be the suite directory
     suitePath = path.join(root, 'suite.yaml');
   }
-  return { suitePath, suiteDir: path.dirname(suitePath) };
+
+  // Canonical realpath/symlink containment under corpusRoot before any read.
+  const containedSuitePath = await assertInsideRoot(root, suitePath);
+  const suiteDir = path.dirname(containedSuitePath);
+  // suiteDir must also remain under corpus root (defense in depth).
+  await assertInsideRoot(root, suiteDir);
+
+  return { suitePath: containedSuitePath, suiteDir };
 }
 
 /**
@@ -182,10 +239,29 @@ export async function runCampaign(opts) {
     opts.harnessRoot ??
       path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'),
   );
-  const campaignDir =
-    opts.campaignDir != null
-      ? path.resolve(opts.campaignDir)
-      : path.join(os.tmpdir(), 'aicb-campaigns', opts.experiment.id || 'campaign');
+
+  // Default campaignDir must never be derived from an unsafe experiment.id.
+  /** @type {string} */
+  let campaignDir;
+  if (opts.campaignDir != null) {
+    campaignDir = path.resolve(opts.campaignDir);
+  } else {
+    let safeId;
+    try {
+      safeId = peers.assertSafeCampaignId(opts.experiment?.id || 'campaign');
+    } catch (err) {
+      return {
+        ok: false,
+        stage: 'preflight',
+        errors: [
+          `unsafe experiment.id for default campaignDir: ${err instanceof Error ? err.message : String(err)}`,
+        ],
+        warnings: [],
+        campaignDir: null,
+      };
+    }
+    campaignDir = path.join(os.tmpdir(), 'aicb-campaigns', safeId);
+  }
 
   const pf = await preflight({
     experiment: opts.experiment,
@@ -203,11 +279,12 @@ export async function runCampaign(opts) {
     };
   }
 
-  await mkdir(campaignDir, { recursive: true });
+  // Campaign tree is private (0700) — secrets may land under raw/artifacts/results.
+  await peers.ensurePrivateDir(campaignDir);
   await peers.ensurePrivateDir(path.join(campaignDir, 'raw'));
-  await mkdir(path.join(campaignDir, 'results'), { recursive: true });
-  await mkdir(path.join(campaignDir, 'workspaces'), { recursive: true });
-  await mkdir(path.join(campaignDir, 'artifacts'), { recursive: true });
+  await peers.ensurePrivateDir(path.join(campaignDir, 'results'));
+  await peers.ensurePrivateDir(path.join(campaignDir, 'workspaces'));
+  await peers.ensurePrivateDir(path.join(campaignDir, 'artifacts'));
 
   const ownerId = `aicb-${process.pid}-${Date.now()}`;
   const lock = await peers.acquireLock(campaignDir, ownerId);
@@ -221,21 +298,91 @@ export async function runCampaign(opts) {
   }
 
   try {
-    const { suitePath, suiteDir } = resolveSuiteLocation(
-      opts.experiment,
-      corpusRoot,
-    );
+    // Resume uses frozen manifest.experiment; never prefer a mutated caller experiment.
+    let manifest = null;
+    if (opts.resume !== false) {
+      try {
+        manifest = await peers.loadManifest(campaignDir);
+      } catch (err) {
+        try {
+          await readFile(path.join(campaignDir, 'manifest.json'), 'utf8');
+          return {
+            ok: false,
+            stage: 'resume',
+            errors: [
+              `invalid campaign manifest (fail closed): ${err instanceof Error ? err.message : String(err)}`,
+            ],
+            campaignDir,
+          };
+        } catch {
+          manifest = null;
+        }
+      }
+    }
+
+    /** @type {object} */
+    let experiment;
+    if (manifest) {
+      if (!manifest.experiment || typeof manifest.experiment !== 'object') {
+        return {
+          ok: false,
+          stage: 'resume',
+          errors: [
+            'resumed manifest missing frozen experiment (fail closed)',
+          ],
+          campaignDir,
+        };
+      }
+      if (
+        opts.experiment &&
+        sha256Json(opts.experiment) !== sha256Json(manifest.experiment)
+      ) {
+        return {
+          ok: false,
+          stage: 'resume',
+          errors: [
+            'caller experiment does not match frozen manifest.experiment (fail closed)',
+          ],
+          campaignDir,
+        };
+      }
+      experiment = manifest.experiment;
+      log(`resumed campaign ${manifest.campaignId}`);
+    } else {
+      experiment = opts.experiment;
+    }
+
+    /** @type {string} */
+    let suitePath;
+    /** @type {string} */
+    let suiteDir;
+    try {
+      ({ suitePath, suiteDir } = await resolveSuiteLocation(experiment, corpusRoot, {
+        assertInsideRoot: peers.assertInsideRoot,
+        assertSafeIdSegment: peers.assertSafeIdSegment,
+      }));
+    } catch (err) {
+      return {
+        ok: false,
+        stage: 'load',
+        errors: [
+          `suite path escapes corpusRoot (fail closed): ${err instanceof Error ? err.message : String(err)}`,
+        ],
+        campaignDir,
+      };
+    }
 
     const suite = await peers.loadSuite(suitePath);
 
-    const taskIds = opts.experiment.taskIds?.length
-      ? opts.experiment.taskIds
+    const taskIds = experiment.taskIds?.length
+      ? experiment.taskIds
       : suite.tasks;
 
     // loadCorpusTasks: first arg is suite dir (where tasks/ lives)
     const suiteForLoad = { ...suite, tasks: taskIds };
     const loaded = await peers.loadCorpusTasks(suiteDir, suiteForLoad);
     const tasksById = tasksByIdFromLoad(loaded);
+    const taskList = taskIds.map((id) => tasksById[id]);
 
     for (const id of taskIds) {
       if (!tasksById[id]) {
@@ -248,35 +395,40 @@ export async function runCampaign(opts) {
       }
     }
 
-    let manifest;
-    if (opts.resume !== false) {
-      try {
-        manifest = await peers.loadManifest(campaignDir);
-      } catch {
-        manifest = null;
-      }
-    }
+    const inputDigests = await peers.computeCampaignInputDigests({
+      experiment,
+      suite,
+      tasks: taskList,
+      suiteDir,
+      harnessRoot,
+    });
+
+    const workspaceRoot = path.join(campaignDir, 'workspaces');
+    const artifactRoot = path.join(campaignDir, 'artifacts');
 
     if (!manifest) {
-      const trials = peers.expandExperiment(opts.experiment, {
-        tasks: taskIds.map((id) => tasksById[id]),
-        arms: opts.experiment.arms,
+      const trials = peers.expandExperiment(experiment, {
+        tasks: taskList,
+        arms: experiment.arms,
       });
 
+      // experiment.id already validated by preflight / assertSafeCampaignId
+      const safeCampaignId = peers.assertSafeCampaignId(experiment.id);
       manifest = peers.createManifest({
-        campaignId: opts.experiment.id,
-        experimentId: opts.experiment.id,
-        experiment: opts.experiment,
+        campaignId: safeCampaignId,
+        experimentId: safeCampaignId,
+        experiment,
         trials,
-        scheduleSeed: opts.experiment.seed,
-        artifactRoot: path.join(campaignDir, 'artifacts'),
-        workspaceRoot: path.join(campaignDir, 'workspaces'),
+        scheduleSeed: experiment.seed,
+        artifactRoot,
+        workspaceRoot,
+        inputDigests,
         host: {
           hostname: os.hostname(),
           platform: process.platform,
           arch: process.arch,
           nodeVersion: process.version,
-          cpus: os.cpus()?.length ?? 0,
+          cpus: Math.max(1, os.cpus()?.length ?? 1),
           totalMemoryBytes: os.totalmem(),
         },
         lock: {
@@ -289,7 +441,16 @@ export async function runCampaign(opts) {
       await peers.saveManifest(campaignDir, manifest);
       log(`created campaign ${manifest.campaignId} with ${trials.length} trials`);
     } else {
-      log(`resumed campaign ${manifest.campaignId}`);
+      const cmp = peers.compareInputDigests(manifest.inputDigests, inputDigests);
+      if (!cmp.ok) {
+        return {
+          ok: false,
+          stage: 'resume',
+          errors: [cmp.error],
+          mismatches: cmp.mismatches,
+          campaignDir,
+        };
+      }
     }
 
     if (opts.execute === false) {
@@ -330,7 +491,12 @@ export async function runCampaign(opts) {
 
       if (!trial) break;
 
-      const arm = opts.experiment.arms.find((a) => a.name === trial.arm);
+      // Defense in depth: manifests are validated on load/create; path joins still
+      // re-check so write boundaries never accept traversal trial ids.
+      peers.assertSafeTrialId(trial.id);
+
+      // Frozen experiment arms only — never a mutated caller experiment on resume.
+      const arm = (experiment.arms || []).find((a) => a.name === trial.arm);
       if (!arm) {
         peers.updateTrial(manifest, trial.id, {
           state: 'failed',
@@ -354,19 +520,30 @@ export async function runCampaign(opts) {
       /** @type {Record<string, unknown>} */
       let trialUpdate = {};
       try {
-        const fixtureName = task.fixturePath;
-        const fixtureDir = fixtureName
-          ? path.join(suiteDir, 'fixtures', fixtureName)
-          : null;
+        // Prefer already-validated/canonical fixture dir from corpus loading.
+        // Fall back only when absent, still contained under suite fixtures/.
+        /** @type {string | null} */
+        let fixtureDir = null;
+        if (
+          task._resolvedFixtureDir != null &&
+          String(task._resolvedFixtureDir).trim() !== ''
+        ) {
+          fixtureDir = String(task._resolvedFixtureDir);
+        } else if (task.fixturePath != null && String(task.fixturePath).trim() !== '') {
+          fixtureDir = await peers.resolveUnder(
+            path.join(suiteDir, 'fixtures'),
+            String(task.fixturePath),
+          );
+        }
 
         const workspace = fixtureDir
           ? await peers.createIsolatedWorkspace({
               fixtureDir,
-              workspaceRoot: path.join(campaignDir, 'workspaces'),
+              workspaceRoot,
               trialId: trial.id,
             })
           : {
-              workspaceDir: path.join(campaignDir, 'workspaces', trial.id),
+              workspaceDir: await peers.trialPathUnder(workspaceRoot, trial.id),
               fixtureHash: null,
             };
 
@@ -375,7 +552,7 @@ export async function runCampaign(opts) {
         }
 
         const invoker = peers.getInvoker(arm.invocationPath);
-        const timeoutMs = opts.experiment.timeoutMs;
+        const timeoutMs = experiment.timeoutMs;
         const request = peers.buildInvocationRequest({
           arm,
           task,
@@ -383,35 +560,44 @@ export async function runCampaign(opts) {
           requestId: trial.id,
           timeoutMs,
         });
-        const requestPath = path.join(
-          campaignDir,
-          'artifacts',
-          trial.id,
-          'request.json',
+        const artifactDir = await peers.trialPathUnder(artifactRoot, trial.id);
+        await peers.ensurePrivateDir(artifactDir);
+        const requestPath = path.join(artifactDir, 'request.json');
+        const outputPath = path.join(artifactDir, 'output.json');
+
+        // Prompt-bearing request written privately (0600) even under permissive umask.
+        await peers.writePrivateFile(
+          requestPath,
+          `${JSON.stringify(request, null, 2)}\n`,
         );
-        const outputPath = path.join(
-          campaignDir,
-          'artifacts',
-          trial.id,
-          'output.json',
-        );
-        await mkdir(path.dirname(requestPath), { recursive: true });
 
         const invokerResult = await invoker({
           poeticBin: arm.poeticBin || process.env.AICB_POETIC_BIN || 'poetic',
           requestPath,
           outputPath,
+          // request already written privately; still pass for invokers that re-write
           request,
           cwd: workspace.workspaceDir,
           timeoutMs,
           command: arm.command,
           args: arm.args || [],
           prompt: request.prompt,
+          // native-cli: enumerated prompt transport only ('stdin' | 'prompt-file')
+          promptTransport: arm.promptTransport,
           provider: arm.provider,
           model: arm.model,
           // harness-controlled env only; never task YAML
           env: undefined,
         });
+
+        // Re-assert private modes after invoker may have rewritten request/output.
+        await tryChmod(requestPath, 0o600);
+        try {
+          await access(outputPath);
+          await tryChmod(outputPath, 0o600);
+        } catch {
+          /* output may be absent on infra failure */
+        }
 
         await peers.quarantineRawOutput(campaignDir, trial.id, {
           stdout: invokerResult.stdout,
@@ -426,13 +612,21 @@ export async function runCampaign(opts) {
         );
 
         const oracleRoot = path.join(suiteDir, 'oracles');
+        // Minimal deterministic gate env: arm allowlist + sandbox posture only.
+        // Never pass process.env or task YAML env.
         const gateResults = await peers.runGates({
           gates: task.eligibilityGates || [],
           workspaceDir: workspace.workspaceDir,
           oracleRoot,
           confinement,
           task,
+          envAllowlist: arm.envAllowlist,
+          sandboxMode: arm.sandboxMode,
         });
+        const safeGateResults =
+          typeof peers.sanitizeGateResultsForStorage === 'function'
+            ? peers.sanitizeGateResultsForStorage(gateResults)
+            : gateResults;
 
         let changedFileCount = null;
         try {
@@ -455,7 +649,7 @@ export async function runCampaign(opts) {
 
         const classified = peers.classifyTrial({
           invokerResult,
-          gateResults,
+          gateResults: safeGateResults,
           changedFileCount,
           timedOut: Boolean(invokerResult.timedOut),
         });
@@ -487,13 +681,14 @@ export async function runCampaign(opts) {
               Buffer.from(String(request.prompt || ''), 'utf8'),
             ),
           },
-          gateResults,
+          // Digests only — never secret-bearing gate stdout/stderr previews
+          gateResults: safeGateResults,
           changedFileCount,
           startedAt,
           finishedAt,
           durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
           workspaceDir: workspace.workspaceDir,
-          artifactDir: path.join(campaignDir, 'artifacts', trial.id),
+          artifactDir,
         };
 
         await peers.writeTrialResult(campaignDir, trial.id, {
@@ -502,7 +697,7 @@ export async function runCampaign(opts) {
           digests: {
             resultDigest: sha256Json({
               classification: classified.classification,
-              gateResults,
+              gateResults: safeGateResults,
               exitCode: invokerResult.exitCode,
             }),
             rawOutputDigest: sha256Json({

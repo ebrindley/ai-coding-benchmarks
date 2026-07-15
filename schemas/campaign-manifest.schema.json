@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://ai-coding-benchmarks.local/schemas/campaign-manifest.schema.json",
   "title": "CampaignManifest",
-  "description": "Resumable campaign state: lock, trials, revisions, host metadata.",
+  "description": "Resumable campaign state: lock, trials, revisions, host metadata, frozen input digests.",
   "type": "object",
   "required": [
     "campaignId",
@@ -17,7 +17,10 @@
   "properties": {
     "campaignId": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Safe filesystem identifier: single path segment, no traversal or separators"
     },
     "schemaVersion": {
       "type": "integer",
@@ -35,11 +38,15 @@
       ]
     },
     "experimentId": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Safe filesystem identifier: single path segment, no traversal or separators"
     },
     "experiment": {
       "type": "object",
-      "description": "Embedded or referenced experiment definition",
+      "description": "Embedded frozen experiment definition used for resume (not re-read from caller)",
       "additionalProperties": true
     },
     "lock": {
@@ -60,7 +67,13 @@
         "required": ["id", "state"],
         "additionalProperties": true,
         "properties": {
-          "id": { "type": "string" },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "description": "Safe filesystem identifier: no path separators or traversal"
+          },
           "state": {
             "type": "string",
             "enum": ["pending", "running", "completed", "failed", "skipped"]
@@ -123,6 +136,54 @@
     },
     "workspaceRoot": {
       "type": ["string", "null"]
+    },
+    "inputDigests": {
+      "type": "object",
+      "description": "Frozen digests of campaign inputs; resume recomputes and fail-closes on mismatch",
+      "required": [
+        "schemaVersion",
+        "experiment",
+        "suite",
+        "tasks",
+        "harness"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "experiment": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of canonical frozen experiment"
+        },
+        "suite": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of canonical suite document"
+        },
+        "tasks": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of canonical task documents"
+        },
+        "fixtures": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of fixture tree digests map"
+        },
+        "oracles": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of oracle file digests map"
+        },
+        "harness": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of harness implementation content (harness source tree, schemas tree, package.json, package-lock.json when present); symlink-safe"
+        }
+      }
     }
   }
 }

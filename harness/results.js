@@ -4,6 +4,8 @@
  * Results live under campaign/results/<trialId>/result.json.
  * Raw provider stdout/stderr (secret-bearing) live under campaign/raw/<trialId>/
  * with directory mode 0700 and file mode 0600.
+ *
+ * Write boundaries validate trial ids and constrain paths under campaign roots.
  */
 
 import {
@@ -16,23 +18,52 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { SCHEMA_VERSION } from './contracts.js';
+import { assertSafeTrialId, trialPathUnder } from './paths.js';
 
 /**
+ * Lexical result dir (sync helper). Prefer resolveTrialResultDir at write boundaries.
  * @param {string} campaignDir
  * @param {string} trialId
  * @returns {string}
  */
 export function trialResultDir(campaignDir, trialId) {
-  return path.join(campaignDir, 'results', trialId);
+  const id = assertSafeTrialId(trialId);
+  return path.join(campaignDir, 'results', id);
 }
 
 /**
+ * Lexical raw dir (sync helper). Prefer resolveTrialRawDir at write boundaries.
  * @param {string} campaignDir
  * @param {string} trialId
  * @returns {string}
  */
 export function trialRawDir(campaignDir, trialId) {
-  return path.join(campaignDir, 'raw', trialId);
+  const id = assertSafeTrialId(trialId);
+  return path.join(campaignDir, 'raw', id);
+}
+
+/**
+ * Canonical containment for results/<trialId>.
+ * @param {string} campaignDir
+ * @param {string} trialId
+ * @returns {Promise<string>}
+ */
+export async function resolveTrialResultDir(campaignDir, trialId) {
+  if (!campaignDir) throw new Error('resolveTrialResultDir: campaignDir is required');
+  const resultsRoot = path.join(path.resolve(campaignDir), 'results');
+  return trialPathUnder(resultsRoot, trialId);
+}
+
+/**
+ * Canonical containment for raw/<trialId>.
+ * @param {string} campaignDir
+ * @param {string} trialId
+ * @returns {Promise<string>}
+ */
+export async function resolveTrialRawDir(campaignDir, trialId) {
+  if (!campaignDir) throw new Error('resolveTrialRawDir: campaignDir is required');
+  const rawRoot = path.join(path.resolve(campaignDir), 'raw');
+  return trialPathUnder(rawRoot, trialId);
 }
 
 /**
@@ -68,7 +99,28 @@ export async function writePrivateFile(filePath, data) {
 }
 
 /**
- * Write (or overwrite) a trial result.json atomically.
+ * Strip secret-bearing gate previews before ordinary result write.
+ * Digests / status / evidence remain.
+ * @param {unknown} gateResults
+ * @returns {unknown}
+ */
+function stripGatePreviews(gateResults) {
+  if (!Array.isArray(gateResults)) return gateResults;
+  return gateResults.map((g) => {
+    if (!g || typeof g !== 'object') return g;
+    const copy = { ...g };
+    delete copy.stdoutPreview;
+    delete copy.stderrPreview;
+    delete copy.stdout;
+    delete copy.stderr;
+    delete copy.rawStdout;
+    delete copy.rawStderr;
+    return copy;
+  });
+}
+
+/**
+ * Write (or overwrite) a trial result.json atomically (dir 0700, file 0600).
  *
  * @param {string} campaignDir
  * @param {string} trialId
@@ -82,15 +134,18 @@ export async function writeTrialResult(campaignDir, trialId, result) {
     throw new Error('writeTrialResult: result is required');
   }
 
-  const dir = trialResultDir(campaignDir, trialId);
-  await mkdir(dir, { recursive: true });
+  // results/ and trial dir are private; path is containment-checked
+  const safeId = assertSafeTrialId(trialId);
+  await ensurePrivateDir(path.join(path.resolve(campaignDir), 'results'));
+  const dir = await resolveTrialResultDir(campaignDir, safeId);
+  await ensurePrivateDir(dir);
 
   const payload = {
     ...result,
-    id: result.id ?? trialId,
+    id: result.id ?? safeId,
     classification: result.classification ?? null,
     digests: result.digests ?? {},
-    gateResults: result.gateResults ?? undefined,
+    gateResults: stripGatePreviews(result.gateResults) ?? undefined,
     requestedModel: result.requestedModel ?? null,
     // Preserve null — never invent resolved from requested
     resolvedModel:
@@ -103,8 +158,9 @@ export async function writeTrialResult(campaignDir, trialId, result) {
 
   const finalPath = path.join(dir, 'result.json');
   const tmpPath = path.join(dir, 'result.json.tmp');
-  await writeFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  await writePrivateFile(tmpPath, `${JSON.stringify(payload, null, 2)}\n`);
   await rename(tmpPath, finalPath);
+  await tryChmod(finalPath, 0o600);
 
   return { path: finalPath, result: payload };
 }
@@ -119,7 +175,8 @@ export async function readTrialResult(campaignDir, trialId) {
   if (!campaignDir) throw new Error('readTrialResult: campaignDir is required');
   if (!trialId) throw new Error('readTrialResult: trialId is required');
 
-  const p = path.join(trialResultDir(campaignDir, trialId), 'result.json');
+  const dir = await resolveTrialResultDir(campaignDir, trialId);
+  const p = path.join(dir, 'result.json');
   const text = await readFile(p, 'utf8');
   return JSON.parse(text);
 }
@@ -140,11 +197,12 @@ export async function quarantineRawOutput(campaignDir, trialId, raw = {}) {
   if (!campaignDir) throw new Error('quarantineRawOutput: campaignDir is required');
   if (!trialId) throw new Error('quarantineRawOutput: trialId is required');
 
-  // Ensure raw root is private
-  const rawRoot = path.join(campaignDir, 'raw');
+  // Ensure raw root is private; path is containment-checked
+  const safeId = assertSafeTrialId(trialId);
+  const rawRoot = path.join(path.resolve(campaignDir), 'raw');
   await ensurePrivateDir(rawRoot);
 
-  const dir = trialRawDir(campaignDir, trialId);
+  const dir = await resolveTrialRawDir(campaignDir, safeId);
   await ensurePrivateDir(dir);
 
   if (raw.stdout != null) {
@@ -168,7 +226,7 @@ export async function quarantineRawOutput(campaignDir, trialId, raw = {}) {
   }
 
   const meta = {
-    trialId: String(trialId),
+    trialId: String(safeId),
     quarantinedAt: new Date().toISOString(),
     warning:
       'SECRET-BEARING: raw provider output. Do not commit or include in sanitized export by default.',

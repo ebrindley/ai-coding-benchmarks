@@ -299,3 +299,128 @@ export async function pathExists(absPath) {
 export async function lstatPath(absPath) {
   return lstat(absPath);
 }
+
+/**
+ * Safe single-segment filesystem identifier pattern:
+ * - no path separators, no `..`, no null bytes
+ * - constrained charset suitable as a single path segment
+ * - length 1..128
+ *
+ * Shared by trial ids, campaign ids, experiment ids used as path segments, etc.
+ */
+export const SAFE_ID_SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** @deprecated Prefer SAFE_ID_SEGMENT_RE; kept as alias for trial id call sites. */
+export const SAFE_TRIAL_ID_RE = SAFE_ID_SEGMENT_RE;
+
+/**
+ * Assert a single path-segment identifier is safe to join under a root.
+ * Rejects empty, overlong, traversal, separators, absolute forms, and unconstrained charset.
+ *
+ * @param {unknown} segment
+ * @param {{ label?: string }} [opts]
+ * @returns {string} the validated segment
+ */
+export function assertSafeIdSegment(segment, opts = {}) {
+  const label = opts.label ?? 'id segment';
+  if (segment == null || typeof segment !== 'string' || segment.trim() === '') {
+    throw new PathEscapeError(`${label} is required`, {
+      candidate: String(segment ?? ''),
+      code: 'ID_SEGMENT_REQUIRED',
+    });
+  }
+  const id = String(segment);
+  if (id.includes('\0')) {
+    throw new PathEscapeError(`${label} contains null byte`, {
+      candidate: id,
+      code: 'ID_SEGMENT_NULL',
+    });
+  }
+  if (
+    id.includes('..') ||
+    id.includes('/') ||
+    id.includes('\\') ||
+    path.isAbsolute(id) ||
+    path.basename(id) !== id ||
+    path.normalize(id) !== id
+  ) {
+    throw new PathEscapeError(
+      `unsafe ${label} (traversal or path separator): "${id}"`,
+      { candidate: id, code: 'ID_SEGMENT_UNSAFE' },
+    );
+  }
+  if (!SAFE_ID_SEGMENT_RE.test(id)) {
+    throw new PathEscapeError(
+      `${label} has invalid charset or length: "${id}"`,
+      { candidate: id, code: 'ID_SEGMENT_CHARSET' },
+    );
+  }
+  return id;
+}
+
+/**
+ * Assert a trial id is safe to join under a campaign root.
+ * @param {unknown} trialId
+ * @returns {string}
+ */
+export function assertSafeTrialId(trialId) {
+  return assertSafeIdSegment(trialId, { label: 'trial id' });
+}
+
+/**
+ * Assert a campaign id is safe to join as a single path segment (e.g. default campaignDir).
+ * @param {unknown} campaignId
+ * @returns {string}
+ */
+export function assertSafeCampaignId(campaignId) {
+  return assertSafeIdSegment(campaignId, { label: 'campaign id' });
+}
+
+/**
+ * Assert an additional relative path segment is safe to join under a root.
+ * @param {unknown} segment
+ * @returns {string}
+ */
+function assertSafePathSegment(segment) {
+  if (segment == null || String(segment).trim() === '') {
+    throw new PathEscapeError('path segment is required', {
+      candidate: String(segment ?? ''),
+      code: 'SEGMENT_REQUIRED',
+    });
+  }
+  const s = String(segment);
+  if (
+    s.includes('\0') ||
+    s.includes('..') ||
+    s.includes('/') ||
+    s.includes('\\') ||
+    path.isAbsolute(s) ||
+    path.basename(s) !== s ||
+    path.normalize(s) !== s
+  ) {
+    throw new PathEscapeError(`unsafe path segment: "${s}"`, {
+      candidate: s,
+      code: 'SEGMENT_UNSAFE',
+    });
+  }
+  return s;
+}
+
+/**
+ * Join trialId (+ optional segments) under a campaign root with canonical containment.
+ * Uses assertSafeTrialId + resolveUnder / assertInsideRoot at the write boundary.
+ *
+ * @param {string} root - campaign workspace/artifact/result/raw root
+ * @param {string} trialId
+ * @param {...string} segments - additional single path segments (no separators)
+ * @returns {Promise<string>} absolute path under root
+ */
+export async function trialPathUnder(root, trialId, ...segments) {
+  const id = assertSafeTrialId(trialId);
+  const parts = [id];
+  for (const seg of segments) {
+    parts.push(assertSafePathSegment(seg));
+  }
+  const rel = path.join(...parts);
+  return resolveUnder(root, rel);
+}
