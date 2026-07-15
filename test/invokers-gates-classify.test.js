@@ -84,9 +84,10 @@ const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
 // Report modes seen at invoke time (request already written by harness with 0600).
 const reqMode = fs.statSync(reqPath).mode & 0o777;
 const outModeBefore = fs.existsSync(out) ? (fs.statSync(out).mode & 0o777) : null;
-// Actual provider raw: <stem>.invoke-artifacts/<requestId>/ (Poetic contract)
-const stem = path.basename(out, path.extname(out));
-const rawDir = path.join(path.dirname(out), stem + '.invoke-artifacts', req.requestId);
+// Actual provider raw: strip only trailing .json (Poetic resolveArtifactQuarantineDir)
+const base = path.basename(path.resolve(out));
+const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
+const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
 fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'provider-stdout-body\\n');
 fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'provider-stderr-body\\n');
@@ -215,8 +216,9 @@ const args = process.argv.slice(2);
 const out = args[args.indexOf('--output') + 1];
 const reqPath = args[args.indexOf('--request') + 1];
 const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
-const stem = path.basename(out, path.extname(out));
-const rawDir = path.join(path.dirname(out), stem + '.invoke-artifacts', req.requestId);
+const base = path.basename(path.resolve(out));
+const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
+const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
 fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'raw-out-${kind}\\n');
 fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'raw-err-${kind}\\n');

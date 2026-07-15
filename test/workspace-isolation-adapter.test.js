@@ -290,8 +290,9 @@ const args = process.argv.slice(2);
 const reqPath = args[args.indexOf('--request') + 1];
 const out = args[args.indexOf('--output') + 1];
 const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
-const stem = path.basename(out, path.extname(out));
-const rawDir = path.join(path.dirname(out), stem + '.invoke-artifacts', req.requestId);
+const base = path.basename(path.resolve(out));
+const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
+const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
 fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'actual-provider-out\\n');
 fs.writeFileSync(path.join(rawDir, 'stderr.txt'), '');
@@ -449,17 +450,30 @@ process.exit(0);
       assert.ok(!paths.dir.includes(`${path.sep}invoke-artifacts${path.sep}`));
       assert.ok(paths.dir.includes('output.invoke-artifacts'));
 
-      // Multi-dot basename: path.extname peels only the last extension
-      const multi = path.join(dir, 'scratch', 'result.v2.json');
+      // Multi-dot .json: only trailing .json stripped (not path.extname)
+      const multi = path.join(dir, 'scratch', 'foo.bar.json');
       assert.equal(
         resolveProviderRawArtifactsDirName(multi),
-        'result.v2.invoke-artifacts',
+        'foo.bar.invoke-artifacts',
       );
       const multiPaths = expectedProviderRawPaths(multi, 'rid-2');
       assert.ok(!('error' in multiPaths));
       assert.equal(
         multiPaths.dir,
-        path.join(dir, 'scratch', 'result.v2.invoke-artifacts', 'rid-2'),
+        path.join(dir, 'scratch', 'foo.bar.invoke-artifacts', 'rid-2'),
+      );
+
+      // Non-.json extension is NOT stripped
+      const txt = path.join(dir, 'scratch', 'foo.txt');
+      assert.equal(
+        resolveProviderRawArtifactsDirName(txt),
+        'foo.txt.invoke-artifacts',
+      );
+
+      // Case-insensitive .json strip
+      assert.equal(
+        resolveProviderRawArtifactsDirName(path.join(dir, 'out.JSON')),
+        'out.invoke-artifacts',
       );
 
       // No-extension basename
@@ -491,8 +505,9 @@ const args = process.argv.slice(2);
 const reqPath = args[args.indexOf('--request') + 1];
 const out = args[args.indexOf('--output') + 1];
 const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
-const stem = path.basename(out, path.extname(out));
-const rawDir = path.join(path.dirname(out), stem + '.invoke-artifacts', req.requestId);
+const base = path.basename(path.resolve(out));
+const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
+const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
 fs.writeFileSync(path.join(rawDir, 'stdout.txt'), 'E2E_CONTRACT_OUT\\n');
 fs.writeFileSync(path.join(rawDir, 'stderr.txt'), 'E2E_CONTRACT_ERR\\n');

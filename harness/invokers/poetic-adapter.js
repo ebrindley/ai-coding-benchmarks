@@ -29,17 +29,20 @@ export const POETIC_INVOKE_RESULT_SCHEMA = 'poetic.provider.invoke.result.v1';
 
 /**
  * Deterministic provider raw quarantine — mirrors Poetic's public
- * `resolveArtifactQuarantineDir(outputPath, requestId)`:
- *   dirname(outputPath) /
- *     basename-without-ext(outputPath) + ".invoke-artifacts" /
- *     requestId /
- *     {stdout,stderr}.txt
+ * `resolveArtifactQuarantineDir(outputPath, requestId)` EXACTLY:
+ *
+ *   const base = path.basename(path.resolve(outputPath));
+ *   const stem = base.toLowerCase().endsWith('.json')
+ *     ? base.slice(0, -5)
+ *     : base;
+ *   // dir = dirname(resolved) / (stem + ".invoke-artifacts") / requestId
  *
  * Example: /scratch/output.json
  *   → /scratch/output.invoke-artifacts/<requestId>/{stdout,stderr}.txt
  *
- * Basename-without-ext uses Node path.basename(path, path.extname(path))
- * (multi-dot: output.v1.json → output.v1.invoke-artifacts/...).
+ * Only a trailing `.json` (case-insensitive) is stripped — not path.extname.
+ * Multi-dot: foo.bar.json → foo.bar.invoke-artifacts
+ * Non-json:  foo.txt → foo.txt.invoke-artifacts
  *
  * Wrapper CLI stdout/stderr are intentionally quiet; actual provider streams
  * live only in these private files. Never trust free-form paths from the
@@ -53,14 +56,16 @@ export const PROVIDER_RAW_STDERR_NAME = 'stderr.txt';
 
 /**
  * Resolve Poetic's deterministic quarantine directory name for an output path.
- * Mirrors path.basename(output, path.extname(output)) + ".invoke-artifacts".
+ * Exact mirror of Poetic: strip only trailing `.json` (case-insensitive).
  *
  * @param {string} outputPath
  * @returns {string} e.g. "output.invoke-artifacts"
  */
 export function resolveProviderRawArtifactsDirName(outputPath) {
-  const base = path.basename(String(outputPath));
-  const stem = path.basename(base, path.extname(base));
+  const base = path.basename(path.resolve(String(outputPath)));
+  const stem = base.toLowerCase().endsWith('.json')
+    ? base.slice(0, -5)
+    : base;
   return `${stem}${PROVIDER_RAW_ARTIFACTS_SUFFIX}`;
 }
 
