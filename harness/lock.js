@@ -1,23 +1,36 @@
 /**
- * Campaign directory lock via exclusive file create (`wx`).
+ * Campaign directory lock via exclusive no-follow file create
+ * (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600 — no rename/replace).
  * No shell. Lock file: campaign.lock under the campaign directory.
  *
  * Dead-owner recovery is conservative: same-host PID liveness plus age or
  * owner-metadata evidence. Never steals a live or ambiguous lock.
  *
- * Stale-lock recovery is serialized by a separate atomic recovery guard
- * (`campaign.lock.recover` with `wx`) so two reclaimers cannot delete a
- * newly acquired live lock (compare-then-unlink race).
+ * Stale-lock recovery is serialized by a separate exclusive recovery guard
+ * (`campaign.lock.recover`) so two reclaimers cannot delete a newly acquired
+ * live lock (compare-then-unlink race).
  *
  * Recovery guards themselves carry PID/host/time identity. A dead same-host
  * guard holder (crashed reclaimer) can be reclaimed safely after age so a
  * reclaimer crash does not wedge resume forever. Live/ambiguous guards are
  * never stolen.
+ *
+ * Reads use bounded readTextNoFollow so pre-planted lock/guard leaf symlinks
+ * cannot inject host content into reclaim decisions.
  */
 
-import { readFile, unlink, writeFile } from 'node:fs/promises';
+import { unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  createFileExclusiveNoFollow,
+  readTextNoFollow,
+  UnsafePathError,
+  DEFAULT_SAFE_READ_MAX_BYTES,
+} from './safe-fs.js';
+
+/** Bound for lock / recovery-guard JSON (small; keep well under default). */
+const LOCK_READ_MAX_BYTES = Math.min(DEFAULT_SAFE_READ_MAX_BYTES, 1024 * 1024);
 
 export const LOCK_FILENAME = 'campaign.lock';
 export const LOCK_RECOVER_FILENAME = 'campaign.lock.recover';
@@ -243,14 +256,14 @@ export function canRecoverDeadGuard(guard, opts = {}) {
 }
 
 /**
- * Read lock metadata if present.
+ * Read lock metadata if present (nofollow; never follows a planted leaf symlink).
  * @param {string} campaignDir
  * @returns {Promise<object | null>}
  */
 export async function readLock(campaignDir) {
   const p = lockPath(campaignDir);
   try {
-    const text = await readFile(p, 'utf8');
+    const text = await readTextNoFollow(p, { maxBytes: LOCK_READ_MAX_BYTES });
     const data = JSON.parse(text);
     return {
       owner: data.owner ?? null,
@@ -261,6 +274,7 @@ export async function readLock(campaignDir) {
       ...data,
     };
   } catch (err) {
+    if (err instanceof UnsafePathError) throw err;
     const code = /** @type {NodeJS.ErrnoException} */ (err).code;
     if (code === 'ENOENT') {
       return null;
@@ -270,14 +284,14 @@ export async function readLock(campaignDir) {
 }
 
 /**
- * Read recovery guard metadata if present.
+ * Read recovery guard metadata if present (nofollow).
  * @param {string} campaignDir
  * @returns {Promise<object | null>}
  */
 export async function readRecoveryGuard(campaignDir) {
   const p = lockRecoverPath(campaignDir);
   try {
-    const text = await readFile(p, 'utf8');
+    const text = await readTextNoFollow(p, { maxBytes: LOCK_READ_MAX_BYTES });
     const data = JSON.parse(text);
     return {
       owner: data.owner ?? null,
@@ -288,6 +302,7 @@ export async function readRecoveryGuard(campaignDir) {
       ...data,
     };
   } catch (err) {
+    if (err instanceof UnsafePathError) throw err;
     const code = /** @type {NodeJS.ErrnoException} */ (err).code;
     if (code === 'ENOENT') {
       return null;
@@ -328,16 +343,32 @@ function buildGuardPayload(lockPayload, existing) {
 }
 
 /**
- * Attempt exclusive create of a file with wx.
+ * Attempt exclusive create of a file with O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600.
+ * Does not replace an existing file (no rename). Leaf symlinks fail closed.
+ *
  * @param {string} p
  * @param {string} body
  * @returns {Promise<{ ok: true } | { ok: false, code?: string, error: string }>}
  */
 async function tryCreateExclusive(p, body) {
   try {
-    await writeFile(p, body, { flag: 'wx' });
+    await createFileExclusiveNoFollow(p, body, { mode: 0o600, fsync: true });
     return { ok: true };
   } catch (err) {
+    if (err instanceof UnsafePathError) {
+      // Pre-planted LEAF symlink at the lock path: surface as EEXIST so callers
+      // re-read via nofollow and fail closed without reclaiming from external
+      // content. Intermediate/parent symlink failures keep their own codes so
+      // acquisition fails immediately (must not enter reclaim).
+      const leafSymlink =
+        err.code === 'SYMLINK' &&
+        /path is a symlink \(fail closed\)/i.test(err.message);
+      return {
+        ok: false,
+        code: leafSymlink ? 'EEXIST' : err.code,
+        error: err.message,
+      };
+    }
     const code = /** @type {NodeJS.ErrnoException} */ (err).code;
     return {
       ok: false,

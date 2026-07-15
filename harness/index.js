@@ -146,6 +146,7 @@ export {
   copyFileNoFollow,
   writeFileAtomicNoFollow,
   writePrivateFileNoFollow,
+  createFileExclusiveNoFollow,
   ensurePrivateDirNoFollow,
   mkdirpNoFollow,
   assertCampaignFilesystemBoundary,

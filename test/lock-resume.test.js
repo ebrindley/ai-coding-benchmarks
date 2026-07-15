@@ -6,7 +6,16 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  rm,
+  writeFile,
+  readFile,
+  readdir,
+  symlink,
+  lstat,
+} from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -399,6 +408,216 @@ describe('lock + atomic resume', () => {
       ).recoverable,
       false,
     );
+  });
+
+  it('planted campaign.lock symlink: acquire/read fail closed; sentinel unchanged', async () => {
+    if (process.platform === 'win32') return;
+    const {
+      acquireLock,
+      readLock,
+      lockPath,
+    } = await import('../harness/lock.js');
+    const { UnsafePathError } = await import('../harness/safe-fs.js');
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-lock-sym-'));
+    const external = path.join(dir, 'host-secret.txt');
+    const SENTINEL = 'LOCK_SENTINEL_EXTERNAL\n';
+    try {
+      await writeFile(external, SENTINEL, 'utf8');
+      await symlink(external, lockPath(dir));
+
+      // Exclusive create must not open/overwrite through the leaf symlink.
+      const acq = await acquireLock(dir, 'attacker-owner', { minAgeMs: 0 });
+      assert.equal(acq.ok, false);
+      assert.equal(acq.acquired, false);
+      assert.match(
+        String(acq.error || ''),
+        /symlink|unreadable|fail closed|unsafe|EEXIST|held/i,
+      );
+
+      // Direct read must not follow into host content.
+      await assert.rejects(
+        () => readLock(dir),
+        (err) =>
+          err instanceof UnsafePathError ||
+          /symlink|fail closed|UNSAFE/i.test(String(err)),
+      );
+
+      // Still a symlink; external body untouched; never reclaimed as our lock.
+      const st = await lstat(lockPath(dir));
+      assert.equal(st.isSymbolicLink(), true);
+      assert.equal(await readFile(external, 'utf8'), SENTINEL);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('intermediate ancestor symlink: acquireLock fails closed; no write outside', async () => {
+    if (process.platform === 'win32') return;
+    const { acquireLock, lockPath } = await import('../harness/lock.js');
+    const { createFileExclusiveNoFollow, UnsafePathError } = await import(
+      '../harness/safe-fs.js'
+    );
+
+    const base = await mkdtemp(path.join(os.tmpdir(), 'aicb-lock-anc-'));
+    const outside = path.join(base, 'outside');
+    const external = path.join(outside, 'host-secret.txt');
+    const SENTINEL = 'ANC_LOCK_SENTINEL\n';
+    try {
+      await mkdir(outside, { recursive: true });
+      await writeFile(external, SENTINEL, 'utf8');
+
+      const parent = path.join(base, 'parent');
+      await mkdir(parent, { recursive: true });
+      // Intermediate component is a symlink directory → outside the tree.
+      const mid = path.join(parent, 'mid');
+      await symlink(outside, mid);
+      // Campaign-shaped path under the intermediate symlink (does not exist).
+      const camp = path.join(mid, 'campaign');
+      // Pre-create the lexical camp path by following would land under outside;
+      // we deliberately leave camp missing so create sees mid as symlink ancestor.
+
+      // Direct exclusive create refuses full parent chain (mid is user symlink).
+      await assert.rejects(
+        () =>
+          createFileExclusiveNoFollow(
+            path.join(camp, 'campaign.lock'),
+            '{"owner":"x"}\n',
+          ),
+        (err) =>
+          err instanceof UnsafePathError ||
+          /symlink|fail closed/i.test(String(err)),
+      );
+
+      // Also refuse when the immediate parent exists under the symlink chain:
+      // plant campaign as a real dir under outside, address it via mid/campaign.
+      await mkdir(path.join(outside, 'campaign'), { recursive: true });
+      await assert.rejects(
+        () =>
+          createFileExclusiveNoFollow(
+            path.join(camp, 'campaign.lock'),
+            '{"owner":"pwn"}\n',
+          ),
+        (err) =>
+          err instanceof UnsafePathError ||
+          /symlink|fail closed/i.test(String(err)),
+      );
+
+      // acquireLock must not create a lock through the intermediate symlink.
+      const acq = await acquireLock(camp, 'owner-anc', { minAgeMs: 0 });
+      assert.equal(acq.ok, false);
+      assert.equal(acq.acquired, false);
+      assert.match(
+        String(acq.error || ''),
+        /symlink|fail closed|parent|unreadable|unsafe|EEXIST|missing/i,
+      );
+
+      // Outside campaign dir must not contain a successfully written lock.
+      const campOutsideListing = await readdir(path.join(outside, 'campaign'));
+      assert.ok(
+        !campOutsideListing.includes('campaign.lock'),
+        'must not write campaign.lock through intermediate ancestor symlink',
+      );
+      try {
+        await lstat(lockPath(camp));
+        // Path may resolve through mid; must not be a regular private lock we created.
+        const st = await lstat(path.join(outside, 'campaign', 'campaign.lock'));
+        assert.fail(
+          `lock must not exist outside (symlink=${st.isSymbolicLink()})`,
+        );
+      } catch (err) {
+        const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+        assert.equal(code, 'ENOENT');
+      }
+
+      assert.equal(await readFile(external, 'utf8'), SENTINEL);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it('planted recovery-guard symlink: recovery fails closed; no reclaim from external', async () => {
+    if (process.platform === 'win32') return;
+    const {
+      acquireLock,
+      releaseLock,
+      lockPath,
+      lockRecoverPath,
+      readRecoveryGuard,
+      isPidAlive,
+      canRecoverDeadLock,
+    } = await import('../harness/lock.js');
+    const { UnsafePathError } = await import('../harness/safe-fs.js');
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-guard-sym-'));
+    const external = path.join(dir, 'host-secret.txt');
+    const SENTINEL = 'GUARD_SENTINEL_EXTERNAL\n';
+    try {
+      await writeFile(external, SENTINEL, 'utf8');
+
+      // Dead recoverable lock (would normally reclaim).
+      let deadPid = spawnSync(process.execPath, ['-e', 'process.exit(0)'], {
+        encoding: 'utf8',
+      }).pid;
+      if (deadPid == null || isPidAlive(deadPid) !== false) {
+        deadPid = 2147483641;
+        if (isPidAlive(deadPid) !== false) {
+          assert.fail('need a dead pid for guard symlink test');
+        }
+      }
+      const deadPayload = {
+        owner: `aicb-${deadPid}-guard-sym`,
+        acquiredAt: new Date(Date.now() - 180_000).toISOString(),
+        pid: deadPid,
+        hostname: os.hostname(),
+      };
+      assert.equal(
+        canRecoverDeadLock(deadPayload, { minAgeMs: 30_000 }).recoverable,
+        true,
+      );
+      await writeFile(
+        lockPath(dir),
+        `${JSON.stringify(deadPayload, null, 2)}\n`,
+        'utf8',
+      );
+
+      // Plant recovery guard as symlink to external sentinel.
+      await symlink(external, lockRecoverPath(dir));
+
+      const acq = await acquireLock(dir, 'new-owner', { minAgeMs: 30_000 });
+      assert.equal(acq.ok, false);
+      assert.equal(acq.acquired, false);
+      assert.match(
+        String(acq.error || ''),
+        /symlink|unreadable|fail closed|recovery|unsafe/i,
+      );
+
+      await assert.rejects(
+        () => readRecoveryGuard(dir),
+        (err) =>
+          err instanceof UnsafePathError ||
+          /symlink|fail closed|UNSAFE/i.test(String(err)),
+      );
+
+      // Dead lock still present (not unlinked/replaced based on external content).
+      const lockBody = await readFile(lockPath(dir), 'utf8');
+      assert.ok(lockBody.includes(String(deadPid)));
+      assert.ok(!lockBody.includes('new-owner'));
+
+      const guardSt = await lstat(lockRecoverPath(dir));
+      assert.equal(guardSt.isSymbolicLink(), true);
+      assert.equal(await readFile(external, 'utf8'), SENTINEL);
+
+      // Clean for isolation: force-remove planted guard and recover for real.
+      await rm(lockRecoverPath(dir), { force: true });
+      const recovered = await acquireLock(dir, 'new-owner', { minAgeMs: 30_000 });
+      assert.equal(recovered.ok, true);
+      assert.equal(recovered.acquired, true);
+      await releaseLock(dir, 'new-owner');
+      assert.equal(await readFile(external, 'utf8'), SENTINEL);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('rejects unsafe campaign ids (traversal/absolute/overlong)', async () => {

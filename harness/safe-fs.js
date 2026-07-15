@@ -58,7 +58,7 @@ export function safeOpenReadFlags() {
 }
 
 /**
- * Exclusive create + write + no-follow (temp files). Requires O_NOFOLLOW.
+ * Exclusive create + write + no-follow (temp files / lock files). Requires O_NOFOLLOW.
  * @returns {number}
  */
 export function safeOpenExclusiveWriteFlags() {
@@ -69,6 +69,122 @@ export function safeOpenExclusiveWriteFlags() {
     constants.O_EXCL |
     constants.O_NOFOLLOW
   );
+}
+
+/**
+ * Create a new file exclusively without following symlinks and without rename.
+ *
+ * Used for lock-style acquisition that must not replace an existing file:
+ * open with O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600 (default), complete write,
+ * fsync, and close. Never opens a pre-existing path (including a leaf
+ * symlink) for write-through.
+ *
+ * Parent is validated with the full no-symlink ancestor chain (mustExist)
+ * before open so intermediate/grandparent user symlinks cannot be followed.
+ * chmod(mode) and fsync are part of the contract: failures remove the
+ * partial regular file and rethrow (fail closed).
+ *
+ * @param {string} filePath
+ * @param {string | Buffer} data
+ * @param {{ mode?: number, fsync?: boolean }} [opts]
+ * @returns {Promise<{ path: string }>}
+ */
+export async function createFileExclusiveNoFollow(filePath, data, opts = {}) {
+  assertNoFollowAvailable();
+  const mode = opts.mode != null ? opts.mode : 0o600;
+  const doFsync = opts.fsync !== false;
+  const abs = path.resolve(String(filePath));
+  if (abs.includes('\0')) {
+    throw new UnsafePathError(
+      `createFileExclusiveNoFollow: path contains null byte (fail closed)`,
+      { code: 'NULL_BYTE', path: abs },
+    );
+  }
+
+  const parent = path.dirname(abs);
+  // Full-chain validation: reject intermediate/grandparent user symlinks, not
+  // only the immediate parent (lstat on the leaf name is insufficient alone).
+  await assertNoSymlinkAncestors(parent, {
+    mustExist: true,
+    label: 'createFileExclusiveNoFollow parent',
+  });
+  const parentSt = await lstatOrNull(parent);
+  if (!parentSt) {
+    throw new UnsafePathError(
+      `createFileExclusiveNoFollow: parent missing (fail closed): ${parent}`,
+      { code: 'PARENT_MISSING', path: parent },
+    );
+  }
+  // After full-chain walk, parent must still be a real directory for create.
+  // Allowed system aliases (/tmp, /var) may appear as symlinks in the chain;
+  // the final parent component must resolve as a directory for open.
+  if (parentSt.isSymbolicLink()) {
+    const allowed = await isAllowedSystemPathSymlink(parent);
+    if (!allowed) {
+      throw new UnsafePathError(
+        `createFileExclusiveNoFollow: parent is a symlink (fail closed): ${parent}`,
+        { code: 'SYMLINK', path: parent },
+      );
+    }
+  } else if (!parentSt.isDirectory()) {
+    throw new UnsafePathError(
+      `createFileExclusiveNoFollow: parent is not a directory (fail closed): ${parent}`,
+      { code: 'NOT_DIRECTORY', path: parent },
+    );
+  }
+
+  // Refuse pre-existing leaf symlink without following (clearer than EEXIST alone).
+  const destSt = await lstatOrNull(abs);
+  if (destSt?.isSymbolicLink()) {
+    throw new UnsafePathError(
+      `createFileExclusiveNoFollow: path is a symlink (fail closed): ${abs}`,
+      { code: 'SYMLINK', path: abs },
+    );
+  }
+
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
+  const flags = safeOpenExclusiveWriteFlags();
+  /** @type {import('node:fs/promises').FileHandle | null} */
+  let handle = null;
+  /** @type {boolean} */
+  let created = false;
+  try {
+    try {
+      handle = await open(abs, flags, mode);
+    } catch (err) {
+      rethrowOpenError(err, abs);
+    }
+    created = true;
+
+    let offset = 0;
+    while (offset < buf.length) {
+      const { bytesWritten } = await handle.write(
+        buf,
+        offset,
+        buf.length - offset,
+        offset,
+      );
+      offset += bytesWritten;
+    }
+    // Create mode can be masked by umask; enforce private bits on the fd.
+    // Fail closed: do not swallow chmod/sync errors (mode 0600 + durability).
+    await handle.chmod(mode);
+    if (doFsync) {
+      await handle.sync();
+    }
+  } catch (err) {
+    if (created) {
+      // Incomplete exclusive create: remove the partial regular file only.
+      await unlink(abs).catch(() => {});
+    }
+    throw err;
+  } finally {
+    if (handle != null) {
+      await handle.close().catch(() => {});
+      handle = null;
+    }
+  }
+  return { path: abs };
 }
 
 /**
