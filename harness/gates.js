@@ -5,10 +5,29 @@
  * policy cannot be constructed — never run gate command strings bare.
  * Command strings are passed as exact literals to `/bin/sh -c` under confinement only.
  *
+ * Oracle contract (commandless):
+ *   gate.oraclePath is relative to the suite oracles/ root only (path-contained).
+ *   Harness builds a controlled argv command string from the script extension:
+ *     .js/.mjs/.cjs → `node <absOraclePath>`
+ *     .sh/.bash     → `bash <absOraclePath>`
+ *   cwd = workspace; WORKSPACE_DIR is set to the absolute workspace path.
+ *   Task-declared `command` (when present) is never rewritten — it runs as-is.
+ *
  * macOS: deny-default seatbelt — process-exec; reads only workspace/private-tmp/system
- *        toolchain roots; writes only workspace + private tmp; network per task policy.
+ *        toolchain roots (+ oracle path roots when executing oracles); writes only
+ *        workspace + private tmp; network per task policy.
  * Linux: explicit ro-bind of system/toolchain roots only (never / or $HOME),
  *        writable workspace, private tmpfs, die-with-parent, network unshare when denied.
+ *
+ * Requirements evidence contract:
+ *   substantiation "test"|"tests": require non-empty artifactRef (metadata only —
+ *     not executed by evaluateRequirements) and a prior passed required gate
+ *     named by evidenceGate (default "tests"). No silent bind to unrelated gates.
+ *   substantiation "static" (and other non-test): require explicit evidenceGate,
+ *     gate, or oraclePath metadata on the mustHave item binding to a prior passed
+ *     gate — never name-substring heuristics on the substantiation keyword.
+ *   artifactRef is declaration metadata only; pass/fail evidence is always the
+ *     exact bound gate result, never "artifactRef was executed".
  */
 
 import { spawn } from 'node:child_process';
@@ -21,6 +40,7 @@ import {
   DEFAULT_CAPTURE_LIMIT,
   spawnControlled,
 } from './invokers/spawn-controlled.js';
+import { PathEscapeError, resolveUnder } from './paths.js';
 
 /** Gates that are structural / non-command-executable without a command field. */
 const STRUCTURAL_GATES = new Set(['baseline-diff', 'requirements']);
@@ -39,6 +59,38 @@ const PROTECTED_PATH_PREFIXES = Object.freeze([
 
 const EVIDENCE_TRUNCATE = 8192;
 const DEFAULT_GATE_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Always-present base keys for confined gate commands (minimal deterministic env).
+ * Values are taken from the parent process when present; never full process.env.
+ */
+export const GATE_CORE_ENV_KEYS = Object.freeze(['PATH']);
+
+/**
+ * Optional platform keys included only when sandboxMode is not restrictive.
+ * Still taken as names from parent — never invented secret values.
+ */
+export const GATE_PLATFORM_ENV_KEYS = Object.freeze([
+  'HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'USER',
+  'LOGNAME',
+  'TERM',
+]);
+
+/** Keys kept even under restrictive sandbox (tools often need a tmp/home). */
+export const GATE_RESTRICTIVE_ENV_KEYS = Object.freeze([
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+]);
 
 /** Explicit system/toolchain roots candidates (missing paths skipped). */
 export const SYSTEM_TOOLCHAIN_ROOTS = Object.freeze([
@@ -78,13 +130,278 @@ export const SYSTEM_TOOLCHAIN_ROOTS = Object.freeze([
  * @property {boolean} timedOut
  * @property {string} [stdoutDigest]
  * @property {string} [stderrDigest]
- * @property {string} [stdoutPreview]
- * @property {string} [stderrPreview]
  * @property {string} [evidence]
  * @property {string} [infraFailure]
  * @property {'PASS' | 'FAIL' | 'INFRA_FAIL' | 'TIMEOUT' | null} classificationSignal
  * @property {string} [check]
+ * @property {string} [oraclePath] relative path under suite oracles/ when oracle gate
  */
+
+/**
+ * @param {unknown} sandboxMode
+ * @returns {boolean}
+ */
+export function isRestrictiveSandboxMode(sandboxMode) {
+  if (sandboxMode == null) return false;
+  const s = String(sandboxMode).trim().toLowerCase();
+  return (
+    s === 'restrictive' ||
+    s === 'strict' ||
+    s === 'minimal' ||
+    s === 'confined' ||
+    s === 'deny'
+  );
+}
+
+/**
+ * @param {unknown} name
+ * @returns {boolean}
+ */
+function isSafeEnvName(name) {
+  return typeof name === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+
+/**
+ * Credential / capability-like environment variable names that must never be
+ * admitted into task **gate** processes via envAllowlist (even if an arm asks).
+ *
+ * Covers: API keys, tokens, secrets, passwords/passphrases, credentials,
+ * private/access/secret keys, authorization/bearer, SSH_AUTH_SOCK, and common
+ * cloud/GitHub credential names. Provider invoker env is unaffected (gates only).
+ *
+ * @param {unknown} name
+ * @returns {boolean}
+ */
+export function isCredentialLikeEnvKey(name) {
+  if (typeof name !== 'string' || name.trim() === '') return false;
+  const n = name.trim().toUpperCase();
+
+  // Exact known credential / agent capability names
+  const EXACT = new Set([
+    'SSH_AUTH_SOCK',
+    'SSH_AGENT_PID',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_SECRET_ACCESS_KEY',
+    'AWS_SESSION_TOKEN',
+    'AWS_SECURITY_TOKEN',
+    'AZURE_CLIENT_SECRET',
+    'AZURE_CLIENT_ID',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'GCLOUD_KEY_FILE',
+    'GITHUB_TOKEN',
+    'GH_TOKEN',
+    'GITLAB_TOKEN',
+    'NPM_TOKEN',
+    'NODE_AUTH_TOKEN',
+    'OPENAI_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'XAI_API_KEY',
+    'GEMINI_API_KEY',
+    'GOOGLE_API_KEY',
+    'HUGGINGFACE_TOKEN',
+    'HF_TOKEN',
+    'AUTHORIZATION',
+    'BEARER',
+    'PASSWORD',
+    'PASSPHRASE',
+    'PASSWD',
+    'SECRET',
+    'CREDENTIALS',
+    'CREDENTIAL',
+  ]);
+  if (EXACT.has(n)) return true;
+
+  // Substring / structural patterns (underscore-delimited credential vocabulary)
+  if (
+    /(?:^|_)(?:API_?KEY|ACCESS_KEY|SECRET_KEY|PRIVATE_KEY|AUTH_TOKEN|BEARER|AUTHORIZATION)(?:_|$)/.test(
+      n,
+    )
+  ) {
+    return true;
+  }
+  if (/(?:^|_)(?:SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?)(?:_|$)/.test(n)) {
+    return true;
+  }
+  if (/(?:^|_)TOKEN(?:_|$)/.test(n)) {
+    return true;
+  }
+  // e.g. FOO_APIKEY, FOOAPIKEY as whole segments
+  if (/(?:^|_)APIKEY(?:_|$)/.test(n)) {
+    return true;
+  }
+  // Sentinel / harness test secrets and anything with SECRET in the name
+  if (n.includes('SECRET')) return true;
+  if (n.includes('PASSWORD') || n.includes('PASSPHRASE')) return true;
+  if (n.endsWith('_CREDENTIALS') || n.endsWith('_CREDENTIAL')) return true;
+
+  return false;
+}
+
+/**
+ * Normalize envAllowlist to an ordered unique list of safe **non-credential** names.
+ * Accepts array of names or object keys (values ignored — only names allowed).
+ * Fail closed if any name is credential-like.
+ *
+ * @param {string[] | Record<string, unknown> | null | undefined} envAllowlist
+ * @returns {string[]}
+ */
+export function normalizeEnvAllowlist(envAllowlist) {
+  if (envAllowlist == null) return [];
+  /** @type {string[]} */
+  let names;
+  if (Array.isArray(envAllowlist)) {
+    names = envAllowlist.map(String);
+  } else if (typeof envAllowlist === 'object') {
+    names = Object.keys(envAllowlist).map(String);
+  } else {
+    throw new Error(
+      'buildGateEnv: envAllowlist must be an array of names, object, null, or undefined',
+    );
+  }
+  const seen = new Set();
+  /** @type {string[]} */
+  const out = [];
+  for (const n of names) {
+    if (!isSafeEnvName(n) || seen.has(n)) continue;
+    if (isCredentialLikeEnvKey(n)) {
+      throw new Error(
+        `buildGateEnv: envAllowlist must not include credential/capability variable "${n}" (gates never receive secrets even when an arm requests them)`,
+      );
+    }
+    seen.add(n);
+    out.push(n);
+  }
+  return out;
+}
+
+/**
+ * Build a minimal deterministic environment for gate commands.
+ *
+ * Never copies full process.env. Composes:
+ * - explicit small base (PATH + platform-required vars when not restrictive)
+ * - arm envAllowlist as allowlist of **names** whose values are taken from parent
+ *
+ * Credential-like names in envAllowlist are rejected (fail closed).
+ * Task YAML must never contribute environment. Callers must not pass corpus task.env.
+ * Provider invoker env is separate and not governed by this function.
+ *
+ * @param {object} [opts]
+ * @param {string[] | Record<string, unknown> | null | undefined} [opts.envAllowlist]
+ * @param {string | null | undefined} [opts.sandboxMode]
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | null} [opts.parentEnv]
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function buildGateEnv(opts = {}) {
+  const parent =
+    opts.parentEnv != null && typeof opts.parentEnv === 'object'
+      ? opts.parentEnv
+      : process.env;
+  const restrictive = isRestrictiveSandboxMode(opts.sandboxMode);
+  const baseKeys = restrictive
+    ? GATE_RESTRICTIVE_ENV_KEYS
+    : [...GATE_CORE_ENV_KEYS, ...GATE_PLATFORM_ENV_KEYS];
+
+  /** @type {NodeJS.ProcessEnv} */
+  const out = Object.create(null);
+
+  for (const key of baseKeys) {
+    // Base keys are never credential-like by construction (PATH/HOME/TMPDIR/…).
+    if (isCredentialLikeEnvKey(key)) continue;
+    if (
+      Object.prototype.hasOwnProperty.call(parent, key) &&
+      parent[key] != null &&
+      parent[key] !== ''
+    ) {
+      out[key] = String(parent[key]);
+    }
+  }
+
+  // PATH is required for toolchain discovery; provide a minimal Unix fallback.
+  if (out.PATH == null || out.PATH === '') {
+    if (parent.PATH != null && String(parent.PATH) !== '') {
+      out.PATH = String(parent.PATH);
+    } else if (process.platform === 'win32') {
+      out.PATH = String(parent.Path || parent.PATH || '');
+    } else {
+      out.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+    }
+  }
+
+  // Fail closed: normalizeEnvAllowlist throws on credential-like names.
+  const allowlist = normalizeEnvAllowlist(opts.envAllowlist);
+  for (const name of allowlist) {
+    if (isCredentialLikeEnvKey(name)) {
+      throw new Error(
+        `buildGateEnv: refused credential-like envAllowlist name "${name}"`,
+      );
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(parent, name) &&
+      parent[name] != null
+    ) {
+      out[name] = String(parent[name]);
+    }
+  }
+
+  // Final belt-and-suspenders: never emit credential-like keys
+  for (const key of Object.keys(out)) {
+    if (isCredentialLikeEnvKey(key)) {
+      delete out[key];
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Strip secret-bearing previews from gate results for ordinary result surfaces.
+ * Keeps digests / status / evidence classification fields only.
+ * @param {unknown} gateResults
+ * @returns {unknown}
+ */
+export function sanitizeGateResultsForStorage(gateResults) {
+  if (!Array.isArray(gateResults)) return gateResults;
+  return gateResults.map((g) => {
+    if (!g || typeof g !== 'object') return g;
+    const {
+      gate,
+      order,
+      required,
+      command,
+      expectedExitCode,
+      status,
+      exitCode,
+      timedOut,
+      stdoutDigest,
+      stderrDigest,
+      evidence,
+      infraFailure,
+      classificationSignal,
+      check,
+      oraclePath,
+    } = /** @type {Record<string, unknown>} */ (g);
+    /** @type {Record<string, unknown>} */
+    const clean = {
+      gate,
+      order,
+      required,
+      command,
+      expectedExitCode,
+      status,
+      exitCode,
+      timedOut,
+      classificationSignal,
+    };
+    if (stdoutDigest != null) clean.stdoutDigest = stdoutDigest;
+    if (stderrDigest != null) clean.stderrDigest = stderrDigest;
+    if (evidence != null) clean.evidence = evidence;
+    if (infraFailure != null) clean.infraFailure = infraFailure;
+    if (check != null) clean.check = check;
+    // oraclePath is a relative corpus path (not secret-bearing); keep for evidence binding
+    if (oraclePath != null) clean.oraclePath = oraclePath;
+    return clean;
+  });
+}
 
 /**
  * @param {string} name
@@ -441,11 +758,59 @@ function isPassedGateResult(g) {
 }
 
 /**
- * Evaluate requirements from prior ordered gate results.
+ * Explicit evidence-gate name from a mustHave item (no substring heuristics).
+ * @param {Record<string, unknown>} item
+ * @returns {string | null}
+ */
+export function resolveItemEvidenceGateName(item) {
+  if (!item || typeof item !== 'object') return null;
+  if (typeof item.evidenceGate === 'string' && item.evidenceGate.trim()) {
+    return item.evidenceGate.trim();
+  }
+  if (typeof item.gate === 'string' && item.gate.trim()) {
+    return item.gate.trim();
+  }
+  return null;
+}
+
+/**
+ * Find a prior gate result by exact gate name.
+ * @param {Array<Record<string, unknown>>} prior
+ * @param {string} gateName
+ * @returns {Record<string, unknown> | undefined}
+ */
+function findPriorGateByName(prior, gateName) {
+  return prior.find((g) => g && String(g.gate) === gateName);
+}
+
+/**
+ * Find a prior oracle gate matching an explicit oraclePath metadata binding.
+ * @param {Array<Record<string, unknown>>} prior
+ * @param {string} oraclePathRel
+ * @returns {Record<string, unknown> | undefined}
+ */
+function findPriorOracleByPath(prior, oraclePathRel) {
+  const norm = String(oraclePathRel).replace(/\\/g, '/');
+  return prior.find((g) => {
+    if (!g || String(g.gate) !== 'oracle') return false;
+    if (typeof g.oraclePath === 'string' && g.oraclePath.replace(/\\/g, '/') === norm) {
+      return true;
+    }
+    return false;
+  });
+}
+
+/**
+ * Evaluate requirements from prior ordered gate results via explicit evidence binding.
  *
- * - substantiation "test": satisfied only by a passed required `tests` gate
- * - other substantiation: satisfied only by a matching passed executable/structural
- *   gate (by gate name, e.g. lint/oracle); otherwise infrastructure-unavailable
+ * - substantiation "test"|"tests": requires non-empty artifactRef (metadata only;
+ *   not executed here) and a prior passed required gate named by evidenceGate
+ *   (default "tests").
+ * - substantiation "static" (and other non-test): requires explicit evidenceGate, gate,
+ *   or oraclePath on the mustHave item binding to a prior passed gate.
+ * - Never binds via substantiation-name substring matching.
+ * - artifactRef is never treated as an executable command; a nonempty artifactRef
+ *   does not imply it was run. Passed evidence is always the exact bound gate result.
  *
  * @param {object} opts
  * @param {Record<string, unknown>} opts.gate
@@ -517,27 +882,13 @@ export async function evaluateRequirements({
     const substantiation = String(item.substantiation ?? '')
       .trim()
       .toLowerCase();
-
-    if (substantiation === 'test' || substantiation === 'tests') {
-      const testsGate = prior.find(
-        (g) =>
-          g &&
-          String(g.gate) === 'tests' &&
-          g.required !== false &&
-          isPassedGateResult(g),
-      );
-      if (!testsGate) {
-        const testsRan = prior.find((g) => g && String(g.gate) === 'tests');
-        if (testsRan && testsRan.status === 'failed') {
-          unsatisfied.push(`${id}: tests gate failed`);
-        } else {
-          unavailable.push(
-            `${id}: no passed required tests gate for substantiation=test`,
-          );
-        }
-      }
-      continue;
-    }
+    const artifactRef =
+      typeof item.artifactRef === 'string' ? item.artifactRef.trim() : '';
+    const explicitGate = resolveItemEvidenceGateName(item);
+    const itemOraclePath =
+      typeof item.oraclePath === 'string' && item.oraclePath.trim()
+        ? item.oraclePath.trim()
+        : null;
 
     if (!substantiation) {
       unavailable.push(
@@ -546,19 +897,93 @@ export async function evaluateRequirements({
       continue;
     }
 
-    // Map substantiation keywords to gate names (lint, oracle, install, static, …)
-    const candidates = prior.filter((g) => {
-      if (!g || !isPassedGateResult(g)) return false;
-      const gname = String(g.gate || '').toLowerCase();
-      return (
-        gname === substantiation ||
-        gname.includes(substantiation) ||
-        substantiation.includes(gname)
-      );
-    });
-    if (candidates.length === 0) {
+    if (substantiation === 'test' || substantiation === 'tests') {
+      // Tests evidence contract: artifactRef is declared metadata only (not executed
+      // here); pass/fail is the prior gate named by evidenceGate (default "tests").
+      if (!artifactRef) {
+        unavailable.push(
+          `${id}: substantiation=test requires non-empty artifactRef metadata (not executed by requirements; bound gate supplies evidence)`,
+        );
+        continue;
+      }
+      const evidenceName = explicitGate || 'tests';
+      const bound = findPriorGateByName(prior, evidenceName);
+      if (bound && bound.required !== false && isPassedGateResult(bound)) {
+        continue;
+      }
+      if (bound && bound.status === 'failed') {
+        unsatisfied.push(
+          `${id}: evidenceGate "${evidenceName}" failed (substantiation=test; artifactRef metadata=${artifactRef})`,
+        );
+      } else if (bound && bound.status === 'execution_unavailable') {
+        unavailable.push(
+          `${id}: evidenceGate "${evidenceName}" execution_unavailable`,
+        );
+      } else {
+        unavailable.push(
+          `${id}: no passed required gate "${evidenceName}" for substantiation=test (artifactRef metadata only=${artifactRef})`,
+        );
+      }
+      continue;
+    }
+
+    // Static / oracle / other non-test: explicit metadata only — no substring heuristics.
+    if (!explicitGate && !itemOraclePath) {
       unavailable.push(
-        `${id}: no matching passed gate for substantiation="${substantiation}"`,
+        `${id}: substantiation="${substantiation}" requires explicit evidenceGate, gate, or oraclePath metadata`,
+      );
+      continue;
+    }
+
+    /** @type {Record<string, unknown> | undefined} */
+    let bound;
+    /** @type {string} */
+    let bindLabel;
+
+    if (itemOraclePath) {
+      bound = findPriorOracleByPath(prior, itemOraclePath);
+      // Also accept a passed oracle gate when the run result carried oraclePath.
+      if (!bound && explicitGate) {
+        const byName = findPriorGateByName(prior, explicitGate);
+        if (
+          byName &&
+          typeof byName.oraclePath === 'string' &&
+          byName.oraclePath.replace(/\\/g, '/') ===
+            itemOraclePath.replace(/\\/g, '/')
+        ) {
+          bound = byName;
+        }
+      }
+      if (!bound && !explicitGate) {
+        // Fall back: any prior oracle result that recorded this oraclePath.
+        bound = prior.find(
+          (g) =>
+            g &&
+            typeof g.oraclePath === 'string' &&
+            g.oraclePath.replace(/\\/g, '/') ===
+              itemOraclePath.replace(/\\/g, '/'),
+        );
+      }
+      bindLabel = `oraclePath=${itemOraclePath}`;
+    } else {
+      bound = findPriorGateByName(prior, /** @type {string} */ (explicitGate));
+      bindLabel = `evidenceGate=${explicitGate}`;
+    }
+
+    if (bound && bound.required !== false && isPassedGateResult(bound)) {
+      continue;
+    }
+    if (bound && bound.status === 'failed') {
+      unsatisfied.push(
+        `${id}: bound gate failed (${bindLabel})`,
+      );
+    } else if (bound && bound.status === 'execution_unavailable') {
+      unavailable.push(
+        `${id}: bound gate execution_unavailable (${bindLabel})`,
+      );
+    } else {
+      unavailable.push(
+        `${id}: no matching passed gate for explicit binding (${bindLabel})`,
       );
     }
   }
@@ -605,9 +1030,303 @@ export async function evaluateRequirements({
     status: 'passed',
     exitCode: 0,
     timedOut: false,
-    evidence: 'requirements: all mustHave items substantiated by prior gate results',
+    // Pass evidence is prior bound gate results only; artifactRef is metadata, not execution.
+    evidence:
+      'requirements: all mustHave items substantiated by prior bound gate results (artifactRef is metadata only)',
     classificationSignal: 'PASS',
     check,
+  };
+}
+
+/**
+ * Shell-single-quote a path for controlled oracle command strings.
+ * @param {string} value
+ * @returns {string}
+ */
+export function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Build a controlled command string for a commandless oracle from absolute path.
+ * Contract: extension selects runtime; path is absolute and already path-contained
+ * under the corpus oracles root.
+ *
+ * @param {string} oracleAbsPath
+ * @returns {string}
+ */
+export function buildOracleCommand(oracleAbsPath) {
+  const abs = path.resolve(oracleAbsPath);
+  const ext = path.extname(abs).toLowerCase();
+  const quoted = shellSingleQuote(abs);
+  if (ext === '.js' || ext === '.mjs' || ext === '.cjs') {
+    return `node ${quoted}`;
+  }
+  if (ext === '.sh' || ext === '.bash') {
+    return `bash ${quoted}`;
+  }
+  throw new Error(
+    `unsupported oracle extension "${ext || '(none)'}" for ${abs}; use .js/.mjs/.cjs/.sh/.bash or declare gate.command`,
+  );
+}
+
+/**
+ * Resolve gate.oraclePath under oracleRoot with containment checks.
+ * @param {string} oracleRoot
+ * @param {string} oraclePathRel
+ * @returns {Promise<string>} absolute path inside oracleRoot
+ */
+export async function resolveCommandlessOraclePath(oracleRoot, oraclePathRel) {
+  if (oracleRoot == null || String(oracleRoot).trim() === '') {
+    throw new PathEscapeError('oracleRoot is required for commandless oracle', {
+      code: 'ORACLE_ROOT_REQUIRED',
+    });
+  }
+  if (oraclePathRel == null || String(oraclePathRel).trim() === '') {
+    throw new PathEscapeError('oraclePath is required for commandless oracle', {
+      code: 'ORACLE_PATH_REQUIRED',
+    });
+  }
+  if (path.isAbsolute(String(oraclePathRel))) {
+    throw new PathEscapeError(
+      `absolute oraclePath is not allowed: "${oraclePathRel}"`,
+      { candidate: String(oraclePathRel), code: 'ABSOLUTE_ORACLE' },
+    );
+  }
+  return resolveUnder(path.resolve(oracleRoot), oraclePathRel);
+}
+
+/**
+ * Evaluate an oracle gate: task-declared command as-is, or commandless via oraclePath.
+ *
+ * @param {object} opts
+ * @param {string} opts.workspaceDir
+ * @param {Record<string, unknown>} opts.gate
+ * @param {string} [opts.oracleRoot]
+ * @param {ConfinementInfo} opts.confinement
+ * @param {number} [opts.timeoutMs]
+ * @param {NodeJS.ProcessEnv} opts.env - minimal env from buildGateEnv (never full process.env)
+ * @param {boolean} [opts.networkAllowed]
+ * @returns {Promise<GateResult & { oraclePath?: string }>}
+ */
+export async function evaluateOracleGate({
+  workspaceDir,
+  gate,
+  oracleRoot,
+  confinement,
+  timeoutMs,
+  env,
+  networkAllowed = false,
+}) {
+  const name = typeof gate.gate === 'string' ? gate.gate : 'oracle';
+  const order = typeof gate.order === 'number' ? gate.order : 1;
+  const required = gate.required === undefined ? true : Boolean(gate.required);
+  const expectedExitCode =
+    typeof gate.expectedExitCode === 'number' ? gate.expectedExitCode : 0;
+  const check = typeof gate.check === 'string' ? gate.check : undefined;
+  const declaredCommand =
+    typeof gate.command === 'string' && gate.command.length > 0
+      ? gate.command
+      : null;
+  const oraclePathRel =
+    typeof gate.oraclePath === 'string' && gate.oraclePath.trim()
+      ? gate.oraclePath.trim()
+      : null;
+
+  /** @type {string | null} */
+  let effectiveCommand = declaredCommand;
+  /** @type {string | undefined} */
+  let resolvedOraclePath;
+  /** @type {string[]} */
+  let extraReadRoots = [];
+
+  if (effectiveCommand == null) {
+    if (!oraclePathRel) {
+      return {
+        gate: name,
+        order,
+        required,
+        command: null,
+        expectedExitCode,
+        status: 'execution_unavailable',
+        exitCode: null,
+        timedOut: false,
+        evidence:
+          'oracle gate has no command and no oraclePath; commandless oracle contract requires oraclePath relative to suite oracles/',
+        infraFailure: 'oracle_path_missing',
+        classificationSignal: 'INFRA_FAIL',
+        check,
+      };
+    }
+    if (oracleRoot == null || String(oracleRoot).trim() === '') {
+      return {
+        gate: name,
+        order,
+        required,
+        command: null,
+        expectedExitCode,
+        status: 'execution_unavailable',
+        exitCode: null,
+        timedOut: false,
+        evidence:
+          'oracleRoot is required to resolve commandless oraclePath under suite oracles/',
+        infraFailure: 'oracle_root_missing',
+        classificationSignal: 'INFRA_FAIL',
+        check,
+        oraclePath: oraclePathRel,
+      };
+    }
+    try {
+      resolvedOraclePath = await resolveCommandlessOraclePath(
+        oracleRoot,
+        oraclePathRel,
+      );
+      await access(resolvedOraclePath, constants.R_OK);
+      effectiveCommand = buildOracleCommand(resolvedOraclePath);
+      extraReadRoots = [
+        path.dirname(resolvedOraclePath),
+        path.resolve(oracleRoot),
+      ];
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const infra =
+        err instanceof PathEscapeError ||
+        /escape|absolute|required|unsupported oracle/i.test(msg);
+      return {
+        gate: name,
+        order,
+        required,
+        command: null,
+        expectedExitCode,
+        status: 'execution_unavailable',
+        exitCode: null,
+        timedOut: false,
+        evidence: `oracle path resolution failed: ${msg}`,
+        infraFailure: infra
+          ? 'oracle_path_resolution_failed'
+          : 'oracle_unreadable',
+        classificationSignal: 'INFRA_FAIL',
+        check,
+        oraclePath: oraclePathRel,
+      };
+    }
+  }
+
+  if (!confinement || !confinement.available) {
+    return {
+      gate: name,
+      order,
+      required,
+      command: effectiveCommand,
+      expectedExitCode,
+      status: 'execution_unavailable',
+      exitCode: null,
+      timedOut: false,
+      evidence: `Confinement unavailable; oracle not executed. ${confinement?.reason ?? ''}`.trim(),
+      infraFailure: 'execution_unavailable',
+      classificationSignal: 'INFRA_FAIL',
+      check,
+      oraclePath: oraclePathRel ?? undefined,
+    };
+  }
+
+  if (env == null || typeof env !== 'object') {
+    return {
+      gate: name,
+      order,
+      required,
+      command: effectiveCommand,
+      expectedExitCode,
+      status: 'execution_unavailable',
+      exitCode: null,
+      timedOut: false,
+      evidence:
+        'oracle requires a minimal gate env from buildGateEnv (never process.env)',
+      infraFailure: 'oracle_env_required',
+      classificationSignal: 'INFRA_FAIL',
+      check,
+      oraclePath: oraclePathRel ?? undefined,
+    };
+  }
+
+  // Oracle scripts read WORKSPACE_DIR; inject only that harness-controlled path.
+  /** @type {NodeJS.ProcessEnv} */
+  const runEnv = {
+    ...env,
+    WORKSPACE_DIR: path.resolve(workspaceDir),
+  };
+
+  const run = await runConfinedCommand({
+    confinement,
+    workspaceDir: path.resolve(workspaceDir),
+    command: effectiveCommand,
+    timeoutMs,
+    env: runEnv,
+    networkAllowed,
+    extraReadRoots,
+  });
+
+  const out = digestAndPreview(run.stdout);
+  const err = digestAndPreview(run.stderr);
+
+  if (run.timedOut) {
+    return {
+      gate: name,
+      order,
+      required,
+      command: effectiveCommand,
+      expectedExitCode,
+      status: 'failed',
+      exitCode: run.exitCode,
+      timedOut: true,
+      stdoutDigest: out.digest,
+      stderrDigest: err.digest,
+      evidence: run.infraFailure ?? 'oracle timed out',
+      infraFailure: run.infraFailure,
+      classificationSignal: 'TIMEOUT',
+      check,
+      oraclePath: oraclePathRel ?? undefined,
+    };
+  }
+
+  if (run.infraFailure) {
+    return {
+      gate: name,
+      order,
+      required,
+      command: effectiveCommand,
+      expectedExitCode,
+      status: 'execution_unavailable',
+      exitCode: run.exitCode,
+      timedOut: false,
+      stdoutDigest: out.digest,
+      stderrDigest: err.digest,
+      evidence: run.infraFailure,
+      infraFailure: run.infraFailure,
+      classificationSignal: 'INFRA_FAIL',
+      check,
+      oraclePath: oraclePathRel ?? undefined,
+    };
+  }
+
+  const passed = run.exitCode === expectedExitCode;
+  return {
+    gate: name,
+    order,
+    required,
+    command: effectiveCommand,
+    expectedExitCode,
+    status: passed ? 'passed' : 'failed',
+    exitCode: run.exitCode,
+    timedOut: false,
+    stdoutDigest: out.digest,
+    stderrDigest: err.digest,
+    evidence: passed
+      ? `oracle exit ${run.exitCode} matches expected ${expectedExitCode}`
+      : `oracle exit ${run.exitCode} != expected ${expectedExitCode}`,
+    classificationSignal: passed ? 'PASS' : 'FAIL',
+    check,
+    oraclePath: oraclePathRel ?? undefined,
   };
 }
 
@@ -671,7 +1390,9 @@ export function buildConfinedArgv(
     const home = path.resolve(os.homedir());
     for (const root of readRoots) {
       const abs = path.resolve(root);
-      if (abs === '/' || abs === home || abs.startsWith(home + path.sep)) {
+      // Never bind exact / or exact $HOME. Contained paths (oracle dirs under a
+      // project tree in $HOME) are allowed as explicit narrow read roots.
+      if (abs === '/' || abs === home) {
         continue;
       }
       args.push('--ro-bind', abs, abs);
@@ -716,8 +1437,9 @@ export function buildConfinedArgv(
  * @param {string} opts.workspaceDir
  * @param {string} opts.command
  * @param {number} [opts.timeoutMs]
- * @param {NodeJS.ProcessEnv} [opts.env]
+ * @param {NodeJS.ProcessEnv} opts.env - must already be a minimal built env (never full process.env)
  * @param {boolean} [opts.networkAllowed]
+ * @param {string[]} [opts.extraReadRoots] additional read-only roots (e.g. oracle dir)
  * @returns {Promise<{ exitCode: number | null, timedOut: boolean, stdout: string, stderr: string, infraFailure?: string, signal?: string, profile?: string }>}
  */
 async function runConfinedCommand({
@@ -727,7 +1449,17 @@ async function runConfinedCommand({
   timeoutMs,
   env,
   networkAllowed = false,
+  extraReadRoots = [],
 }) {
+  if (env == null || typeof env !== 'object') {
+    return {
+      exitCode: null,
+      timedOut: false,
+      stdout: '',
+      stderr: '',
+      infraFailure: 'runConfinedCommand: env is required (use buildGateEnv; never process.env)',
+    };
+  }
   let profileDir = null;
   let privateTmp = null;
   let profileText = '';
@@ -736,7 +1468,22 @@ async function runConfinedCommand({
     privateTmp = await mkdtemp(path.join(os.tmpdir(), 'aicb-gate-tmp-'));
     let profilePath;
 
-    const readRoots = await resolveExistingToolchainRoots();
+    const toolchainRoots = await resolveExistingToolchainRoots();
+    /** @type {string[]} */
+    const readRoots = [...toolchainRoots];
+    for (const extra of Array.isArray(extraReadRoots) ? extraReadRoots : []) {
+      if (extra == null || String(extra).trim() === '') continue;
+      const abs = path.resolve(String(extra));
+      const home = path.resolve(os.homedir());
+      // Refuse only exact / and exact $HOME. Contained paths under $HOME are OK
+      // (corpus oracles often live under the user's project tree).
+      if (abs === '/' || abs === home) {
+        continue;
+      }
+      if (!readRoots.includes(abs)) {
+        readRoots.push(abs);
+      }
+    }
     // Fail closed if we cannot construct a minimal executable view
     const hasShellRoot = readRoots.some(
       (r) =>
@@ -839,7 +1586,8 @@ async function runConfinedCommand({
       try {
         child = spawn(built.command, built.args, {
           cwd: path.resolve(workspaceDir),
-          env: env ?? { ...process.env },
+          // Fail closed: only the caller-supplied minimal env (buildGateEnv).
+          env,
           shell: false,
           detached: process.platform !== 'win32',
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -985,6 +1733,14 @@ export function isStructuralGate(gate) {
   const name = typeof gate.gate === 'string' ? gate.gate : '';
   const hasCommand = typeof gate.command === 'string' && gate.command.length > 0;
   if (hasCommand) return false;
+  // Commandless oracle with oraclePath is executable via the oracle path contract.
+  if (
+    name === 'oracle' &&
+    typeof gate.oraclePath === 'string' &&
+    gate.oraclePath.trim()
+  ) {
+    return false;
+  }
   if (STRUCTURAL_GATES.has(name)) return true;
   return !hasCommand;
 }
@@ -1004,23 +1760,34 @@ export function resolveNetworkAllowed(task) {
 /**
  * Run eligibility gates in order under real confinement / structural evaluators.
  *
+ * Gate commands receive a minimal deterministic env from buildGateEnv
+ * (base + arm envAllowlist names from parent). Full process.env is never passed.
+ * Task YAML must not inject environment.
+ *
+ * Ordinary GateResult surfaces keep digests only — never stdout/stderr previews
+ * (previews can contain secrets).
+ *
  * @param {object} opts
  * @param {Array<Record<string, unknown>>} opts.gates
  * @param {string} opts.workspaceDir
  * @param {string} [opts.oracleRoot]
  * @param {ConfinementInfo} [opts.confinement]
  * @param {number} [opts.timeoutMs]
- * @param {NodeJS.ProcessEnv} [opts.env]
- * @param {object} [opts.task] full task including expectedOutcome + networkPolicy
+ * @param {string[] | Record<string, unknown> | null} [opts.envAllowlist] arm allowlist of names
+ * @param {string | null} [opts.sandboxMode] arm sandbox posture
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | null} [opts.parentEnv] testable parent env
+ * @param {object} [opts.task] full task including expectedOutcome + networkPolicy (never env)
  * @returns {Promise<GateResult[]>}
  */
 export async function runGates({
   gates,
   workspaceDir,
-  oracleRoot: _oracleRoot,
+  oracleRoot,
   confinement: confinementOpt,
   timeoutMs,
-  env,
+  envAllowlist = null,
+  sandboxMode = null,
+  parentEnv = null,
   task = null,
 }) {
   if (!Array.isArray(gates)) {
@@ -1030,8 +1797,26 @@ export async function runGates({
     throw new Error('runGates: workspaceDir is required');
   }
 
+  // Refuse task-YAML env smuggling if a task object carries env-like fields.
+  if (task && typeof task === 'object') {
+    if (
+      Object.prototype.hasOwnProperty.call(task, 'env') ||
+      Object.prototype.hasOwnProperty.call(task, 'environment') ||
+      Object.prototype.hasOwnProperty.call(task, 'gateEnv')
+    ) {
+      throw new Error(
+        'runGates: task YAML must not inject environment (env/environment/gateEnv refused)',
+      );
+    }
+  }
+
   const confinement = confinementOpt ?? (await detectConfinement());
   const networkAllowed = resolveNetworkAllowed(task);
+  const gateEnv = buildGateEnv({
+    envAllowlist,
+    sandboxMode,
+    parentEnv: parentEnv ?? process.env,
+  });
   const ordered = [...gates].sort((a, b) => {
     const ao = typeof a.order === 'number' ? a.order : 0;
     const bo = typeof b.order === 'number' ? b.order : 0;
@@ -1069,6 +1854,22 @@ export async function runGates({
           gate,
           task,
           priorGateResults: results,
+        }),
+      );
+      continue;
+    }
+
+    // Oracle: declared command as-is, or commandless via oraclePath under oracleRoot.
+    if (name === 'oracle') {
+      results.push(
+        await evaluateOracleGate({
+          workspaceDir: path.resolve(workspaceDir),
+          gate,
+          oracleRoot,
+          confinement,
+          timeoutMs,
+          env: gateEnv,
+          networkAllowed,
         }),
       );
       continue;
@@ -1116,10 +1917,11 @@ export async function runGates({
       workspaceDir: path.resolve(workspaceDir),
       command,
       timeoutMs,
-      env,
+      env: gateEnv,
       networkAllowed,
     });
 
+    // Digests only on ordinary results — never secret-bearing previews.
     const out = digestAndPreview(run.stdout);
     const err = digestAndPreview(run.stderr);
 
@@ -1135,8 +1937,6 @@ export async function runGates({
         timedOut: true,
         stdoutDigest: out.digest,
         stderrDigest: err.digest,
-        stdoutPreview: out.preview,
-        stderrPreview: err.preview,
         evidence: run.infraFailure ?? 'gate timed out',
         infraFailure: run.infraFailure,
         classificationSignal: 'TIMEOUT',
@@ -1157,8 +1957,6 @@ export async function runGates({
         timedOut: false,
         stdoutDigest: out.digest,
         stderrDigest: err.digest,
-        stdoutPreview: out.preview,
-        stderrPreview: err.preview,
         evidence: run.infraFailure,
         infraFailure: run.infraFailure,
         classificationSignal: 'INFRA_FAIL',
@@ -1179,8 +1977,6 @@ export async function runGates({
       timedOut: false,
       stdoutDigest: out.digest,
       stderrDigest: err.digest,
-      stdoutPreview: out.preview,
-      stderrPreview: err.preview,
       evidence: passed
         ? `exit ${run.exitCode} matches expected ${expectedExitCode}`
         : `exit ${run.exitCode} != expected ${expectedExitCode}`,

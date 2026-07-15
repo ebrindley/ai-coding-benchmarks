@@ -26,37 +26,44 @@ expectedOutcome:
     - id: layered-architecture
       description: Clear separation of controller/service/repository layers
       substantiation: static
+      evidenceGate: layered-architecture
       artifactRef: scripts/check-layered-architecture.sh
 
     - id: get-all-books
       description: GET /books returns list of books
       substantiation: test
+      evidenceGate: tests
       artifactRef: src/test/java/com/example/BookControllerTest.java::getAllBooks
 
     - id: get-book-by-id
       description: GET /books/{id} returns book or 404
       substantiation: test
+      evidenceGate: tests
       artifactRef: src/test/java/com/example/BookControllerTest.java::getBookById
 
     - id: create-book
       description: POST /books creates book and returns 201
       substantiation: test
+      evidenceGate: tests
       artifactRef: src/test/java/com/example/BookControllerTest.java::createBook
 
     - id: delete-book
       description: DELETE /books/{id} removes book
       substantiation: test
+      evidenceGate: tests
       artifactRef: src/test/java/com/example/BookControllerTest.java::deleteBook
 
     - id: constructor-injection
       description: Uses constructor injection, no field @Autowired
       substantiation: static
+      evidenceGate: constructor-injection
       artifactRef: scripts/check-no-field-autowired.sh
 
   niceToHave:
     - id: validation
       description: Bean validation on request DTOs (@NotNull, @Size)
       substantiation: test
+      evidenceGate: tests
       artifactRef: src/test/java/com/example/BookControllerTest.java::validation
 
     - id: swagger
@@ -86,13 +93,26 @@ eligibilityGates:
     expectedExitCode: 0
     order: 3
 
+  - gate: layered-architecture
+    check: Clear separation of controller/service/repository layers
+    command: bash scripts/check-layered-architecture.sh
+    expectedExitCode: 0
+    order: 4
+
+  - gate: constructor-injection
+    check: Uses constructor injection, no field @Autowired
+    command: bash scripts/check-no-field-autowired.sh
+    expectedExitCode: 0
+    order: 5
+
   - gate: oracle
     check: External oracle validates HTTP endpoints end-to-end
-    order: 4
+    oraclePath: greenfield-004-java-spring-service/check-http-endpoints.sh
+    order: 6
 
   - gate: requirements
     check: All must_have items substantiated by test results
-    order: 5
+    order: 7
 
 scoring:
   delivery:

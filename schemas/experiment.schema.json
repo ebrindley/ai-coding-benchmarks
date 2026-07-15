@@ -9,7 +9,10 @@
   "properties": {
     "id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Experiment/campaign id: single safe path segment (used for default campaignDir)"
     },
     "schemaVersion": {
       "type": "integer",
@@ -90,6 +93,11 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Native-cli fixed argv prefix"
+        },
+        "promptTransport": {
+          "type": "string",
+          "enum": ["stdin", "prompt-file"],
+          "description": "native-cli prompt delivery: controlled stdin (default) or harness temp file path appended as final argv"
         },
         "envAllowlist": {
           "type": "array",

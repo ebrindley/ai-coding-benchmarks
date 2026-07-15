@@ -13,6 +13,7 @@ import {
   readdir,
   lstat,
   readlink,
+  realpath,
   symlink,
   utimes,
   writeFile,
@@ -107,7 +108,13 @@ export function defaultGitSpawn(args, cwd) {
  * @returns {Promise<void>}
  */
 export async function copyFixtureTree(fixtureRoot, destRoot) {
-  const srcRoot = path.resolve(fixtureRoot);
+  // Canonicalize roots so macOS /tmp vs /private/tmp does not false-reject internal links.
+  let srcRoot = path.resolve(fixtureRoot);
+  try {
+    srcRoot = await realpath(srcRoot);
+  } catch {
+    /* keep resolved path if root not yet fully materialized */
+  }
   const dstRoot = path.resolve(destRoot);
 
   await assertInsideRoot(srcRoot, srcRoot);
@@ -162,15 +169,33 @@ export async function copyFixtureTree(fixtureRoot, destRoot) {
             { root: srcRoot, candidate: srcPath, code: 'FIXTURE_READLINK' },
           );
         }
-        // Resolve link relative to its parent; reject if it leaves fixture root.
-        const resolved = path.resolve(path.dirname(srcPath), linkTarget);
-        if (!isPathInside(srcRoot, resolved)) {
+        // Fail closed: absolute fixture symlinks are never preserved.
+        if (path.isAbsolute(linkTarget)) {
           throw new PathEscapeError(
-            `fixture symlink escapes fixture root: "${childRel}" -> "${linkTarget}"`,
-            { root: srcRoot, candidate: resolved, code: 'SYMLINK_ESCAPE' },
+            `fixture absolute symlink rejected: "${childRel}" -> "${linkTarget}"`,
+            { root: srcRoot, candidate: linkTarget, code: 'ABSOLUTE_SYMLINK' },
           );
         }
-        // Re-create as symlink with the same relative/absolute target string (not followed).
+        // Preserve only relative internal symlinks that resolve inside fixture root.
+        // Compare using realpath-canonical roots (macOS /var -> /private/var).
+        const resolved = path.resolve(path.dirname(srcPath), linkTarget);
+        let resolvedCanon = resolved;
+        try {
+          // realpath parent + join remaining (target may not exist yet)
+          resolvedCanon = path.resolve(
+            await realpath(path.dirname(srcPath)),
+            linkTarget,
+          );
+        } catch {
+          resolvedCanon = resolved;
+        }
+        if (!isPathInside(srcRoot, resolvedCanon)) {
+          throw new PathEscapeError(
+            `fixture symlink escapes fixture root: "${childRel}" -> "${linkTarget}"`,
+            { root: srcRoot, candidate: resolvedCanon, code: 'SYMLINK_ESCAPE' },
+          );
+        }
+        // Re-create with the same relative target string (not followed).
         await symlink(linkTarget, dstPath);
         continue;
       }

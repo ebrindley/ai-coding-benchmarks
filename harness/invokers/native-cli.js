@@ -3,10 +3,22 @@
  * experiment arm config. Must not smuggle credentials or env from corpus task YAML.
  *
  * spawn without shell; argv array only. Tests inject fake executables via `command`.
+ *
+ * Task prompt delivery is injection-safe:
+ * - default `promptTransport: 'stdin'` writes the exact prompt to controlled stdin
+ * - `promptTransport: 'prompt-file'` writes a harness-controlled temp file and
+ *   appends the absolute path as a final argv element (no shell templating);
+ *   the temp prompt directory is always removed in `finally` after the child
+ *   completes or fails (success path never returns a stale absolute path)
  */
 
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
 import { spawnControlled } from './spawn-controlled.js';
+
+/** Allowed prompt transport modes (enumerated; never free-form shell). */
+export const PROMPT_TRANSPORTS = Object.freeze(['stdin', 'prompt-file']);
 
 /**
  * Keys that look like credentials. Invokers refuse env objects that appear to
@@ -44,10 +56,19 @@ function assertHarnessEnv(env, opts = {}) {
  * @property {string} [outputPath]
  * @property {string} [infraFailure]
  * @property {string} [signal]
+ * @property {string} [promptTransport]
+ * @property {boolean} [promptFileUsed] - true when prompt-file transport was used (path not returned; cleaned up)
  */
 
 /**
  * Invoke a native CLI as configured by the experiment arm (not task YAML).
+ *
+ * Prompt delivery (injection-safe):
+ * - `prompt` + `promptTransport: 'stdin'` (default): exact prompt bytes on stdin
+ * - `prompt` + `promptTransport: 'prompt-file'`: write harness temp file; append
+ *   absolute path as final argv element; always remove temp dir in `finally`
+ * - explicit `stdin` overrides prompt for stdin transport
+ * - legacy `promptFile` (path): read file contents into stdin when no prompt/stdin
  *
  * @param {object} opts
  * @param {string} opts.command - executable path/name from arm config
@@ -55,7 +76,9 @@ function assertHarnessEnv(env, opts = {}) {
  * @param {string} [opts.cwd]
  * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | null} [opts.env] harness-controlled only
  * @param {number} [opts.timeoutMs]
- * @param {string} [opts.promptFile] - if set, file contents are written to stdin (unless stdin provided)
+ * @param {string} [opts.prompt] - exact task prompt to deliver
+ * @param {'stdin' | 'prompt-file'} [opts.promptTransport] - default 'stdin'
+ * @param {string} [opts.promptFile] - legacy: if set and no prompt/stdin, file → stdin
  * @param {string | Buffer} [opts.stdin]
  * @param {unknown} [opts.taskEnv] - REJECTED if present (smuggling guard)
  * @returns {Promise<InvokerResult>}
@@ -66,6 +89,8 @@ export async function invokeNativeCli({
   cwd,
   env,
   timeoutMs,
+  prompt,
+  promptTransport,
   promptFile,
   stdin,
   taskEnv,
@@ -110,6 +135,31 @@ export async function invokeNativeCli({
       infraFailure: 'args must be an array of strings',
     };
   }
+  for (const a of args) {
+    if (typeof a !== 'string') {
+      return {
+        exitCode: null,
+        timedOut: false,
+        stdout: '',
+        stderr: '',
+        infraFailure: 'args must be an array of strings (argv-safe; no shell)',
+      };
+    }
+  }
+
+  const transport =
+    promptTransport == null || promptTransport === ''
+      ? 'stdin'
+      : String(promptTransport);
+  if (!PROMPT_TRANSPORTS.includes(/** @type {'stdin' | 'prompt-file'} */ (transport))) {
+    return {
+      exitCode: null,
+      timedOut: false,
+      stdout: '',
+      stderr: '',
+      infraFailure: `unsupported promptTransport "${transport}"; expected one of: ${PROMPT_TRANSPORTS.join(', ')}`,
+    };
+  }
 
   try {
     assertHarnessEnv(env);
@@ -123,37 +173,99 @@ export async function invokeNativeCli({
     };
   }
 
+  /** @type {string[]} */
+  let finalArgs = args.map(String);
+  /** @type {string | Buffer | undefined} */
   let stdinData = stdin;
-  if (stdinData === undefined && promptFile) {
+  /** @type {string | undefined} */
+  let promptTempDir;
+  /** @type {string | undefined} */
+  let writtenPromptPath;
+
+  if (transport === 'prompt-file') {
+    if (prompt == null) {
+      return {
+        exitCode: null,
+        timedOut: false,
+        stdout: '',
+        stderr: '',
+        promptTransport: transport,
+        infraFailure: 'prompt is required when promptTransport is prompt-file',
+      };
+    }
     try {
-      stdinData = await readFile(promptFile, 'utf8');
+      promptTempDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-prompt-'));
+      writtenPromptPath = path.join(promptTempDir, 'prompt.txt');
+      await writeFile(writtenPromptPath, String(prompt), {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
     } catch (err) {
+      // Best-effort cleanup if mkdir succeeded but write failed.
+      if (promptTempDir) {
+        await rm(promptTempDir, { recursive: true, force: true }).catch(() => {});
+      }
       const message = err instanceof Error ? err.message : String(err);
       return {
         exitCode: null,
         timedOut: false,
         stdout: '',
         stderr: '',
-        infraFailure: `failed to read promptFile: ${message}`,
+        promptTransport: transport,
+        infraFailure: `failed to write prompt-file: ${message}`,
       };
+    }
+    // Controlled argv append only — never shell interpolation of the prompt.
+    finalArgs = [...finalArgs, writtenPromptPath];
+    // Do not put prompt body on stdin for prompt-file transport.
+    stdinData = undefined;
+  } else {
+    // stdin transport (default)
+    if (stdinData === undefined && prompt != null) {
+      stdinData = String(prompt);
+    }
+    if (stdinData === undefined && promptFile) {
+      try {
+        stdinData = await readFile(promptFile, 'utf8');
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          exitCode: null,
+          timedOut: false,
+          stdout: '',
+          stderr: '',
+          promptTransport: transport,
+          infraFailure: `failed to read promptFile: ${message}`,
+        };
+      }
     }
   }
 
-  const result = await spawnControlled({
-    command: String(command),
-    args: args.map(String),
-    cwd,
-    env,
-    timeoutMs,
-    stdin: stdinData,
-  });
+  try {
+    const result = await spawnControlled({
+      command: String(command),
+      args: finalArgs,
+      cwd,
+      env,
+      timeoutMs,
+      stdin: stdinData,
+    });
 
-  return {
-    exitCode: result.exitCode,
-    timedOut: result.timedOut,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    ...(result.infraFailure ? { infraFailure: result.infraFailure } : {}),
-    ...(result.signal ? { signal: result.signal } : {}),
-  };
+    return {
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      promptTransport: transport,
+      // Do not return the now-stale absolute prompt path after cleanup.
+      ...(promptTempDir ? { promptFileUsed: true } : {}),
+      ...(result.infraFailure ? { infraFailure: result.infraFailure } : {}),
+      ...(result.signal ? { signal: result.signal } : {}),
+    };
+  } finally {
+    // Always remove temporary prompt directory/file after child completes or fails.
+    if (promptTempDir) {
+      await rm(promptTempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
 }

@@ -57,6 +57,8 @@ const PROMPT_BEARING_KEYS = new Set([
   'requestBody',
   'stdout',
   'stderr',
+  'stdoutPreview',
+  'stderrPreview',
   'rawStdout',
   'rawStderr',
   'providerStdout',
@@ -142,7 +144,7 @@ function sanitizeResult(result, campaignDir) {
       out[key] = result[key];
     }
   }
-  // gateResults: keep classification/status digests only
+  // gateResults: keep classification/status digests only — never previews
   if (Array.isArray(out.gateResults)) {
     out.gateResults = out.gateResults.map((g) => {
       if (!g || typeof g !== 'object') return g;
@@ -159,8 +161,11 @@ function sanitizeResult(result, campaignDir) {
         stderrDigest,
         expectedExitCode,
         check,
+        infraFailure,
+        oraclePath,
       } = g;
-      return stripPromptBearing({
+      /** @type {Record<string, unknown>} */
+      const clean = {
         gate,
         order,
         required,
@@ -173,7 +178,11 @@ function sanitizeResult(result, campaignDir) {
         stderrDigest,
         expectedExitCode,
         check,
-      });
+      };
+      if (infraFailure != null) clean.infraFailure = infraFailure;
+      if (oraclePath != null) clean.oraclePath = oraclePath;
+      // Explicitly drop previews even if present on the source object
+      return stripPromptBearing(clean);
     });
   }
   return /** @type {object} */ (

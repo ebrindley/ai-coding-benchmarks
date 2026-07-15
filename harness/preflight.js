@@ -6,6 +6,7 @@
 import { access, constants, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { SCHEMA_VERSION, INVOCATION_PATHS } from './contracts.js';
+import { assertSafeCampaignId } from './paths.js';
 
 /**
  * @typedef {object} PreflightResult
@@ -57,7 +58,17 @@ export async function preflight({ experiment, corpusRoot, campaignDir, harnessRo
     if (experiment.schemaVersion !== 1 && experiment.schemaVersion !== SCHEMA_VERSION) {
       errors.push(`unsupported experiment.schemaVersion: ${experiment.schemaVersion}`);
     }
-    if (!experiment.id) errors.push('experiment.id is required');
+    if (!experiment.id) {
+      errors.push('experiment.id is required');
+    } else {
+      try {
+        // experiment.id doubles as default campaign path segment — must be safe.
+        assertSafeCampaignId(experiment.id);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`experiment.id is not a safe campaign id: ${msg}`);
+      }
+    }
     if (!Array.isArray(experiment.arms) || experiment.arms.length === 0) {
       errors.push('experiment.arms must be a non-empty array');
     } else {

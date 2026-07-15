@@ -176,6 +176,12 @@ export function parseResolvedModelEvidence(artifact) {
   };
 }
 
-export { invokePoeticAdapter } from './poetic-adapter.js';
-export { invokeNativeCli } from './native-cli.js';
+export {
+  invokePoeticAdapter,
+  parseInvokeResult,
+  mapOutcomeKind,
+  POETIC_INVOKE_RESULT_SCHEMA,
+  POETIC_OUTCOME_KINDS,
+} from './poetic-adapter.js';
+export { invokeNativeCli, PROMPT_TRANSPORTS } from './native-cli.js';
 export { invokePoeticSystem } from './poetic-system.js';
