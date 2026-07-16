@@ -1,0 +1,189 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-coding-benchmarks.local/schemas/campaign-manifest.schema.json",
+  "title": "CampaignManifest",
+  "description": "Resumable campaign state: lock, trials, revisions, host metadata, frozen input digests.",
+  "type": "object",
+  "required": [
+    "campaignId",
+    "schemaVersion",
+    "status",
+    "lock",
+    "trials",
+    "createdAt",
+    "updatedAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "campaignId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Safe filesystem identifier: single path segment, no traversal or separators"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "paused",
+        "completed",
+        "failed",
+        "aborted"
+      ]
+    },
+    "experimentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Safe filesystem identifier: single path segment, no traversal or separators"
+    },
+    "experiment": {
+      "type": "object",
+      "description": "Embedded frozen experiment definition used for resume (not re-read from caller)",
+      "additionalProperties": true
+    },
+    "lock": {
+      "type": "object",
+      "required": ["held", "owner"],
+      "additionalProperties": false,
+      "properties": {
+        "held": { "type": "boolean" },
+        "owner": { "type": ["string", "null"] },
+        "acquiredAt": { "type": ["string", "null"], "format": "date-time" },
+        "path": { "type": ["string", "null"] }
+      }
+    },
+    "trials": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "state"],
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "description": "Safe filesystem identifier: no path separators or traversal"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["pending", "running", "completed", "failed", "skipped"]
+          },
+          "arm": { "type": "string" },
+          "taskId": { "type": "string" },
+          "repetition": { "type": "integer", "minimum": 1 },
+          "invocationPath": {
+            "type": "string",
+            "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+          },
+          "requestedModel": { "type": "string" },
+          "resolvedModel": { "type": ["string", "null"] },
+          "postureFingerprint": { "type": ["string", "null"] },
+          "classification": {
+            "type": ["string", "null"],
+            "enum": ["PASS", "FAIL", "NO_OP", "INFRA_FAIL", "TIMEOUT", null]
+          }
+        }
+      }
+    },
+    "corpusRevision": {
+      "type": ["string", "null"],
+      "description": "Git SHA or content digest of the corpus root"
+    },
+    "harnessRevision": {
+      "type": ["string", "null"],
+      "description": "Git SHA or version of the harness code"
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostname": { "type": "string" },
+        "platform": { "type": "string" },
+        "arch": { "type": "string" },
+        "nodeVersion": { "type": "string" },
+        "cpus": { "type": "integer", "minimum": 1 },
+        "totalMemoryBytes": { "type": "integer", "minimum": 0 },
+        "user": { "type": "string" }
+      }
+    },
+    "scheduleSeed": {
+      "type": ["integer", "string", "null"]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "artifactRoot": {
+      "type": ["string", "null"]
+    },
+    "workspaceRoot": {
+      "type": ["string", "null"]
+    },
+    "inputDigests": {
+      "type": "object",
+      "description": "Frozen digests of campaign inputs; resume recomputes and fail-closes on mismatch",
+      "required": [
+        "schemaVersion",
+        "experiment",
+        "suite",
+        "tasks",
+        "harness"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "experiment": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of canonical frozen experiment"
+        },
+        "suite": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of canonical suite document"
+        },
+        "tasks": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of canonical task documents"
+        },
+        "fixtures": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of fixture tree digests map"
+        },
+        "oracles": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of oracle file digests map"
+        },
+        "harness": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "sha256 of harness implementation content (harness source tree, schemas tree, package.json, package-lock.json when present); symlink-safe"
+        }
+      }
+    }
+  }
+}

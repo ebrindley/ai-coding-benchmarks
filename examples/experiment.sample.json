@@ -1,0 +1,22 @@
+{
+  "id": "sample-local",
+  "schemaVersion": 1,
+  "corpusRoot": "benchmarks",
+  "suiteId": "cli-comparison",
+  "taskIds": ["greenfield-003-js-event-emitter"],
+  "repetitions": 1,
+  "seed": 1,
+  "timeoutMs": 60000,
+  "arms": [
+    {
+      "name": "fake-native",
+      "provider": "fake",
+      "model": "none",
+      "invocationPath": "native-cli",
+      "command": "true",
+      "args": [],
+      "envAllowlist": [],
+      "sandboxMode": null
+    }
+  ]
+}

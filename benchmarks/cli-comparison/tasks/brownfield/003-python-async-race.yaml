@@ -37,16 +37,19 @@ expectedOutcome:
     - id: no-duplicate-processing
       description: Same task never processed twice under concurrent load
       substantiation: test
+      evidenceGate: tests
       artifactRef: tests/test_processor.py::test_no_duplicate_processing
 
     - id: uses-asyncio-lock
       description: Fix uses asyncio.Lock or similar primitive
       substantiation: static
+      evidenceGate: asyncio-primitives
       artifactRef: scripts/check_asyncio_primitives.py
 
     - id: existing-tests-pass
       description: All existing tests still pass (excludes performance tests)
       substantiation: test
+      evidenceGate: tests
       artifactRef: pytest tests/ exits 0
 
   niceToHave:

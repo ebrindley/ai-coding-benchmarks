@@ -42,26 +42,31 @@ expectedOutcome:
     - id: shared-module-created
       description: shared/validators.py exists with extracted functions
       substantiation: static
+      evidenceGate: shared-module
       artifactRef: scripts/check_shared_module.py
 
     - id: no-duplication
       description: validate_email not duplicated (only in shared/)
       substantiation: static
+      evidenceGate: no-duplication
       artifactRef: scripts/check_no_duplication.py
 
     - id: existing-tests-pass
       description: All 32 existing tests pass
       substantiation: test
+      evidenceGate: tests
       artifactRef: pytest tests/ exits 0
 
     - id: no-test-modifications
       description: No test files were modified
       substantiation: static
+      evidenceGate: no-test-edits
       artifactRef: scripts/check_no_test_edits.py
 
     - id: api-unchanged
       description: Public function signatures unchanged
       substantiation: static
+      evidenceGate: no-api-change
       artifactRef: scripts/check_api_compat.py
 
   niceToHave:
@@ -115,9 +120,21 @@ eligibilityGates:
     expectedExitCode: 0
     order: 6
 
+  - gate: shared-module
+    check: shared/validators.py exists with extracted functions
+    command: ./.venv/bin/python scripts/check_shared_module.py
+    expectedExitCode: 0
+    order: 7
+
+  - gate: no-duplication
+    check: Validation functions not duplicated outside shared/
+    command: ./.venv/bin/python scripts/check_no_duplication.py
+    expectedExitCode: 0
+    order: 8
+
   - gate: requirements
     check: All must_have items substantiated
-    order: 7
+    order: 9
 
 scoring:
   delivery:

@@ -43,26 +43,31 @@ expectedOutcome:
     - id: services-extracted
       description: At least 3 new service classes created
       substantiation: static
+      evidenceGate: service-count
       artifactRef: scripts/check-service-count.sh
 
     - id: srp-compliance
       description: Each service has single responsibility (<500 lines)
       substantiation: static
+      evidenceGate: class-size
       artifactRef: scripts/check-class-size.sh
 
     - id: existing-tests-pass
       description: All existing tests pass
       substantiation: test
+      evidenceGate: tests
       artifactRef: mvn test exits 0
 
     - id: no-test-modifications
       description: No test files were modified
       substantiation: static
+      evidenceGate: no-test-edits
       artifactRef: scripts/check-no-test-edits.sh
 
     - id: api-unchanged
       description: OrderService public method signatures unchanged
       substantiation: static
+      evidenceGate: no-api-change
       artifactRef: scripts/check-api-compat.sh
 
   niceToHave:
@@ -110,9 +115,21 @@ eligibilityGates:
     expectedExitCode: 0
     order: 5
 
+  - gate: service-count
+    check: At least 3 new service classes extracted
+    command: bash scripts/check-service-count.sh
+    expectedExitCode: 0
+    order: 6
+
+  - gate: class-size
+    check: Each service has single responsibility (<500 lines)
+    command: bash scripts/check-class-size.sh
+    expectedExitCode: 0
+    order: 7
+
   - gate: requirements
     check: All must_have items substantiated
-    order: 6
+    order: 8
 
 scoring:
   delivery:

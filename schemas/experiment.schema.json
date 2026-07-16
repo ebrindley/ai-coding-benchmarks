@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-coding-benchmarks.local/schemas/experiment.schema.json",
+  "title": "Experiment",
+  "description": "Versioned experiment definition expanding to a trial matrix.",
+  "type": "object",
+  "required": ["id", "schemaVersion", "corpusRoot", "arms", "repetitions", "seed"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Experiment/campaign id: single safe path segment (used for default campaignDir)"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "corpusRoot": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute or harness-relative path to the corpus root"
+    },
+    "suiteId": {
+      "type": "string",
+      "description": "Suite name/id under the corpus (e.g. cli-comparison)"
+    },
+    "suitePath": {
+      "type": "string",
+      "description": "Explicit path to suite.yaml (alternative to suiteId)"
+    },
+    "taskIds": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Optional taskId subset; defaults to suite.tasks"
+    },
+    "arms": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/arm" }
+    },
+    "repetitions": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "seed": {
+      "type": ["integer", "string"],
+      "description": "Schedule/randomization seed for deterministic trial ordering"
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "anyOf": [
+    { "required": ["suiteId"] },
+    { "required": ["suitePath"] }
+  ],
+  "definitions": {
+    "arm": {
+      "type": "object",
+      "required": ["name", "provider", "model", "invocationPath"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Requested model id"
+        },
+        "invocationPath": {
+          "type": "string",
+          "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+        },
+        "command": {
+          "type": "string",
+          "description": "Native-cli executable path/name"
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Native-cli fixed argv prefix"
+        },
+        "promptTransport": {
+          "type": "string",
+          "enum": ["stdin", "prompt-file"],
+          "description": "native-cli prompt delivery: controlled stdin (default) or harness temp file path appended as final argv"
+        },
+        "envAllowlist": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "sandboxMode": {
+          "type": ["string", "null"]
+        },
+        "posture": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Optional extra posture-affecting fields"
+        }
+      }
+    }
+  }
+}

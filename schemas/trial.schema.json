@@ -1,0 +1,200 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-coding-benchmarks.local/schemas/trial.schema.json",
+  "title": "Trial",
+  "description": "Single trial execution record within a campaign. Written by writeTrialResult to results/<trialId>/result.json. Always includes schemaVersion and writtenAt. additionalProperties is false: runtime writers and verify fail closed on unknown fields. resultDigest covers the entire stored record except digests.resultDigest. resolvedModel is never invented from requestedModel; when unavailable, resolvedModel is null and resolvedModelAvailable is false. artifactDir may be recorded but evidence verify always digests campaign/artifacts/<trialId> and never trusts the stored path. Identity fields (id, experimentId, arm, provider, taskId, repetition, scheduleSeed, invocationPath, requestedModel, postureFingerprint) bind to the frozen manifest trial when verified with manifestTrial.",
+  "type": "object",
+  "required": [
+    "id",
+    "experimentId",
+    "arm",
+    "provider",
+    "taskId",
+    "repetition",
+    "scheduleSeed",
+    "invocationPath",
+    "requestedModel",
+    "resolvedModel",
+    "resolvedModelAvailable",
+    "resolvedModelSource",
+    "postureFingerprint",
+    "state",
+    "classification",
+    "digests",
+    "schemaVersion",
+    "writtenAt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Must equal destination trialId; writeTrialResult always forces the safe destination id"
+    },
+    "experimentId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "arm": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Arm name from the experiment"
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Provider id from the arm; always identity-bound to the frozen manifest row"
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repetition": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "scheduleSeed": {
+      "type": ["integer", "string"]
+    },
+    "invocationPath": {
+      "type": "string",
+      "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+    },
+    "requestedModel": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Model id requested on the arm; null only when arm had no model (writeTrialResult default)"
+    },
+    "resolvedModel": {
+      "type": ["string", "null"],
+      "description": "Model id actually used after resolution, if known; never invented from requestedModel"
+    },
+    "resolvedModelAvailable": {
+      "type": "boolean",
+      "description": "True only when resolvedModel was obtained from invoker/adapter evidence"
+    },
+    "resolvedModelSource": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Evidence source for resolvedModel (e.g. model.resolved.value, invoker-explicit, unavailable, absent)"
+    },
+    "postureFingerprint": {
+      "type": ["string", "null"],
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Posture fingerprint (64 hex) or null; always identity-bound to the frozen manifest row. Pattern applies only when a string is present."
+    },
+    "state": {
+      "type": "string",
+      "enum": ["pending", "running", "completed", "failed", "skipped"]
+    },
+    "classification": {
+      "type": ["string", "null"],
+      "enum": ["PASS", "FAIL", "NO_OP", "INFRA_FAIL", "TIMEOUT", null]
+    },
+    "classificationReason": {
+      "type": ["string", "null"],
+      "description": "Free-form classification note; sanitized export only keeps bounded identifiers"
+    },
+    "reasonCode": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9._-]{1,128}$",
+      "description": "Bounded neutral protocol reason code (e.g. SUCCESS, MODEL_UNRESOLVED, PROVIDER_TIMEOUT). Pattern applies only when a string is present. Free-form provider text is never stored here."
+    },
+    "outcomeKind": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9._-]{1,128}$",
+      "description": "Bounded neutral protocol outcome kind (e.g. success, timeout, provider_error, refusal). Independent of transport exitCode. Pattern applies only when a string is present."
+    },
+    "protocolEvidenceVersion": {
+      "type": ["integer", "null"],
+      "enum": [1, null],
+      "description": "Version of the neutral invocation protocol evidence envelope persisted on this trial. Required (value 1) for new reportable poetic-adapter records; null/absent allowed for older records and non-adapter paths where the contract permits."
+    },
+    "protocolSchema": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9._-]{1,128}$",
+      "description": "Stable schema id for protocol evidence (e.g. poetic.provider.invoke.result.v1). Bounded identifier only; never free-form text. Pattern applies only when a string is present."
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fixtureHash": { "type": "string" },
+        "baselineCommit": { "type": "string" },
+        "promptHash": { "type": "string" },
+        "workspaceHash": { "type": "string" }
+      }
+    },
+    "digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Evidence binding digests (required object). rawEvidenceUnavailable marks infra records without provider raw. resultDigest is stamped by writeTrialResult over the full stored record excluding itself.",
+      "properties": {
+        "resultDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "artifactDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "fixtureDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "rawOutputDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "rawStdoutSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "rawStderrSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "rawOutputFileSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "rawEvidenceUnavailable": {
+          "type": "boolean",
+          "description": "True when INFRA_FAIL path stored no raw provider artifacts (unavailable for report); still included in resultDigest envelope"
+        }
+      }
+    },
+    "exitCode": {
+      "type": ["integer", "null"],
+      "description": "Transport process exit code only; not a substitute for outcomeKind/reasonCode. null when the process never exited cleanly."
+    },
+    "executionRoot": {
+      "type": ["string", "null"],
+      "description": "External execution root for provider workspaces (outside campaign tree)"
+    },
+    "gateResults": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Gate evidence after stripGatePreviews (no stdout/stderr previews)"
+      }
+    },
+    "changedFileCount": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "startedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "finishedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "durationMs": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "error": {
+      "type": ["string", "null"]
+    },
+    "workspaceDir": {
+      "type": ["string", "null"],
+      "description": "Per-trial workspace path (external execution root); recorded but not used as digest authority"
+    },
+    "artifactDir": {
+      "type": ["string", "null"],
+      "description": "Recorded artifact path for humans/export; evidence verify always digests campaign/artifacts/<trialId> instead of this value"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Always stamped by writeTrialResult from SCHEMA_VERSION"
+    },
+    "writtenAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Always stamped by writeTrialResult at write time"
+    }
+  }
+}

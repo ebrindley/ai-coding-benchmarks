@@ -1,0 +1,178 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-coding-benchmarks.local/schemas/report.schema.json",
+  "title": "SummaryReport",
+  "description": "Summary report contract emitted by buildReport. Aggregation keys MUST NOT mix distinct invocationPath, resolvedModel, requestedModel, or postureFingerprint values into a single cell. Each stats cell is keyed by a homogeneous (arm, taskId, invocationPath, requestedModel, resolvedModel, postureFingerprint) slice. Global totals may count n/completed but leave passRate null when the set is heterogeneous.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "campaignId",
+    "generatedAt",
+    "totals",
+    "byArm",
+    "byTask",
+    "cells",
+    "refusals",
+    "classifications"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "campaignId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Safe filesystem identifier: single path segment, no traversal or separators"
+    },
+    "experimentId": {
+      "type": ["string", "null"]
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "totals": {
+      "$ref": "#/definitions/statsBlock"
+    },
+    "byArm": {
+      "type": "array",
+      "description": "Per-arm rollups. Each entry is still path/model/posture-homogeneous or enumerates slices rather than mixing them.",
+      "items": {
+        "type": "object",
+        "required": ["arm", "stats"],
+        "additionalProperties": false,
+        "properties": {
+          "arm": { "type": "string" },
+          "provider": { "type": "string" },
+          "invocationPath": {
+            "type": "string",
+            "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+          },
+          "requestedModel": { "type": ["string", "null"] },
+          "resolvedModel": { "type": ["string", "null"] },
+          "postureFingerprint": { "type": ["string", "null"] },
+          "stats": { "$ref": "#/definitions/statsBlock" }
+        }
+      }
+    },
+    "byTask": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["taskId", "stats"],
+        "additionalProperties": false,
+        "properties": {
+          "taskId": { "type": "string" },
+          "stats": { "$ref": "#/definitions/statsBlock" },
+          "byArm": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["arm", "stats"],
+              "additionalProperties": false,
+              "properties": {
+                "arm": { "type": "string" },
+                "invocationPath": {
+                  "type": "string",
+                  "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+                },
+                "requestedModel": { "type": ["string", "null"] },
+                "resolvedModel": { "type": ["string", "null"] },
+                "postureFingerprint": { "type": ["string", "null"] },
+                "stats": { "$ref": "#/definitions/statsBlock" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "cells": {
+      "type": "array",
+      "description": "Atomic aggregation cells. A cell is the only place numeric rates may be computed. Mixing different invocationPath, model, or postureFingerprint within one cell is forbidden.",
+      "items": { "$ref": "#/definitions/aggregationCell" }
+    },
+    "refusals": {
+      "type": "array",
+      "description": "Recorded attempts to aggregate across incompatible dimensions (always present; may be empty)",
+      "items": {
+        "type": "object",
+        "required": ["reason", "dimensions"],
+        "additionalProperties": false,
+        "properties": {
+          "reason": { "type": "string" },
+          "dimensions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["invocationPath", "resolvedModel", "requestedModel", "postureFingerprint", "arm", "taskId"]
+            }
+          },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "classifications": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "PASS": { "type": "integer", "minimum": 0 },
+        "FAIL": { "type": "integer", "minimum": 0 },
+        "NO_OP": { "type": "integer", "minimum": 0 },
+        "INFRA_FAIL": { "type": "integer", "minimum": 0 },
+        "TIMEOUT": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "definitions": {
+    "statsBlock": {
+      "type": "object",
+      "required": ["n", "completed", "pass", "fail", "noOp", "infraFail", "timeout", "passRate", "meanDurationMs"],
+      "additionalProperties": false,
+      "properties": {
+        "n": { "type": "integer", "minimum": 0 },
+        "completed": { "type": "integer", "minimum": 0 },
+        "pass": { "type": "integer", "minimum": 0 },
+        "fail": { "type": "integer", "minimum": 0 },
+        "noOp": { "type": "integer", "minimum": 0 },
+        "infraFail": { "type": "integer", "minimum": 0 },
+        "timeout": { "type": "integer", "minimum": 0 },
+        "passRate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "pass / completed when completed > 0 and cell is homogeneous; null when aggregation was refused"
+        },
+        "meanDurationMs": { "type": ["number", "null"] }
+      }
+    },
+    "aggregationCell": {
+      "type": "object",
+      "required": [
+        "arm",
+        "taskId",
+        "invocationPath",
+        "resolvedModel",
+        "postureFingerprint",
+        "stats"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "arm": { "type": "string" },
+        "taskId": { "type": "string" },
+        "invocationPath": {
+          "type": "string",
+          "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+        },
+        "requestedModel": { "type": ["string", "null"] },
+        "resolvedModel": { "type": ["string", "null"] },
+        "postureFingerprint": { "type": ["string", "null"] },
+        "provider": { "type": "string" },
+        "stats": { "$ref": "#/definitions/statsBlock" }
+      }
+    }
+  }
+}
