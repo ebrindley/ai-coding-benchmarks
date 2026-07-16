@@ -1331,6 +1331,7 @@ export async function ingestProviderRawEvidence(outputPath, requestId, opts = {}
  * @param {unknown} [opts.request] if provided, written as JSON to requestPath before spawn
  * @param {string} opts.campaignDir - campaign control tree hidden from provider via OS confinement
  * @param {import('./provider-confine.js').ProviderConfinementInfo} [opts.confinement]
+ * @param {unknown} [opts.taskEnv] - REJECTED if present (smuggling guard; never merge task YAML env)
  * @returns {Promise<InvokerResult>}
  */
 export async function invokePoeticAdapter({
@@ -1343,7 +1344,37 @@ export async function invokePoeticAdapter({
   request,
   campaignDir,
   confinement,
+  taskEnv,
+  ...rest
 }) {
+  // Refuse credential/env smuggling from task YAML (before confinement setup).
+  if (taskEnv !== undefined) {
+    return {
+      exitCode: null,
+      timedOut: false,
+      stdout: '',
+      stderr: '',
+      outputPath: outputPath ?? '',
+      success: false,
+      outcomeKind: null,
+      reasonCode: null,
+      infraFailure:
+        'refusing taskEnv: poetic-adapter does not merge corpus task YAML env/credentials',
+    };
+  }
+  if (rest && Object.prototype.hasOwnProperty.call(rest, 'task')) {
+    return {
+      exitCode: null,
+      timedOut: false,
+      stdout: '',
+      stderr: '',
+      outputPath: outputPath ?? '',
+      success: false,
+      outcomeKind: null,
+      reasonCode: null,
+      infraFailure: 'refusing task object: pass only harness-controlled options',
+    };
+  }
   if (campaignDir == null || String(campaignDir).trim() === '') {
     return {
       exitCode: null,
@@ -1466,6 +1497,9 @@ export async function invokePoeticAdapter({
 
   // Fail-closed OS confinement: campaign tree inaccessible while provider is alive.
   // Nested Poetic sandboxes (if any) run inside this outer restriction.
+  // Private TMPDIR lives under the already-writable scratch bind (request parent)
+  // so Poetic's os.tmpdir() raw spool remains writable under bubblewrap.
+  const scratchParent = path.dirname(path.resolve(String(requestPath)));
   const result = await spawnControlled({
     command: String(poeticBin),
     args,
@@ -1475,9 +1509,10 @@ export async function invokePoeticAdapter({
     campaignDir: String(campaignDir),
     confine: true,
     confinement,
+    privateTempParent: scratchParent,
     extraBindPaths: [
-      path.dirname(String(requestPath)),
-      path.dirname(String(outputPath)),
+      scratchParent,
+      path.dirname(path.resolve(String(outputPath))),
     ],
   });
 

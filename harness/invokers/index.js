@@ -206,4 +206,7 @@ export {
   campaignDenyPaths,
   escapeSeatbeltPath,
   assertPathOutsideCampaign,
+  createProviderPrivateTemp,
+  applyProviderTempEnv,
+  PROVIDER_PRIVATE_TEMP_PREFIX,
 } from './provider-confine.js';

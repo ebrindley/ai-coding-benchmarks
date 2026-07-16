@@ -6,6 +6,13 @@
  * separation of workspaces: the harness denies the campaign subpath via
  * sandbox-exec (macOS) or bubblewrap tmpfs mask (Linux).
  *
+ * Linux bubblewrap binds `/` read-only and only rebinds the execution
+ * workspace (plus optional scratch paths) writable. Host `os.tmpdir()`
+ * (commonly `/tmp`) is therefore unwritable inside the sandbox. Every
+ * confined provider spawn receives a private 0700 temp directory under the
+ * already-writable workspace/scratch bind, with TMPDIR/TMP/TEMP constrained
+ * to that directory. Campaign-control storage is never used as temp parent.
+ *
  * Honesty bound:
  * - Nested sandboxes (e.g. Poetic's own provider sandbox) run *inside* this
  *   outer restriction; we do not claim nested-sandbox introspection.
@@ -13,9 +20,20 @@
  * - Gate confinement is separate (gates.js); this module is for invokers only.
  */
 
-import { access, constants, mkdtemp, writeFile, rm, realpath, lstat } from 'node:fs/promises';
+import {
+  access,
+  constants,
+  mkdtemp,
+  writeFile,
+  rm,
+  realpath,
+  chmod,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+
+/** mkdtemp prefix for per-invocation private temp under the workspace bind. */
+export const PROVIDER_PRIVATE_TEMP_PREFIX = 'aicb-prov-tmp-';
 
 /**
  * @typedef {object} ProviderConfinementInfo
@@ -166,6 +184,60 @@ export function buildProviderSeatbeltProfile(campaignPaths) {
 }
 
 /**
+ * Create a private 0700 temp directory under an already-writable confinement
+ * bind (workspace or scratch). Never under campaign control storage.
+ *
+ * Poetic creates its raw spool under `os.tmpdir()`; under bubblewrap host
+ * `/tmp` is read-only, so the child must receive TMPDIR pointing here.
+ *
+ * @param {string} parentDir - absolute parent already (or soon) RW-bound
+ * @returns {Promise<string>} absolute private temp path
+ */
+export async function createProviderPrivateTemp(parentDir) {
+  if (parentDir == null || String(parentDir).trim() === '') {
+    throw new Error('createProviderPrivateTemp: parentDir required');
+  }
+  const parent = path.resolve(String(parentDir));
+  if (parent === '/' || parent === '') {
+    throw new Error('createProviderPrivateTemp: refusing filesystem root');
+  }
+  // The harness must establish the workspace/scratch parent itself. Do not
+  // create arbitrary caller-selected ancestors from this confinement helper.
+  const dir = await mkdtemp(path.join(parent, PROVIDER_PRIVATE_TEMP_PREFIX));
+  // Force 0700 independent of umask (Poetic expects a private spool parent).
+  await chmod(dir, 0o700);
+  return dir;
+}
+
+/**
+ * Overlay constrained TMPDIR/TMP/TEMP onto a harness-controlled env object.
+ * Does not merge task YAML env — only the three temp keys are set/overwritten.
+ *
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} env
+ * @param {string} privateTempDir
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function applyProviderTempEnv(env, privateTempDir) {
+  if (privateTempDir == null || String(privateTempDir).trim() === '') {
+    throw new Error('applyProviderTempEnv: privateTempDir required');
+  }
+  const t = path.resolve(String(privateTempDir));
+  /** @type {NodeJS.ProcessEnv} */
+  const out = {};
+  if (env != null && typeof env === 'object') {
+    for (const [k, v] of Object.entries(env)) {
+      if (v !== undefined && v !== null) {
+        out[k] = String(v);
+      }
+    }
+  }
+  out.TMPDIR = t;
+  out.TMP = t;
+  out.TEMP = t;
+  return out;
+}
+
+/**
  * Build confined argv for a provider command.
  * Never uses a shell. Command and args are preserved as the final argv tail.
  *
@@ -256,15 +328,20 @@ export function buildProviderConfinedArgv({
  * Prepare confinement materials and wrap a command for provider spawn.
  * Caller must invoke cleanup() after the child exits.
  *
+ * Always provisions a private 0700 temp under the writable workspace/scratch
+ * bind (never under campaign control storage) so confined children can use
+ * os.tmpdir() / TMPDIR even when bubblewrap mounts host root read-only.
+ *
  * @param {object} opts
  * @param {string} opts.command
  * @param {string[]} opts.args
  * @param {string} opts.cwd
  * @param {string} opts.campaignDir - campaign control/evidence root to hide
  * @param {string[]} [opts.extraBindPaths]
+ * @param {string} [opts.privateTempParent] - parent for private temp (default: cwd)
  * @param {ProviderConfinementInfo} [opts.confinement] - pre-detected
  * @returns {Promise<
- *   | { ok: true, command: string, args: string[], cleanup: () => Promise<void>, confinement: ProviderConfinementInfo, campaignPaths: string[] }
+ *   | { ok: true, command: string, args: string[], cleanup: () => Promise<void>, confinement: ProviderConfinementInfo, campaignPaths: string[], privateTempDir: string }
  *   | { ok: false, infraFailure: string, executionUnavailable: true }
  * >}
  */
@@ -276,6 +353,15 @@ export async function wrapProviderCommand(opts) {
       executionUnavailable: true,
       infraFailure:
         'provider confinement requires campaignDir (fail closed; unconfined spawn refused)',
+    };
+  }
+
+  if (opts.cwd == null || String(opts.cwd).trim() === '') {
+    return {
+      ok: false,
+      executionUnavailable: true,
+      infraFailure:
+        'provider confinement requires cwd (workspace) for private temp and writable bind',
     };
   }
 
@@ -302,16 +388,56 @@ export async function wrapProviderCommand(opts) {
 
   /** @type {string | null} */
   let profileDir = null;
+  /** @type {string | null} */
+  let privateTempDir = null;
   /** @type {string | undefined} */
   let profilePath;
 
   try {
+    // Private temp under already-writable workspace/scratch bind — never campaign.
+    const tempParent =
+      opts.privateTempParent != null &&
+      String(opts.privateTempParent).trim() !== ''
+        ? String(opts.privateTempParent)
+        : String(opts.cwd);
+    await assertPathOutsideCampaign(tempParent, campaignDir);
+    const canonicalTempParent = await canonicalPath(tempParent);
+    const allowedTempParents = [String(opts.cwd), ...(opts.extraBindPaths ?? [])];
+    let tempParentAllowed = false;
+    for (const allowed of allowedTempParents) {
+      const canonicalAllowed = await canonicalPath(allowed);
+      if (
+        canonicalTempParent === canonicalAllowed ||
+        canonicalTempParent.startsWith(canonicalAllowed + path.sep)
+      ) {
+        tempParentAllowed = true;
+        break;
+      }
+    }
+    if (!tempParentAllowed) {
+      throw new Error(
+        `private temp parent must be inside cwd or an explicit writable bind: ${canonicalTempParent}`,
+      );
+    }
+    privateTempDir = await createProviderPrivateTemp(tempParent);
+    await assertPathOutsideCampaign(privateTempDir, campaignDir);
+
     if (confinement.kind === 'sandbox-exec') {
+      // Seatbelt profile lives on the host outside the sandbox tree (sandbox-exec
+      // reads -f path before applying the profile). Host tmp is fine here.
       profileDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-provider-sb-'));
       profilePath = path.join(profileDir, 'provider.sb');
       const profile = buildProviderSeatbeltProfile(campaignPaths);
       await writeFile(profilePath, profile, { encoding: 'utf8', mode: 0o600 });
     }
+
+    // Ensure the private temp is RW-bound under bwrap (redundant when under cwd,
+    // required when privateTempParent is an external scratch path).
+    /** @type {string[]} */
+    const extraBindPaths = [
+      ...(Array.isArray(opts.extraBindPaths) ? opts.extraBindPaths : []),
+      privateTempDir,
+    ];
 
     const wrapped = buildProviderConfinedArgv({
       confinement,
@@ -320,8 +446,14 @@ export async function wrapProviderCommand(opts) {
       cwd: opts.cwd,
       campaignPaths,
       profilePath,
-      extraBindPaths: opts.extraBindPaths,
+      extraBindPaths,
     });
+
+    const tempToClean = privateTempDir;
+    const profileToClean = profileDir;
+    // Ownership transferred to cleanup; avoid double-rm on success return.
+    privateTempDir = null;
+    profileDir = null;
 
     return {
       ok: true,
@@ -329,15 +461,26 @@ export async function wrapProviderCommand(opts) {
       args: wrapped.args,
       confinement,
       campaignPaths,
+      privateTempDir: tempToClean,
       cleanup: async () => {
-        if (profileDir) {
-          await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+        if (profileToClean) {
+          await rm(profileToClean, { recursive: true, force: true }).catch(
+            () => {},
+          );
+        }
+        if (tempToClean) {
+          await rm(tempToClean, { recursive: true, force: true }).catch(
+            () => {},
+          );
         }
       },
     };
   } catch (err) {
     if (profileDir) {
       await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+    }
+    if (privateTempDir) {
+      await rm(privateTempDir, { recursive: true, force: true }).catch(() => {});
     }
     return {
       ok: false,

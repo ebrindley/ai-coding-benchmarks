@@ -22,7 +22,10 @@
  */
 
 import { spawn } from 'node:child_process';
-import { wrapProviderCommand } from './provider-confine.js';
+import {
+  wrapProviderCommand,
+  applyProviderTempEnv,
+} from './provider-confine.js';
 
 /** Default max bytes retained per stream (rest discarded, length recorded). */
 export const DEFAULT_CAPTURE_LIMIT = 256 * 1024;
@@ -42,6 +45,7 @@ export const DEFAULT_CAPTURE_LIMIT = 256 * 1024;
  * @property {boolean} [executionUnavailable]
  * @property {string[]} [confinedArgv]
  * @property {string} [confinedCommand]
+ * @property {string} [privateTempDir] - confined private temp (cleaned after return)
  */
 
 /**
@@ -333,6 +337,7 @@ export function spawnRaw({
  * @param {string} [opts.campaignDir] - campaign control tree to hide from provider
  * @param {boolean} [opts.confine] - default true when campaignDir set; false = raw (trusted)
  * @param {string[]} [opts.extraBindPaths] - extra rw binds for bwrap
+ * @param {string} [opts.privateTempParent] - parent for private 0700 TMPDIR (default: cwd)
  * @param {import('./provider-confine.js').ProviderConfinementInfo} [opts.confinement]
  * @returns {Promise<SpawnResult>}
  */
@@ -348,6 +353,7 @@ export async function spawnControlled(opts) {
     campaignDir,
     confine,
     extraBindPaths,
+    privateTempParent,
     confinement,
   } = opts;
 
@@ -384,6 +390,7 @@ export async function spawnControlled(opts) {
       cwd: String(cwd),
       campaignDir: String(campaignDir),
       extraBindPaths,
+      privateTempParent,
       confinement,
     });
 
@@ -399,11 +406,18 @@ export async function spawnControlled(opts) {
     }
 
     try {
+      // Constrain TMPDIR/TMP/TEMP to the private workspace-bound temp so
+      // confined children (e.g. Poetic raw spool under os.tmpdir()) can write.
+      // Never merges task YAML env — only harness-controlled env + temp keys.
+      const childEnv = applyProviderTempEnv(
+        resolveHarnessEnv(env),
+        wrapped.privateTempDir,
+      );
       const result = await spawnRaw({
         command: wrapped.command,
         args: wrapped.args,
         cwd,
-        env,
+        env: childEnv,
         timeoutMs,
         stdin,
         captureLimit,
@@ -412,6 +426,7 @@ export async function spawnControlled(opts) {
         ...result,
         confinedCommand: wrapped.command,
         confinedArgv: wrapped.args,
+        privateTempDir: wrapped.privateTempDir,
       };
     } finally {
       await wrapped.cleanup();
