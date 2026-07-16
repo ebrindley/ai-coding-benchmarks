@@ -4,7 +4,7 @@
  * Resumable and deterministic.
  */
 
-import { mkdir, access, lstat } from 'node:fs/promises';
+import { mkdir, access, lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -20,10 +20,169 @@ import {
 } from './results.js';
 import {
   assertCampaignFilesystemBoundary,
+  createFileExclusiveNoFollow,
   readFileNoFollow,
+  readTextNoFollow,
   writeFileAtomicNoFollow,
   UnsafePathError,
 } from './safe-fs.js';
+
+export const CAMPAIGN_OWNER_FILENAME = '.aicb-campaign-owner.json';
+export const CAMPAIGN_OWNER_SCHEMA = 'aicb.campaign-owner.v1';
+
+/** @param {unknown} error */
+function errorCode(error) {
+  return error && typeof error === 'object' && 'code' in error
+    ? /** @type {{ code?: unknown }} */ (error).code
+    : undefined;
+}
+
+/** @param {string} target */
+async function lstatOrNull(target) {
+  try {
+    return await lstat(target);
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/**
+ * Validate the private ownership marker without following its leaf.
+ * @param {string} campaignDir
+ */
+async function validateCampaignOwnerMarker(campaignDir) {
+  const markerPath = path.join(campaignDir, CAMPAIGN_OWNER_FILENAME);
+  const text = await readTextNoFollow(markerPath, { maxBytes: 4096 });
+  let marker;
+  try {
+    marker = JSON.parse(text);
+  } catch (error) {
+    throw new UnsafePathError(
+      `invalid AICB campaign ownership marker JSON (fail closed): ${error instanceof Error ? error.message : String(error)}`,
+      { code: 'CAMPAIGN_OWNER_INVALID', path: markerPath },
+    );
+  }
+  if (
+    marker == null ||
+    typeof marker !== 'object' ||
+    Array.isArray(marker) ||
+    marker.schema !== CAMPAIGN_OWNER_SCHEMA
+  ) {
+    throw new UnsafePathError(
+      'invalid AICB campaign ownership marker schema (fail closed)',
+      { code: 'CAMPAIGN_OWNER_INVALID', path: markerPath },
+    );
+  }
+}
+
+/**
+ * Claim a caller-selected campaign root before any chmod or campaign write.
+ *
+ * An absent leaf is created privately and marked. An existing leaf is accepted
+ * only when it already carries a valid ownership marker, a valid legacy AICB
+ * manifest, or is an empty dedicated leaf that can be claimed exclusively.
+ * Non-empty unrecognized directories are refused before chmod or writes, which
+ * prevents `--campaign .` from mutating an unrelated repository.
+ *
+ * @param {string} requestedDir
+ * @param {{ corpusRoot: string, harnessRoot: string, loadManifest: (dir: string) => Promise<object> }} options
+ */
+export async function claimCampaignRoot(requestedDir, options) {
+  const campaignDir = await assertCampaignFilesystemBoundary(requestedDir);
+  const resolved = path.resolve(campaignDir);
+  const forbiddenRoots = new Set([
+    path.parse(resolved).root,
+    path.resolve(os.homedir()),
+    path.resolve(os.tmpdir()),
+    path.resolve(options.corpusRoot),
+    path.resolve(options.harnessRoot),
+  ]);
+  if (forbiddenRoots.has(resolved)) {
+    throw new UnsafePathError(
+      `refusing dangerous campaign root (choose a dedicated child directory): ${resolved}`,
+      { code: 'CAMPAIGN_ROOT_DANGEROUS', path: resolved },
+    );
+  }
+
+  let rootStats = await lstatOrNull(resolved);
+  let created = false;
+  if (rootStats == null) {
+    try {
+      await mkdir(resolved, { mode: 0o700 });
+      created = true;
+    } catch (error) {
+      if (errorCode(error) !== 'EEXIST') throw error;
+    }
+    rootStats = await lstatOrNull(resolved);
+  }
+
+  if (!rootStats?.isDirectory() || rootStats.isSymbolicLink()) {
+    throw new UnsafePathError(
+      `campaign root must be a real directory (fail closed): ${resolved}`,
+      { code: 'CAMPAIGN_ROOT_INVALID', path: resolved },
+    );
+  }
+
+  // A repository root is never a campaign root, even if an attacker or stale
+  // tool planted a marker there.
+  if ((await lstatOrNull(path.join(resolved, '.git'))) != null) {
+    throw new UnsafePathError(
+      `refusing repository as campaign root (choose a dedicated child directory): ${resolved}`,
+      { code: 'CAMPAIGN_ROOT_REPOSITORY', path: resolved },
+    );
+  }
+
+  const markerPath = path.join(resolved, CAMPAIGN_OWNER_FILENAME);
+  if (!created) {
+    const markerStats = await lstatOrNull(markerPath);
+    if (markerStats != null) {
+      await validateCampaignOwnerMarker(resolved);
+      return resolved;
+    }
+
+    const manifestPath = path.join(resolved, 'manifest.json');
+    if ((await lstatOrNull(manifestPath)) == null) {
+      const entries = await readdir(resolved);
+      if (entries.length > 0) {
+        throw new UnsafePathError(
+          `existing non-empty campaign root is not owned by AICB (choose a new directory): ${resolved}`,
+          { code: 'CAMPAIGN_ROOT_UNOWNED', path: resolved },
+        );
+      }
+    } else {
+      // Legacy campaign compatibility: the full manifest must validate before
+      // this process writes a marker or changes directory permissions.
+      await options.loadManifest(resolved);
+    }
+  }
+
+  const marker = `${JSON.stringify({ schema: CAMPAIGN_OWNER_SCHEMA })}\n`;
+  try {
+    await createFileExclusiveNoFollow(markerPath, marker, { mode: 0o600, fsync: true });
+  } catch (error) {
+    if (errorCode(error) !== 'EEXIST') throw error;
+    await validateCampaignOwnerMarker(resolved);
+  }
+  return resolved;
+}
+
+/** Create the dedicated default parent without recursively chmodding `/tmp`. */
+async function ensureDefaultCampaignParent(parentDir) {
+  const resolved = await assertCampaignFilesystemBoundary(parentDir);
+  try {
+    await mkdir(resolved, { mode: 0o700 });
+  } catch (error) {
+    if (errorCode(error) !== 'EEXIST') throw error;
+  }
+  const stats = await lstatOrNull(resolved);
+  if (!stats?.isDirectory() || stats.isSymbolicLink()) {
+    throw new UnsafePathError(
+      `default campaign parent must be a real directory: ${resolved}`,
+      { code: 'CAMPAIGN_PARENT_INVALID', path: resolved },
+    );
+  }
+}
 
 
 /**
@@ -415,6 +574,7 @@ export async function runCampaign(opts) {
   // Default campaignDir must never be derived from an unsafe experiment.id.
   /** @type {string} */
   let campaignDir;
+  let defaultCampaignParent = null;
   if (opts.campaignDir != null) {
     campaignDir = path.resolve(opts.campaignDir);
   } else {
@@ -432,7 +592,8 @@ export async function runCampaign(opts) {
         campaignDir: null,
       };
     }
-    campaignDir = path.join(os.tmpdir(), 'aicb-campaigns', safeId);
+    defaultCampaignParent = path.join(os.tmpdir(), 'aicb-campaigns');
+    campaignDir = path.join(defaultCampaignParent, safeId);
   }
 
   const pf = await preflight({
@@ -451,10 +612,18 @@ export async function runCampaign(opts) {
     };
   }
 
-  // Physical campaign boundary before any create/resume write: reject symlink
-  // campaign root and any existing user-controlled symlink ancestor/component.
+  // Establish ownership before any chmod or campaign write. The default parent
+  // is a dedicated AICB namespace; an explicit existing campaign root must
+  // already carry a valid marker or legacy manifest.
   try {
-    campaignDir = await assertCampaignFilesystemBoundary(campaignDir);
+    if (defaultCampaignParent != null) {
+      await ensureDefaultCampaignParent(defaultCampaignParent);
+    }
+    campaignDir = await claimCampaignRoot(campaignDir, {
+      corpusRoot,
+      harnessRoot,
+      loadManifest: peers.loadManifest,
+    });
   } catch (err) {
     return {
       ok: false,
