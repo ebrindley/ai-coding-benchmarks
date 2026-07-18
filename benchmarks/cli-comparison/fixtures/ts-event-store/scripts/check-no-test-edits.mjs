@@ -39,7 +39,9 @@ function getModifiedFiles() {
 
   const staged = run(['diff', '--cached', '--name-only', '--', fixtureDir]);
   const unstaged = run(['diff', '--name-only', '--', fixtureDir]);
-  return [...new Set([...staged, ...unstaged])];
+  // Include untracked files so an agent cannot slip in a new test file undetected.
+  const untracked = run(['ls-files', '--others', '--exclude-standard', '--', fixtureDir]);
+  return [...new Set([...staged, ...unstaged, ...untracked])];
 }
 
 function emit(result) {
