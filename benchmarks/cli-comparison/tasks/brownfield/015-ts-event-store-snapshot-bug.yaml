@@ -1,0 +1,183 @@
+# Brownfield Task: Fix Event-Store Snapshot/Checkpoint Double-Count Bug
+#
+# Category: Bug Fix (existing-codebase)
+# Language: TypeScript (Node.js, event sourcing)
+# Complexity: High
+# Estimated Time: 45 minutes
+#
+# Bug: Balances loaded via a snapshot or projected via a checkpoint are too
+#      high, because the boundary event is applied twice.
+# Root cause: The event store's "read events after a version" boundary is
+#      inclusive instead of exclusive, so incremental readers re-apply the last
+#      event they already folded in. Full replay from version 0 hides it.
+
+taskId: brownfield-015-ts-event-store-snapshot-bug
+type: brownfield
+codeType: existing-codebase
+category: bugfix
+language: typescript
+description: |
+  Fix a state-corruption bug in the event-sourced account ledger under
+  fixtures/ts-event-store. Balances are correct when an aggregate is rebuilt by
+  replaying its whole stream, but wrong when it is rebuilt incrementally.
+
+  Bug symptoms:
+  - Loading an account through a snapshot returns a balance that is too high;
+    the event at the snapshot's version is counted twice.
+  - The balance projection drifts every time it catches up from its checkpoint:
+    the checkpoint event is re-processed on the next catch-up.
+  - A full replay from version 0 (no snapshot, empty checkpoint) is correct,
+    which masks the defect on the common path.
+
+  Root cause hints:
+  - The store exposes readStream(streamId, fromVersionExclusive) whose parameter
+    is documented as EXCLUSIVE: it must return only events whose version is
+    strictly greater than the argument.
+  - Both incremental readers (AccountRepository.load after a snapshot, and
+    BalanceProjection.catchUp after a checkpoint) depend on that exclusivity to
+    avoid re-applying the boundary event.
+  - The reducer accumulates deposits/withdrawals and is not idempotent, so a
+    re-applied event corrupts the running balance.
+
+  Constraints:
+  - Fix the shared read-boundary contract; do not special-case individual
+    callers or make the reducer idempotent.
+  - Preserve the public API (EventStore, AccountRepository, BalanceProjection,
+    SnapshotStore) and the documented exclusive-read semantics.
+  - Type checking must stay clean; the bug is a runtime defect, not a type error.
+  - Do not edit tests/. scripts/check-no-test-edits.mjs enforces this.
+complexity: high
+
+expectedOutcome:
+  mustHave:
+    - id: exclusive-read-boundary
+      description: readStream(id, n) returns only events with version strictly > n
+      substantiation: test
+      artifactRef: tests/event-store.test.ts::readStream-is-exclusive-of-fromVersion
+
+    - id: snapshot-no-double-count
+      description: Loading through a snapshot does not re-apply the boundary event
+      substantiation: test
+      artifactRef: tests/account-repository.test.ts::snapshot-rehydration-does-not-double-count-boundary-event
+
+    - id: snapshot-no-new-events
+      description: A snapshot with no newer events returns the snapshot state unchanged
+      substantiation: test
+      artifactRef: tests/account-repository.test.ts::snapshot-with-no-new-events-returns-snapshot-state
+
+    - id: projection-no-reprocess
+      description: Incremental catch-up does not reprocess the checkpoint event
+      substantiation: test
+      artifactRef: tests/balance-projection.test.ts::incremental-catch-up-does-not-reprocess-checkpoint-event
+
+    - id: projection-catchup-noop
+      description: A catch-up with no new events leaves the projected balance unchanged
+      substantiation: test
+      artifactRef: tests/balance-projection.test.ts::catch-up-with-no-new-events-is-a-no-op
+
+    - id: full-replay-unbroken
+      description: Full-replay load and existing store behavior still pass
+      substantiation: test
+      artifactRef: npm test exits 0
+
+  niceToHave:
+    - id: minimal-diff
+      description: Fix is localized to the shared read-boundary rather than each caller
+      substantiation: manual
+
+  successCriteria:
+    - All must-have tests pass
+    - No TypeScript errors
+    - Public API and exclusive-read semantics unchanged
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: install
+    check: Dependencies installed
+    command: npm install --no-audit --no-fund --package-lock=false
+    expectedExitCode: 0
+    order: 2
+
+  - gate: no-test-edits
+    check: No test files modified (fix must be proven by the shipped tests)
+    command: node scripts/check-no-test-edits.mjs
+    expectedExitCode: 0
+    order: 3
+
+  - gate: typecheck
+    check: TypeScript compiles without errors
+    command: npx tsc --noEmit
+    expectedExitCode: 0
+    order: 4
+
+  - gate: lint
+    check: No ESLint errors
+    command: npx eslint src/ tests/
+    expectedExitCode: 0
+    order: 5
+
+  - gate: tests
+    check: All tests pass
+    command: npm test
+    expectedExitCode: 0
+    order: 6
+
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 7
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - linter_delta
+      - complexity_delta
+
+toolEvidencePolicy:
+  requiredWhen: tests are part of success_criteria
+  neutralWhen: never
+
+networkPolicy:
+  allowed: true
+  provenanceRequired: true
+  record:
+    - urls
+    - timestamps
+    - content_hash
+
+fixturePath: ts-event-store
+
+# Fixture details
+fixture:
+  description: Event-sourced account ledger with an inclusive/exclusive read-boundary bug
+  bugLocation: src/event-store.ts::readStream()
+  testFramework: Jest
+  spansFiles:
+    - src/event-store.ts
+    - src/account-repository.ts
+    - src/balance-projection.ts
+    - src/account.ts
+  masking: Full replay from version 0 is correct; only snapshot/checkpoint paths fail
+
+tags:
+  - typescript
+  - event-sourcing
+  - snapshot
+  - projection
+  - off-by-one
+  - bug-fix
+  - existing-codebase
+
+estimatedMinutes: 45

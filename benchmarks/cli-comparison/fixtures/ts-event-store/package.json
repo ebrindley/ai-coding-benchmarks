@@ -1,0 +1,28 @@
+{
+  "name": "ts-event-store",
+  "private": true,
+  "version": "1.0.0",
+  "description": "TypeScript event-sourcing fixture (seeded snapshot rehydration off-by-one bug)",
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "lint": "npx eslint src/ tests/",
+    "typecheck": "npx tsc --noEmit",
+    "check-no-test-edits": "node scripts/check-no-test-edits.mjs"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@typescript-eslint/eslint-plugin": "^8.54.0",
+    "@typescript-eslint/parser": "^8.54.0",
+    "eslint": "^9.39.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "typescript": "^5.4.5"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/tests/**/*.test.ts"
+    ]
+  }
+}

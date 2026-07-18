@@ -27,3 +27,7 @@ tasks:
   - brownfield-008-js-to-ts-migration
   - brownfield-010-ts-lru-eviction-bug
   - brownfield-011-go-worker-pool-race
+  - brownfield-012-csharp-di-lifetime-bug
+  - brownfield-013-java-order-concurrency-bug
+  - brownfield-014-python-pipeline-cache-invalidation
+  - brownfield-015-ts-event-store-snapshot-bug
