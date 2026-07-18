@@ -35,17 +35,22 @@ public final class OrderConcurrencyTest {
   private static final int ROUNDS = 25;
   private static final int THREADS = 64;
 
-  private OrderService newService(CyclicBarrier readBarrier) {
+  /** Bundles the service with the order repository so tests can assert persistence. */
+  private record Fixture(OrderService service, OrderRepository orders) {}
+
+  private Fixture newFixture(CyclicBarrier readBarrier) {
     ProductRepository products =
         new BarrierProductRepository(new InMemoryProductRepository(), readBarrier);
-    return new OrderService(products, new InMemoryOrderRepository());
+    OrderRepository orders = new InMemoryOrderRepository();
+    return new Fixture(new OrderService(products, orders), orders);
   }
 
   @Test
   void stockIsConservedUnderConcurrentReservation() throws Exception {
     for (int round = 0; round < ROUNDS; round++) {
       CyclicBarrier readBarrier = new CyclicBarrier(THREADS);
-      OrderService service = newService(readBarrier);
+      Fixture fixture = newFixture(readBarrier);
+      OrderService service = fixture.service();
       Product product = service.addProduct("widget", THREADS);
 
       AtomicInteger confirmed = new AtomicInteger();
@@ -70,6 +75,13 @@ public final class OrderConcurrencyTest {
               + THREADS
               + ")");
       assertEquals(0, finalStock, "round " + round + ": stock should be fully reserved");
+      // A persisted order must correspond to a reserved unit: no orphan orders
+      // from a reservation that later failed, and no confirmed reservation without
+      // a saved order.
+      assertEquals(
+          confirmed.get(),
+          fixture.orders().findAll().size(),
+          "round " + round + ": persisted order count must equal confirmed reservations");
     }
   }
 
@@ -78,7 +90,8 @@ public final class OrderConcurrencyTest {
     int capacity = THREADS / 2;
     for (int round = 0; round < ROUNDS; round++) {
       CyclicBarrier readBarrier = new CyclicBarrier(THREADS);
-      OrderService service = newService(readBarrier);
+      Fixture fixture = newFixture(readBarrier);
+      OrderService service = fixture.service();
       Product product = service.addProduct("gadget", capacity);
 
       AtomicInteger confirmed = new AtomicInteger();
@@ -98,6 +111,12 @@ public final class OrderConcurrencyTest {
           capacity,
           confirmed.get(),
           "round " + round + ": oversold (confirmed=" + confirmed.get() + ", capacity=" + capacity + ")");
+      // The failed reservations (THREADS - capacity of them) must not leave orphan
+      // orders behind: only successful reservations may persist an order.
+      assertEquals(
+          confirmed.get(),
+          fixture.orders().findAll().size(),
+          "round " + round + ": persisted order count must equal confirmed reservations (no orphans)");
       assertEquals(0, finalStock, "round " + round + ": stock should be exhausted");
       assertTrue(finalStock >= 0, "round " + round + ": stock went negative");
     }

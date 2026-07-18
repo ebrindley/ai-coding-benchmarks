@@ -167,9 +167,9 @@ fixture:
   bugLocation: src/main/java/com/example/OrderService.java::placeOrder
   spansLayers: OrderController -> OrderService -> ProductRepository/OrderRepository
   testFramework: JUnit 5 + Spring Boot Test (MockMvc)
-  concurrencyTest: OrderConcurrencyTest spawns 64 threads x 100 rounds behind a CountDownLatch barrier
+  concurrencyTest: OrderConcurrencyTest spawns 64 threads x 25 rounds; a CyclicBarrier on the product read forces read-check-write overlap
   testCount: 7 tests (2 concurrency, 5 functional MockMvc)
-  deterministicPattern: CountDownLatch start barrier maximizes contention; many rounds surface the race reliably
+  deterministicPattern: CyclicBarrier gathers all readers before any write, deterministically surfacing the lost-update race; each concurrency test also asserts persisted-order count equals confirmed reservations
   checkScripts:
     noTestEdits: scripts/check-no-test-edits.sh
     synchronization: scripts/check-synchronization.sh
