@@ -52,6 +52,7 @@ expectedOutcome:
     - id: tenant-context-scoped
       description: ITenantContext is registered with a Scoped lifetime, not Singleton
       substantiation: static
+      evidenceGate: di-lifetimes
       artifactRef: scripts/check-di-lifetimes.sh
 
     - id: no-state-bleed
@@ -67,6 +68,7 @@ expectedOutcome:
     - id: no-test-modifications
       description: No test files were modified
       substantiation: static
+      evidenceGate: no-test-edits
       artifactRef: scripts/check-no-test-edits.sh
 
   niceToHave:

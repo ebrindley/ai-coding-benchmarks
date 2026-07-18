@@ -136,6 +136,17 @@ unattributable. Keep contrasts one-variable.
 - **Cost/tokens/latency are not yet aggregated into the report.** Two arms can
   reach the same score at very different cost; capture that out-of-band if it
   matters to your decision.
+- **Gate commands run confined and write only inside the workspace.** Every gate
+  executes under OS confinement (macOS `sandbox-exec`, Linux `bwrap`) that grants
+  writes only to the trial workspace and a private temp — `$HOME` is not
+  writable. Package managers that default to a `$HOME` cache (Maven `~/.m2`, NuGet
+  `~/.nuget`, npm `~/.npm`, Cargo `~/.cargo`, the Go module cache) will fail their
+  build/install gate on a machine that has not pre-populated or redirected those
+  caches into the workspace. Prime the toolchain caches (or point each tool's
+  cache dir inside the workspace) before a run, and treat a build/install
+  `INFRA_FAIL` as an environment problem, not a model capability failure. This
+  applies equally to every arm, so it does not bias a comparison — but it can
+  zero out a whole language (e.g. C# or Java) on an unprepared host.
 
 These are known gaps, not properties of a finished instrument. The suite today
 is strong for **profiling models** and **detecting large, consistent

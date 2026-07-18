@@ -55,6 +55,7 @@ expectedOutcome:
     - id: cache-coherent
       description: Behavioural coherence probe passes (no stale read after a mutation)
       substantiation: static
+      evidenceGate: cache-coherence
       artifactRef: scripts/check_cache_coherence.py
 
     - id: existing-tests-pass
@@ -65,6 +66,7 @@ expectedOutcome:
     - id: no-test-edits
       description: Fix is proven without modifying test files
       substantiation: static
+      evidenceGate: no-test-edits
       artifactRef: scripts/check_no_test_edits.py
 
   niceToHave:
