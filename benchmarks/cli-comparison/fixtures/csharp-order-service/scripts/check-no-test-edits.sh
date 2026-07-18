@@ -11,7 +11,8 @@ set -euo pipefail
 #
 # Grep-able error IDs: PASS_NO_TEST_EDITS, FAIL_TEST_FILES_MODIFIED
 
-changed="$( { git diff --name-only; git diff --cached --name-only; } | sort -u )"
+# Includes untracked files so a newly added test file cannot slip in undetected.
+changed="$( { git diff --name-only; git diff --cached --name-only; git ls-files --others --exclude-standard; } | sort -u )"
 
 test_edits="$(printf '%s\n' "$changed" | grep -E '(^|/)tests/|\.Tests\.csproj$|Tests?\.cs$' || true)"
 

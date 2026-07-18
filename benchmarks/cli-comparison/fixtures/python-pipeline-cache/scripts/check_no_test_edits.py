@@ -64,11 +64,24 @@ def get_modified_files() -> list[str]:
             check=True,
             cwd=fixture_dir,
         )
+        # Get untracked (but not gitignored) files so an agent cannot slip in a
+        # new test file undetected.
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "--", str(fixture_dir)],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=fixture_dir,
+        )
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         # Fail closed: an unverifiable state must not be reported as clean.
         raise GitUnavailableError(str(exc)) from exc
 
-    files = set(staged.stdout.strip().split("\n") + unstaged.stdout.strip().split("\n"))
+    files = set(
+        staged.stdout.strip().split("\n")
+        + unstaged.stdout.strip().split("\n")
+        + untracked.stdout.strip().split("\n")
+    )
     # Filter empty strings and .venv directory
     return [f for f in files if f and ".venv" not in f]
 
