@@ -9,8 +9,8 @@ Benchmark fixture for testing cross-module bug fixes.
 >
 > | State | Tests Run | Results | Fix Applied |
 > |-------|-----------|---------|-------------|
-> | Baseline (current) | 33 | 26 PASS, 7 FAIL | Flush invalidates by raw label |
-> | After fix | 33 | 33 PASS | Flush invalidates by canonical category |
+> | Baseline (current) | 34 | 26 PASS, 8 FAIL | Flush invalidates by raw label |
+> | After fix | 34 | 34 PASS | Flush invalidates by canonical category |
 >
 > Time is injected via a `FakeClock` (see `tests/conftest.py`) and the cache TTL is set far
 > larger than any test advances, so the staleness the failing tests observe is caused **only**
