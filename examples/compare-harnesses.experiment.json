@@ -1,0 +1,37 @@
+{
+  "id": "compare-harnesses-example",
+  "schemaVersion": 1,
+  "corpusRoot": "benchmarks",
+  "suiteId": "cli-comparison",
+  "repetitions": 3,
+  "seed": "compare-harnesses-2026",
+  "timeoutMs": 900000,
+  "metadata": {
+    "purpose": "Same model + backend, two different harnesses/scaffolds: attribute an effect to the harness rather than the model.",
+    "contrast": "harness-only (invocationPath varies)",
+    "hold-fixed": "provider + model identical; only `invocationPath` (and, for native-cli, the driving command) varies.",
+    "caveat": "A harness contrast measures an END-TO-END treatment: the delta bundles system prompt, agent loop, tool protocol, parsing, retries, and context management. It cannot establish a model-INDEPENDENT harness effect from one model alone; cross several models with several harnesses for that. Also: native-cli cannot prove resolved model, so confirm the same backend served both arms out-of-band.",
+    "replace-before-running": "Set the provider/model and the native-cli `command`/`args` to your real coding-agent CLI."
+  },
+  "arms": [
+    {
+      "name": "harness-poetic-adapter",
+      "provider": "REPLACE_WITH_PROVIDER",
+      "model": "REPLACE_WITH_MODEL",
+      "invocationPath": "poetic-adapter",
+      "envAllowlist": [],
+      "sandboxMode": "read-only"
+    },
+    {
+      "name": "harness-native-cli",
+      "provider": "REPLACE_WITH_PROVIDER",
+      "model": "REPLACE_WITH_MODEL",
+      "invocationPath": "native-cli",
+      "command": "REPLACE_WITH_AGENT_CLI",
+      "args": [],
+      "promptTransport": "stdin",
+      "envAllowlist": [],
+      "sandboxMode": "read-only"
+    }
+  ]
+}

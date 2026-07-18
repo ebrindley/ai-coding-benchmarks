@@ -27,6 +27,14 @@ Each task YAML defines:
 - `fixturePath`: starting codebase, when applicable.
 - `tags`: useful labels for filtering.
 
+## Running the whole suite as a comparison
+
+These tasks are **not** meant to be compared one by one — the suite is a single
+comprehensive assessment yielding a composite score and per-language /
+per-category sub-scores. To compare models, providers, or harnesses across the
+whole suite, see [`COMPARISON.md`](COMPARISON.md) and the example experiments in
+[`../../examples/`](../../examples/).
+
 ## Scoring Guidance
 
 Use pass/fail gate results first. A run should be considered passing only when
