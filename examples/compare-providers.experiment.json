@@ -11,7 +11,7 @@
     "contrast": "provider-only",
     "hold-fixed": "model + invocationPath + posture are identical across arms; only `provider` varies.",
     "note": "taskIds is intentionally omitted so the WHOLE suite runs. This is a comprehensive assessment, not a per-task test. Read the composite + per-language/per-category sub-scores and the per-task divergences, not any single task.",
-    "why-poetic-adapter": "poetic-adapter is the only invocation path that records verified resolved-model evidence, so a provider contrast can prove which backend actually served each request. native-cli / poetic-system cannot prove resolved model and are unsuitable for provider-equivalence claims.",
+    "why-poetic-adapter": "poetic-adapter is the only invocation path that records verified resolved-model evidence -- it binds the provider/model identifiers Poetic reports for each request, so you know which provider+model was REQUESTED and acknowledged. It does NOT independently attest weights, precision, or the physical backend, so it cannot by itself prove a provider is serving an unquantized variant; a quantized proxy returning the expected ids would still be accepted. Detect quantization behaviourally, via consistent per-task divergence across repetitions, and confirm backend identity out-of-band. native-cli / poetic-system record no resolved-model evidence at all and are unsuitable for provider-equivalence claims.",
     "replace-before-running": "Set `provider`/`model` to real ids registered in your Poetic install. The values below are placeholders."
   },
   "arms": [

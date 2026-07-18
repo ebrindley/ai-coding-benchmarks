@@ -75,11 +75,13 @@ expectedOutcome:
     - id: uses-synchronization
       description: Fix introduces a concurrency-control mechanism (lock/atomic/CAS)
       substantiation: static
+      evidenceGate: synchronization
       artifactRef: scripts/check-synchronization.sh
 
     - id: no-test-modifications
       description: No test files were modified
       substantiation: static
+      evidenceGate: no-test-edits
       artifactRef: scripts/check-no-test-edits.sh
 
   niceToHave:

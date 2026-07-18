@@ -15,6 +15,12 @@ set -euo pipefail
 # singleton constructor) is covered by the ValidateOnBuild test in the suite, and
 # the per-call scope behavior is pinned by ProcessOrder_DoesNotBleedTenantState.
 #
+# Registrations are evaluated on the source with BOTH // line comments and
+# /* ... */ block comments stripped (so a commented-out registration never
+# counts), and each service is matched in both the generic (`AddX<Service>`) and
+# the reflection (`AddX(typeof(Service))`) registration forms. For OrderProcessor
+# the LAST active registration wins (.NET resolves the last Add* registration).
+#
 # Exit codes:
 #   0  PASS  - ITenantContext Scoped and OrderProcessor Singleton
 #   40 FAIL  - ITenantContext still registered as Singleton
@@ -32,24 +38,52 @@ if [[ ! -f "$src" ]]; then
   exit 41
 fi
 
-if grep -E 'AddSingleton<\s*ITenantContext' "$src" >/dev/null 2>&1; then
+# Strip C# comments (// line and /* ... */ block, including multi-line) so that a
+# commented-out registration is never treated as active. String literals are not
+# a concern for a DI composition-root file.
+strip_comments() {
+  awk '
+    BEGIN { inblock = 0 }
+    {
+      line = $0; out = ""; n = length(line); i = 1
+      while (i <= n) {
+        if (inblock) {
+          rest = substr(line, i); p = index(rest, "*/")
+          if (p == 0) { i = n + 1 } else { inblock = 0; i = i + p + 1 }
+        } else {
+          two = substr(line, i, 2)
+          if (two == "/*") { inblock = 1; i = i + 2 }
+          else if (two == "//") { i = n + 1 }
+          else { out = out substr(line, i, 1); i = i + 1 }
+        }
+      }
+      print out
+    }
+  ' "$1"
+}
+
+active="$(strip_comments "$src")"
+
+# Match a service registration in both generic and typeof forms, e.g.
+#   AddSingleton<ITenantContext, TenantContext>()   AddScoped(typeof(ITenantContext), ...)
+tenant_singleton='AddSingleton\s*(<\s*ITenantContext\b|\(\s*typeof\s*\(\s*ITenantContext\b)'
+tenant_scoped='AddScoped\s*(<\s*ITenantContext\b|\(\s*typeof\s*\(\s*ITenantContext\b)'
+processor_any='Add(Singleton|Scoped|Transient)\s*(<\s*OrderProcessor\b|\(\s*typeof\s*\(\s*OrderProcessor\b)'
+
+if printf '%s\n' "$active" | grep -Eq "$tenant_singleton"; then
   echo "[FAIL_TENANT_CONTEXT_SINGLETON] ITenantContext must be Scoped, not Singleton" >&2
   exit 40
 fi
 
-if ! grep -E 'AddScoped<\s*ITenantContext' "$src" >/dev/null 2>&1; then
-  echo "[FAIL_TENANT_CONTEXT_REGISTRATION_MISSING] no AddScoped<ITenantContext...> registration found" >&2
+if ! printf '%s\n' "$active" | grep -Eq "$tenant_scoped"; then
+  echo "[FAIL_TENANT_CONTEXT_REGISTRATION_MISSING] no active AddScoped ITenantContext registration found" >&2
   exit 41
 fi
 
-# OrderProcessor must stay Singleton. Evaluate the EFFECTIVE registration, not
-# mere presence: strip // line comments first (a commented AddSingleton must not
-# count), then take the LAST OrderProcessor registration (.NET resolves the last
-# Add* wins) and require it to be AddSingleton. This rejects both a commented-out
-# singleton and a competing later AddScoped/AddTransient<OrderProcessor>.
+# Effective OrderProcessor lifetime = the last active registration's Add* verb.
 effective_processor_reg="$(
-  { sed 's://.*::' "$src" \
-      | grep -Eo 'Add(Singleton|Scoped|Transient)<\s*OrderProcessor' \
+  { printf '%s\n' "$active" | grep -Eo "$processor_any" \
+      | grep -Eo 'Add(Singleton|Scoped|Transient)' \
       || true; } \
     | tail -n 1
 )"
@@ -59,7 +93,7 @@ if [[ -z "$effective_processor_reg" ]]; then
   exit 42
 fi
 
-if [[ "$effective_processor_reg" != AddSingleton* ]]; then
+if [[ "$effective_processor_reg" != "AddSingleton" ]]; then
   echo "[FAIL_ORDER_PROCESSOR_NOT_SINGLETON] OrderProcessor must stay Singleton (fix opens a scope per order via IServiceScopeFactory, not by demoting the processor); effective registration was: ${effective_processor_reg}" >&2
   exit 42
 fi

@@ -55,6 +55,7 @@ expectedOutcome:
     - id: cache-coherent
       description: Behavioural coherence probe passes (no stale read after a mutation)
       substantiation: static
+      evidenceGate: cache-coherence
       artifactRef: scripts/check_cache_coherence.py
 
     - id: existing-tests-pass
@@ -65,6 +66,7 @@ expectedOutcome:
     - id: no-test-edits
       description: Fix is proven without modifying test files
       substantiation: static
+      evidenceGate: no-test-edits
       artifactRef: scripts/check_no_test_edits.py
 
   niceToHave:
@@ -162,7 +164,7 @@ fixture:
     - src/normalize.py
     - src/cache.py
   testFramework: pytest
-  testCount: 33 tests (22 unit, 11 integration; 7 fail on baseline)
+  testCount: 34 tests (22 unit, 12 integration; 8 fail on baseline)
   deterministicPattern: Injected FakeClock with long TTL so staleness is caused only by the bug
   checkScripts:
     cacheCoherence: scripts/check_cache_coherence.py

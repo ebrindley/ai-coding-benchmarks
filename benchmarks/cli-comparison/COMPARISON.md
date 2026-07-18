@@ -12,14 +12,25 @@ a harness). Each task executes in a throwaway, fixture-pinned worktree, so runs
 never contaminate each other. You compare the resulting **profiles**, not the
 raw repo.
 
-## Why this suite (and not a public one)
+## Why this suite (and contamination)
 
-Public benchmarks (HumanEval, SWE-bench, etc.) leak into training data, so a
-high score can reflect memorization as much as capability. **These tasks are
-private and seeded by us**, so they are far harder to "benchmax": a model cannot
-have memorized a fix it has never seen. That makes the **per-dimension profile**
-— how an arm does on Python vs TypeScript, on bug-fixes vs refactors —
-trustworthy signal about real capability rather than contamination.
+Saturated public benchmarks (HumanEval, SWE-bench, etc.) appear in training data,
+so a high score can reflect memorization as much as capability. This repository
+is **public** (MIT-licensed), so it is not immune to that over time — but it is a
+**new, purpose-built corpus that is not part of the standard public benchmark
+datasets** those models are tuned against, and its tasks were seeded by us rather
+than lifted from well-known sources. That makes contamination *less likely today*
+than for the saturated benchmarks, though not impossible, and it will erode as
+the repo circulates.
+
+Two practical implications:
+
+- Treat the **per-dimension profile** — how an arm does on Python vs TypeScript,
+  on bug-fixes vs refactors — as the useful signal, not a single headline number.
+- If contamination resistance matters for your comparison, pin to a commit,
+  record the date, and consider holding back or rotating a private variant of the
+  tasks. Contamination resistance is a property you maintain, not a guarantee the
+  public repo provides.
 
 ## The composite score and sub-scores
 
@@ -107,11 +118,14 @@ unattributable. Keep contrasts one-variable.
   prove which model/backend actually served the request, so use `poetic-adapter`
   for any **provider** or **quantization** claim, and confirm backend identity
   out-of-band otherwise.
-- **Nondeterministic tasks.** `brownfield-003-python-async-race` and
-  `brownfield-011-go-worker-pool-race` exercise real concurrency and can flip
-  run-to-run on their own. Treat a divergence there as signal only if it
-  reproduces across repetitions. (`brownfield-013-java-order-concurrency-bug`
-  is made deterministic by a barrier, but is still concurrency-heavy.)
+- **Concurrency tasks.** `brownfield-011-go-worker-pool-race` relies on the Go
+  scheduler and can flip run-to-run on its own; treat a divergence there as
+  signal only if it reproduces across repetitions. The other concurrency tasks
+  force the race deterministically —
+  `brownfield-003-python-async-race` monkey-patches `asyncio.sleep` to guarantee
+  the interleaving, and `brownfield-013-java-order-concurrency-bug` uses a
+  `CyclicBarrier` — so they are reproducible, not flaky, though still
+  concurrency-heavy.
 - **Fairness controls are not yet first-class.** The experiment schema does not
   pin sampling (temperature/top-p/seed), retries, or budgets. If your provider
   path exposes these, hold them equal across arms out-of-band, or a divergence
@@ -122,6 +136,17 @@ unattributable. Keep contrasts one-variable.
 - **Cost/tokens/latency are not yet aggregated into the report.** Two arms can
   reach the same score at very different cost; capture that out-of-band if it
   matters to your decision.
+- **Gate commands run confined and write only inside the workspace.** Every gate
+  executes under OS confinement (macOS `sandbox-exec`, Linux `bwrap`) that grants
+  writes only to the trial workspace and a private temp — `$HOME` is not
+  writable. Package managers that default to a `$HOME` cache (Maven `~/.m2`, NuGet
+  `~/.nuget`, npm `~/.npm`, Cargo `~/.cargo`, the Go module cache) will fail their
+  build/install gate on a machine that has not pre-populated or redirected those
+  caches into the workspace. Prime the toolchain caches (or point each tool's
+  cache dir inside the workspace) before a run, and treat a build/install
+  `INFRA_FAIL` as an environment problem, not a model capability failure. This
+  applies equally to every arm, so it does not bias a comparison — but it can
+  zero out a whole language (e.g. C# or Java) on an unprepared host.
 
 These are known gaps, not properties of a finished instrument. The suite today
 is strong for **profiling models** and **detecting large, consistent

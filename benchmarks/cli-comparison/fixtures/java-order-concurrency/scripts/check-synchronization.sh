@@ -10,6 +10,7 @@ set -euo pipefail
 #   - a synchronized block/method or an explicit Lock
 #   - an atomic compute on the repository map (compute/computeIfPresent/merge)
 #   - a compare-and-set / optimistic retry loop
+#   - a lock-free atomic update (updateAndGet/getAndUpdate/accumulateAndGet)
 mainSrc="src/main/java/com/example"
 
 if [[ ! -d "$mainSrc" ]]; then
@@ -18,7 +19,7 @@ if [[ ! -d "$mainSrc" ]]; then
 fi
 
 if grep -rEq \
-  '\bsynchronized\b|ReentrantLock|\bLock\b|computeIfPresent|\bcompute\b|\bmerge\b|\breplace\b|compareAndSet|StampedLock|ReadWriteLock' \
+  '\bsynchronized\b|ReentrantLock|\bLock\b|computeIfPresent|\bcompute\b|\bmerge\b|\breplace\b|compareAndSet|updateAndGet|getAndUpdate|accumulateAndGet|StampedLock|ReadWriteLock' \
   "$mainSrc"; then
   echo "[OK] concurrency-control mechanism present"
   exit 0
