@@ -1,0 +1,172 @@
+# Brownfield Task: Fix DI Lifetime Bug in Multi-Tenant Order Service
+#
+# Category: Bug Fix (existing-codebase)
+# Language: C# (.NET 8, Microsoft.Extensions.DependencyInjection)
+# Complexity: High
+# Estimated Time: 45 minutes
+#
+# Bug: A singleton OrderProcessor captures scoped services (captive dependency)
+# and ITenantContext is registered as a singleton, so per-request tenant state
+# bleeds across calls and per-tenant pricing is wrong.
+# Root cause spans two files: OrderProcessor.cs and ServiceCollectionExtensions.cs
+
+taskId: brownfield-012-csharp-di-lifetime-bug
+type: brownfield
+codeType: existing-codebase
+category: bugfix
+language: csharp
+description: |
+  Fix a dependency-injection lifetime bug in a multi-tenant order-pricing
+  service built on Microsoft.Extensions.DependencyInjection (.NET 8).
+
+  Bug symptoms:
+  - Pricing a second tenant on the same OrderProcessor throws
+    "tenant already assigned" (state from the first call never resets).
+  - Per-tenant discounts are wrong once more than one tenant is served.
+  - Under concurrent tenants the results are unreliable.
+
+  Root cause (spans two files):
+  - src/OrderService/OrderProcessor.cs: OrderProcessor is a singleton but injects
+    the scoped PricingService and ITenantContext directly, capturing one scoped
+    instance for the whole process lifetime (a "captive dependency").
+  - src/OrderService/ServiceCollectionExtensions.cs: ITenantContext holds
+    per-request state but is registered as AddSingleton; it must be AddScoped.
+
+  Constraints:
+  - Keep OrderProcessor registered as a singleton and keep its public
+    ProcessOrder(string, int) signature unchanged.
+  - Preserve the parallel-safe, per-request scoping model; do not make the
+    services process-global mutable state.
+  - Resolve scoped services through a fresh scope per order
+    (IServiceScopeFactory), not by capturing them in the singleton constructor.
+  - Do not edit anything under tests/. Use only the pinned packages.
+complexity: high
+
+expectedOutcome:
+  mustHave:
+    - id: no-captive-dependency
+      description: The container validates on build with scope validation enabled (no singleton captures a scoped service)
+      substantiation: test
+      artifactRef: tests/OrderService.Tests/OrderProcessorTests.cs::Container_HasNoCaptiveDependencies
+
+    - id: tenant-context-scoped
+      description: ITenantContext is registered with a Scoped lifetime, not Singleton
+      substantiation: static
+      artifactRef: scripts/check-di-lifetimes.sh
+
+    - id: no-state-bleed
+      description: Tenant state does not bleed across sequential ProcessOrder calls
+      substantiation: test
+      artifactRef: tests/OrderService.Tests/OrderProcessorTests.cs::ProcessOrder_DoesNotBleedTenantStateAcrossCalls
+
+    - id: correct-under-concurrency
+      description: Concurrent tenants get correct, isolated pricing
+      substantiation: test
+      artifactRef: tests/OrderService.Tests/OrderProcessorTests.cs::ProcessOrder_IsCorrectUnderConcurrentTenants
+
+    - id: no-test-modifications
+      description: No test files were modified
+      substantiation: static
+      artifactRef: scripts/check-no-test-edits.sh
+
+  niceToHave:
+    - id: scope-per-order
+      description: OrderProcessor opens a fresh DI scope per order via IServiceScopeFactory
+      substantiation: test
+      artifactRef: tests/OrderService.Tests/OrderProcessorTests.cs::TenantContext_IsScoped_NotShared
+
+    - id: api-unchanged
+      description: OrderProcessor remains a singleton with an unchanged ProcessOrder signature
+      substantiation: static
+      artifactRef: OrderProcessor stays singleton; ProcessOrder(string, int) unchanged
+
+  successCriteria:
+    - All tests pass under dotnet test
+    - ITenantContext is Scoped and no singleton captures a scoped service
+    - Per-tenant pricing is correct sequentially and under concurrency
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: no-test-edits
+    check: No test files modified
+    command: bash scripts/check-no-test-edits.sh
+    expectedExitCode: 0
+    order: 2
+
+  - gate: di-lifetimes
+    check: ITenantContext registered as Scoped, not Singleton
+    command: bash scripts/check-di-lifetimes.sh
+    expectedExitCode: 0
+    order: 3
+
+  - gate: build
+    check: .NET build succeeds
+    command: dotnet build -c Release
+    expectedExitCode: 0
+    order: 4
+
+  - gate: tests
+    check: All tests pass
+    command: dotnet test
+    expectedExitCode: 0
+    order: 5
+
+  - gate: requirements
+    check: All must_have items substantiated
+    order: 6
+
+scoring:
+  delivery:
+    weight: 0.4
+    evidence:
+      - diff
+      - file_changes
+  correctness:
+    weight: 0.4
+    evidence:
+      - test_results
+  quality:
+    weight: 0.2
+    evidence:
+      - complexity_delta
+
+toolEvidencePolicy:
+  requiredWhen: tests are part of success_criteria
+  neutralWhen: never
+
+networkPolicy:
+  allowed: true
+  provenanceRequired: true
+  record:
+    - urls
+    - timestamps
+    - content_hash
+
+fixturePath: csharp-order-service
+
+# Fixture details
+fixture:
+  description: .NET 8 multi-tenant order-pricing service with a DI lifetime bug
+  bugLocation:
+    - src/OrderService/OrderProcessor.cs (captive dependency in singleton)
+    - src/OrderService/ServiceCollectionExtensions.cs (ITenantContext registered as Singleton)
+  testFramework: xUnit
+  testCount: 5 tests in 1 test file
+  deterministicPattern: TenantContext enforces single-assignment per scope, so the bug throws deterministically
+  checkScripts:
+    noTestEdits: scripts/check-no-test-edits.sh
+    diLifetimes: scripts/check-di-lifetimes.sh
+
+tags:
+  - csharp
+  - dotnet
+  - dependency-injection
+  - service-lifetime
+  - captive-dependency
+  - bug-fix
+  - existing-codebase
+
+estimatedMinutes: 45
