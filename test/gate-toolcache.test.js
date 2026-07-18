@@ -252,11 +252,45 @@ describe('gate tool-cache dir', () => {
             workspaceDir: path.join(os.tmpdir(), 'aicb-elsewhere-ws'),
             executionRoot: root,
           }),
-        /execution root/i,
+        /execution root|strict descendant/i,
       );
+
+      // Reject a cache dir OUTSIDE the execution root (not a strict descendant).
+      // Equality-only rejection would let this through and become a writable
+      // bind outside the root that cleanup later refuses to remove.
+      const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'aicb-outside-root-'));
+      try {
+        await assert.rejects(
+          () =>
+            assertHarnessCacheDir({
+              cacheDir: outsideRoot,
+              workspaceDir: workspace,
+              executionRoot: root,
+            }),
+          /strict descendant|execution root/i,
+        );
+      } finally {
+        await rm(outsideRoot, { recursive: true, force: true });
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it('assertSafeCacheDirShape rejects relative paths before resolving', async () => {
+    const { assertSafeCacheDirShape } = await import('../harness/gates.js');
+    // path.resolve() would turn these absolute; the check must run on the input.
+    assert.throws(
+      () => assertSafeCacheDirShape('.', 'test'),
+      /absolute/i,
+    );
+    assert.throws(
+      () => assertSafeCacheDirShape('relative-cache', 'test'),
+      /absolute/i,
+    );
+    // An absolute path still resolves fine.
+    const abs = assertSafeCacheDirShape(path.join(os.tmpdir(), 'aicb-abs-cache'), 'test');
+    assert.ok(path.isAbsolute(abs));
   });
 
   it('confined: TMPDIR overlay + warm cache reuse across gates; cleaned on failure path', async (t) => {
@@ -303,16 +337,19 @@ describe('gate tool-cache dir', () => {
     try {
       const results = await runGates({
         gates: [
-          // Gate 1: prove TMPDIR points at a writable private tmp (aicb-gate-tmp-*),
-          // and HOME points at the cache dir; write a sentinel into the cache.
+          // Gate 1: prove TMPDIR points at a directory that is writable *inside*
+          // the sandbox (seatbelt: the private host tmp; bwrap: the in-sandbox
+          // /tmp tmpfs — the host private tmp is shadowed there), and HOME points
+          // at the cache dir; write a sentinel into the cache.
           {
             gate: 'warm',
             order: 1,
             required: true,
             expectedExitCode: 0,
             command:
-              'case "$TMPDIR" in *aicb-gate-tmp-*) : ;; *) echo "bad TMPDIR=$TMPDIR" >&2; exit 3;; esac; ' +
-              'test -w "$TMPDIR" || { echo "TMPDIR not writable" >&2; exit 4; }; ' +
+              'test -n "$TMPDIR" || { echo "TMPDIR unset" >&2; exit 3; }; ' +
+              'test -w "$TMPDIR" || { echo "TMPDIR not writable=$TMPDIR" >&2; exit 4; }; ' +
+              'touch "$TMPDIR/probe.$$" || { echo "cannot write TMPDIR=$TMPDIR" >&2; exit 5; }; ' +
               'echo warmed > "$HOME/sentinel.txt"',
           },
           // Gate 2 (same trial): read the sentinel written by gate 1 → warm-cache reuse.

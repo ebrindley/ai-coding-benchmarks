@@ -558,10 +558,13 @@ export function assertSafeCacheDirShape(cacheDir, context = 'cacheDir') {
   if (cacheDir == null || String(cacheDir).trim() === '') {
     throw new Error(`${context}: cacheDir is required`);
   }
-  const abs = path.resolve(String(cacheDir));
-  if (!path.isAbsolute(abs)) {
+  // Validate the ORIGINAL input: path.resolve() always returns an absolute
+  // path, so checking the resolved value would make this unreachable and let a
+  // relative cacheDir (e.g. "." or "relative-cache") bind CWD writable.
+  if (!path.isAbsolute(String(cacheDir))) {
     throw new Error(`${context}: cacheDir must be an absolute path`);
   }
+  const abs = path.resolve(String(cacheDir));
   if (abs === '/' || abs === '') {
     throw new Error(`${context}: refusing filesystem root as cacheDir`);
   }
@@ -679,9 +682,14 @@ export async function assertHarnessCacheDir({
     } catch {
       /* lexical compare */
     }
-    if (real === realRoot) {
+    // Require a STRICT descendant of the execution root. Equality-only rejection
+    // would let an outside dir pass here and become a writable bind outside the
+    // root, which cleanupExecutionWorkspace then refuses to remove (leaking a
+    // populated cache). isPathInside(root, real) is true when real === root, so
+    // exclude equality explicitly.
+    if (!isPathInside(realRoot, real) || real === realRoot) {
       throw new Error(
-        `assertHarnessCacheDir: cacheDir must not be the execution root itself: ${real}`,
+        `assertHarnessCacheDir: cacheDir must be a strict descendant of the execution root (cache="${real}" executionRoot="${realRoot}")`,
       );
     }
   }
@@ -1908,11 +1916,17 @@ async function runConfinedCommand({
 
   try {
     privateTmp = await mkdtemp(path.join(os.tmpdir(), 'aicb-gate-tmp-'));
-    // Overlay TMPDIR/TMP/TEMP onto the per-command private tmp. Inside
-    // confinement the host TMPDIR is absent/denied; package managers stage
-    // downloads under $TMPDIR, so this must point at the writable private tmp.
+    // Overlay TMPDIR/TMP/TEMP so package managers (which stage downloads under
+    // $TMPDIR) point at a directory that is writable *inside* the sandbox. The
+    // accessible target differs by confinement kind:
+    //  - bwrap: `--tmpfs /tmp` mounts a fresh in-sandbox tmpfs that SHADOWS the
+    //    host `privateTmp` (created under the host /tmp), so the host path is
+    //    invisible in the sandbox; use the in-sandbox `/tmp` tmpfs instead.
+    //  - sandbox-exec: `privateTmp` is a real host path explicitly granted
+    //    read+write in the seatbelt profile, so use it directly.
     // Harness overlay only — never merges parent env (mirrors provider-confine).
-    const runEnv = applyProviderTempEnv(env, privateTmp);
+    const tmpTarget = confinement.kind === 'bwrap' ? '/tmp' : privateTmp;
+    const runEnv = applyProviderTempEnv(env, tmpTarget);
     let profilePath;
 
     const toolchainRoots = await resolveExistingToolchainRoots();

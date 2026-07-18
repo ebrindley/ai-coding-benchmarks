@@ -152,9 +152,12 @@ unattributable. Keep contrasts one-variable.
   success/failure/timeout, so caches warm within a trial (across its ordered
   gates) but never leak across trials. A genuine dependency-resolution or build
   error surfaces as a normal build/install **FAIL** (nonzero exit), not an
-  `INFRA_FAIL` — treat those as capability signal. `INFRA_FAIL` is reserved for
-  confinement/spawn problems (e.g. no `sandbox-exec`/`bwrap`, no network when the
-  toolchain needs it to fetch dependencies).
+  `INFRA_FAIL` — treat those as capability signal. A network-denied dependency
+  fetch also exits nonzero, so it too is a **FAIL**, not `INFRA_FAIL`: if the
+  task needs network, allow it via `networkPolicy` rather than reading the
+  failure as capability. `INFRA_FAIL` is reserved for confinement/spawn problems
+  (e.g. no `sandbox-exec`/`bwrap` available, or the confinement wrapper cannot
+  execute the gate at all).
 
 These are known gaps, not properties of a finished instrument. The suite today
 is strong for **profiling models** and **detecting large, consistent
