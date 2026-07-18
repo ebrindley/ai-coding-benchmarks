@@ -1,0 +1,34 @@
+{
+  "id": "compare-models-example",
+  "schemaVersion": 1,
+  "corpusRoot": "benchmarks",
+  "suiteId": "cli-comparison",
+  "repetitions": 3,
+  "seed": "compare-models-2026",
+  "timeoutMs": 900000,
+  "metadata": {
+    "purpose": "Two different models on the same provider + harness: capability profile and ranking.",
+    "contrast": "model-only",
+    "hold-fixed": "provider + invocationPath + posture identical; only `model` varies.",
+    "note": "Whole suite runs (taskIds omitted). The interesting output is the per-language and per-category sub-score PROFILE, not the single composite: one model may lead on Python and trail on TypeScript. Report the profile, not just the winner.",
+    "replace-before-running": "Set `provider`/`model` to real ids registered in your Poetic install."
+  },
+  "arms": [
+    {
+      "name": "model-A",
+      "provider": "REPLACE_WITH_PROVIDER",
+      "model": "REPLACE_WITH_MODEL_A",
+      "invocationPath": "poetic-adapter",
+      "envAllowlist": [],
+      "sandboxMode": "read-only"
+    },
+    {
+      "name": "model-B",
+      "provider": "REPLACE_WITH_PROVIDER",
+      "model": "REPLACE_WITH_MODEL_B",
+      "invocationPath": "poetic-adapter",
+      "envAllowlist": [],
+      "sandboxMode": "read-only"
+    }
+  ]
+}

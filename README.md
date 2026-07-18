@@ -53,6 +53,17 @@ treated as secret-bearing, quarantined under the campaign directory, excluded
 from default sanitized export, and should not be committed. Upload/publish of
 results remains external to this repository.
 
+### Running the suite as a comparison (composite + sub-scores)
+
+The suite is meant to be run **as a whole**, not task by task: clone/pin the
+repo, run the entire suite against each model, provider, or harness you are
+comparing, and read the **composite score and per-language/per-category
+sub-scores** — the profile, not any single task. See
+[`benchmarks/cli-comparison/COMPARISON.md`](benchmarks/cli-comparison/COMPARISON.md)
+for the methodology, and the ready-to-edit multi-arm experiments in
+[`examples/`](examples/) (`compare-providers`, `compare-models`,
+`compare-harnesses`).
+
 ### Neutral protocol evidence (poetic-adapter)
 
 For `poetic-adapter` trials the harness persists versioned, neutral invocation

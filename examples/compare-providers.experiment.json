@@ -1,0 +1,35 @@
+{
+  "id": "compare-providers-example",
+  "schemaVersion": 1,
+  "corpusRoot": "benchmarks",
+  "suiteId": "cli-comparison",
+  "repetitions": 3,
+  "seed": "compare-providers-2026",
+  "timeoutMs": 900000,
+  "metadata": {
+    "purpose": "Same model, two providers: detect backend divergence (quantization, precision, silent degradation).",
+    "contrast": "provider-only",
+    "hold-fixed": "model + invocationPath + posture are identical across arms; only `provider` varies.",
+    "note": "taskIds is intentionally omitted so the WHOLE suite runs. This is a comprehensive assessment, not a per-task test. Read the composite + per-language/per-category sub-scores and the per-task divergences, not any single task.",
+    "why-poetic-adapter": "poetic-adapter is the only invocation path that records verified resolved-model evidence, so a provider contrast can prove which backend actually served each request. native-cli / poetic-system cannot prove resolved model and are unsuitable for provider-equivalence claims.",
+    "replace-before-running": "Set `provider`/`model` to real ids registered in your Poetic install. The values below are placeholders."
+  },
+  "arms": [
+    {
+      "name": "providerA-same-model",
+      "provider": "REPLACE_WITH_PROVIDER_A",
+      "model": "REPLACE_WITH_SHARED_MODEL_ID",
+      "invocationPath": "poetic-adapter",
+      "envAllowlist": [],
+      "sandboxMode": "read-only"
+    },
+    {
+      "name": "providerB-same-model",
+      "provider": "REPLACE_WITH_PROVIDER_B",
+      "model": "REPLACE_WITH_SHARED_MODEL_ID",
+      "invocationPath": "poetic-adapter",
+      "envAllowlist": [],
+      "sandboxMode": "read-only"
+    }
+  ]
+}
