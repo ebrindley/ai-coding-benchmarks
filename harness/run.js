@@ -4,7 +4,7 @@
  * Resumable and deterministic.
  */
 
-import { mkdir, access, lstat, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, access, lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -209,7 +209,12 @@ async function loadPeers() {
       assertWorkspaceOutsideCampaign,
     },
     { getInvoker, buildInvocationRequest },
-    { runGates, detectConfinement, sanitizeGateResultsForStorage },
+    {
+      runGates,
+      detectConfinement,
+      sanitizeGateResultsForStorage,
+      assertHarnessCacheDir,
+    },
     { classifyTrial },
     {
       writeTrialResult,
@@ -267,6 +272,7 @@ async function loadPeers() {
     runGates,
     detectConfinement,
     sanitizeGateResultsForStorage,
+    assertHarnessCacheDir,
     classifyTrial,
     writeTrialResult,
     quarantineRawOutput,
@@ -933,6 +939,8 @@ export async function runCampaign(opts) {
       let trialUpdate = {};
       /** @type {string | null} */
       let trialWorkspaceDir = null;
+      /** @type {string | null} */
+      let trialCacheDir = null;
       try {
         // Prefer already-validated/canonical fixture dir from corpus loading.
         // Fall back only when absent, still contained under suite fixtures/.
@@ -976,6 +984,23 @@ export async function runCampaign(opts) {
         }
 
         trialWorkspaceDir = workspace.workspaceDir;
+
+        // Per-trial harness-owned tool-cache dir: a SIBLING under the execution
+        // root (option b), not nested in the workspace. Kept out of the
+        // workspace so baseline-diff never sees cache artifacts as changed
+        // files and assertHarnessCacheDir's disjoint-from-workspace guard holds.
+        // Cleaned in the same finally as the workspace via the existing
+        // validated cleanupExecutionWorkspace remove — no new lifecycle code and
+        // no caches accumulating across trials.
+        trialCacheDir = await mkdtemp(
+          path.join(executionRoot, `${peers.assertSafeTrialId(trial.id)}-toolcache-`),
+        );
+        // Validate as a security boundary before it becomes a writable bind.
+        await peers.assertHarnessCacheDir({
+          cacheDir: trialCacheDir,
+          workspaceDir: workspace.workspaceDir,
+          executionRoot,
+        });
 
         const invoker = peers.getInvoker(arm.invocationPath);
         const timeoutMs = experiment.timeoutMs;
@@ -1110,6 +1135,9 @@ export async function runCampaign(opts) {
           task,
           envAllowlist: arm.envAllowlist,
           sandboxMode: arm.sandboxMode,
+          // Per-trial writable tool-cache dir: HOME + NuGet/npm/pip/Cargo/Go/Maven
+          // caches redirect here inside confinement (host $HOME is invisible).
+          cacheDir: trialCacheDir,
         });
         const safeGateResults =
           typeof peers.sanitizeGateResultsForStorage === 'function'
@@ -1314,6 +1342,17 @@ export async function runCampaign(opts) {
         if (trialWorkspaceDir) {
           await peers
             .cleanupExecutionWorkspace(trialWorkspaceDir, {
+              executionRoot,
+            })
+            .catch(() => {});
+        }
+        // Remove the per-trial tool-cache dir on success/failure/timeout so
+        // downloaded artifacts + candidate code never accumulate across trials.
+        // Same validated remove as the workspace (both are siblings under the
+        // execution root); refuses anything outside it.
+        if (trialCacheDir) {
+          await peers
+            .cleanupExecutionWorkspace(trialCacheDir, {
               executionRoot,
             })
             .catch(() => {});
