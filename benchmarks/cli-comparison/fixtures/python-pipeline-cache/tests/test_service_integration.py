@@ -1,4 +1,4 @@
-"""End-to-end tests for InventoryService cache coherence - 11 tests.
+"""End-to-end tests for InventoryService cache coherence - 12 tests.
 
 Two groups:
 

@@ -82,7 +82,7 @@ weakening the cache's exact-match invalidation.
 # Install dependencies
 bash scripts/setup-venv.sh
 
-# Run tests (7 fail on the baseline, all pass after the fix)
+# Run tests (8 fail on the baseline, all pass after the fix)
 .venv/bin/python -m pytest tests/ -v
 
 # Behavioural coherence check (fails on baseline, passes after fix)
@@ -105,7 +105,7 @@ python-pipeline-cache/
 │   ├── test_normalize.py         # 8 tests (pass on baseline)
 │   ├── test_cache.py             # 8 tests (pass on baseline)
 │   ├── test_store.py             # 6 tests (pass on baseline)
-│   └── test_service_integration.py  # 11 tests (4 pass, 7 fail on baseline)
+│   └── test_service_integration.py  # 12 tests (4 pass, 8 fail on baseline)
 ├── scripts/
 │   ├── setup-venv.sh
 │   ├── check_no_test_edits.py    # Gate: no test files modified
@@ -120,9 +120,9 @@ python-pipeline-cache/
 - `test_cache.py` - TTL, exact-match tag invalidation
 - `test_store.py` - verbatim labels, raw dirty log
 
-### Integration (11 tests)
+### Integration (12 tests)
 - `TestReadCorrectness` (4) - cold reads, canonical aggregation (pass on baseline)
-- `TestFreshAfterMutation` (7) - warm cache, mutate, re-read (**fail on baseline**)
+- `TestFreshAfterMutation` (8) - warm cache, mutate, re-read (**fail on baseline**)
 
 ## Exit Codes & Error IDs
 

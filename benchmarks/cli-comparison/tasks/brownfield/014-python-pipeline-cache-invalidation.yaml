@@ -162,7 +162,7 @@ fixture:
     - src/normalize.py
     - src/cache.py
   testFramework: pytest
-  testCount: 33 tests (22 unit, 11 integration; 7 fail on baseline)
+  testCount: 34 tests (22 unit, 12 integration; 8 fail on baseline)
   deterministicPattern: Injected FakeClock with long TTL so staleness is caused only by the bug
   checkScripts:
     cacheCoherence: scripts/check_cache_coherence.py
