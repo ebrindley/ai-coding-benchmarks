@@ -108,3 +108,30 @@ class TestFreshAfterMutation:
                 seeded_service.sell("SKU-3", -delta)
             fresh = seeded_service.category_summary("electronics")
             assert fresh["total_quantity"] == float(expected_after)
+
+    def test_mutation_only_invalidates_touched_category(
+        self, seeded_service: InventoryService
+    ):
+        # The fix must invalidate by the *canonical category* touched, not clear
+        # the whole cache. Warm two unrelated categories, mutate only one, and
+        # confirm the untouched category's entry survives as a cache hit while the
+        # mutated category is refreshed. A blunt cache.clear() in _flush() would
+        # evict the untouched entry too and fail this test.
+        seeded_service.category_summary("home & kitchen")
+        seeded_service.category_summary("electronics")
+
+        hits_before = seeded_service.cache.hits
+        # Mutate only the home & kitchen category (SKU-2, raw label "Home & Kitchen").
+        seeded_service.sell("SKU-2", 1)
+
+        # The untouched electronics summary must still be a warm cache hit.
+        seeded_service.category_summary("electronics")
+        assert seeded_service.cache.hits == hits_before + 1, (
+            "unrelated category was evicted -- _flush must invalidate only the "
+            "touched category's tag, not clear the whole cache"
+        )
+
+        # The mutated category must be refreshed (not stale).
+        assert (
+            seeded_service.category_summary("home & kitchen")["total_quantity"] == 14.0
+        )
