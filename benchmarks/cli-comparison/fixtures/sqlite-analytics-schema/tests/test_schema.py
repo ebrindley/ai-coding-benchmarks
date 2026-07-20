@@ -154,15 +154,29 @@ class TestSchema(unittest.TestCase):
             conn.close()
 
     def test_schema_idempotent(self):
-        """schema.sql must be safe to apply repeatedly without DROP of existing objects."""
+        """Reapplying schema.sql must preserve existing data."""
         sql = SCHEMA_PATH.read_text(encoding="utf-8")
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON;")
         try:
             conn.executescript(sql)
-            # Second apply must not error (IF NOT EXISTS / CREATE OR REPLACE style).
+            conn.execute("INSERT INTO customers VALUES (9001, 'Sentinel Customer')")
+            conn.execute("INSERT INTO products VALUES (9001, 'Sentinel Product', 1234)")
+            conn.execute(
+                "INSERT INTO orders VALUES (9001, 9001, '2030-01-01T00:00:00Z')"
+            )
+            conn.execute("INSERT INTO order_items VALUES (9001, 9001, 9001, 2)")
+            conn.commit()
+
             conn.executescript(sql)
+            for table in REQUIRED_COLUMNS:
+                row = conn.execute(
+                    f"SELECT id FROM {table} WHERE id = 9001"
+                ).fetchone()
+                self.assertIsNotNone(
+                    row, f"reapplying schema.sql destroyed existing {table} data"
+                )
             tables = {
                 r["name"]
                 for r in conn.execute(

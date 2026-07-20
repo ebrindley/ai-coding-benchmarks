@@ -121,6 +121,14 @@ const PROTECTED_MANIFEST_BASENAMES = Object.freeze(
   ]),
 );
 
+/** Build-selection manifests whose names are project-specific. */
+const PROTECTED_MANIFEST_SUFFIXES = Object.freeze([
+  '.sln',
+  '.csproj',
+  '.fsproj',
+  '.vbproj',
+]);
+
 /**
  * Root / co-located test filename patterns (basename).
  * Covers Go `*_test.go`, Node/TS `*.test.*` / `*.spec.*`, Python `test_*.py` / `*_test.py`.
@@ -1083,6 +1091,9 @@ export function isProtectedPath(relPath) {
   if (PROTECTED_MANIFEST_BASENAMES.has(baseLower)) {
     return true;
   }
+  if (PROTECTED_MANIFEST_SUFFIXES.some((suffix) => baseLower.endsWith(suffix))) {
+    return true;
+  }
   for (const re of PROTECTED_TEST_BASENAME_RES) {
     if (re.test(base)) return true;
   }
@@ -1097,15 +1108,32 @@ export function isProtectedPath(relPath) {
 export function resolveBaselineDiffAllow(gate) {
   if (!gate || typeof gate !== 'object') return null;
   const policy = /** @type {Record<string, unknown>} */ (gate).baselineDiffPolicy;
-  if (!policy || typeof policy !== 'object') return null;
+  if (policy === undefined) return null;
+  if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
+    throw new TypeError('baselineDiffPolicy must be an object');
+  }
   const allow = /** @type {Record<string, unknown>} */ (policy).allow;
-  if (!Array.isArray(allow)) return null;
+  if (!Array.isArray(allow) || allow.length < 1) {
+    throw new TypeError('baselineDiffPolicy.allow must be a non-empty array');
+  }
   /** @type {string[]} */
   const out = [];
   for (const entry of allow) {
-    if (typeof entry !== 'string') continue;
+    if (typeof entry !== 'string') {
+      throw new TypeError('baselineDiffPolicy.allow entries must be strings');
+    }
+    const raw = entry.trim().replace(/\\/g, '/');
     const n = normalizeRelPath(entry);
-    if (n) out.push(n);
+    if (
+      !n ||
+      path.posix.isAbsolute(raw) ||
+      raw.split('/').includes('..')
+    ) {
+      throw new TypeError(
+        'baselineDiffPolicy.allow entries must be safe workspace-relative paths',
+      );
+    }
+    out.push(n);
   }
   return out;
 }
@@ -1305,8 +1333,74 @@ export async function collectBaselineChangedPaths(workspaceDir, opts = {}) {
   }
   const gitOpts = opts.gitSpawn ? { gitSpawn: opts.gitSpawn } : {};
 
+  // Refuse repository-local config that can re-enable arbitrary clean filters
+  // or import additional provider-controlled config during harness Git calls.
+  const localConfig = await runHarnessGit(
+    cwd,
+    ['config', '--local', '--no-includes', '--name-only', '--get-regexp', '.*'],
+    gitOpts,
+  );
+  if (localConfig.exitCode !== 0 && localConfig.exitCode !== 1) {
+    return {
+      ok: false,
+      error:
+        localConfig.stderr ||
+        localConfig.stdout ||
+        'failed to inspect repository-local git config',
+    };
+  }
+  const unsafeConfigKeys = String(localConfig.stdout || '')
+    .split(/\r?\n/)
+    .map((key) => key.trim().toLowerCase())
+    .filter(
+      (key) =>
+        key.startsWith('filter.') ||
+        key === 'include.path' ||
+        (key.startsWith('includeif.') && key.endsWith('.path')) ||
+        key === 'extensions.worktreeconfig',
+    );
+  if (unsafeConfigKeys.length > 0) {
+    return {
+      ok: false,
+      error: `unsafe repository-local git config: ${unsafeConfigKeys.join(', ')}`,
+    };
+  }
+
+  // assume-unchanged and skip-worktree can hide modified protected files from
+  // a normal tree-to-worktree diff. Reject either flag before comparison.
+  const indexFlags = await runHarnessGit(
+    cwd,
+    ['ls-files', '-v', '-z'],
+    gitOpts,
+  );
+  if (indexFlags.exitCode !== 0) {
+    return {
+      ok: false,
+      error:
+        indexFlags.stderr ||
+        indexFlags.stdout ||
+        'failed to inspect git index flags',
+    };
+  }
+  const concealedPaths = String(indexFlags.stdout || '')
+    .split('\0')
+    .filter(Boolean)
+    .filter((record) => {
+      const tag = record[0] || '';
+      return tag === 'S' || (/[a-z]/.test(tag) && tag === tag.toLowerCase());
+    })
+    .map((record) => normalizeRelPath(record.slice(2)));
+  if (concealedPaths.length > 0) {
+    return {
+      ok: false,
+      error: `git index concealment flags present: ${concealedPaths.join(', ')}`,
+      paths: concealedPaths,
+    };
+  }
+
   // Confirm the harness-sealed object id still resolves. The provider may
-  // rewrite refs in workspace .git, but cannot redirect this object id.
+  // rewrite refs in workspace .git, but GIT_NO_REPLACE_OBJECTS keeps this
+  // object id from being redirected through refs/replace.
   const rev = await runHarnessGit(
     cwd,
     ['rev-parse', '--verify', `${baselineCommit}^{commit}`],
@@ -1386,7 +1480,18 @@ export async function countMeaningfulBaselineChangedFiles(workspaceDir, opts = {
  * @returns {{ ok: true } | { ok: false, reason: string, hits: string[] }}
  */
 export function evaluateBaselineDiffPolicy(changedPaths, gate) {
-  const allow = resolveBaselineDiffAllow(gate);
+  let allow;
+  try {
+    allow = resolveBaselineDiffAllow(gate);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `invalid baselineDiffPolicy: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      hits: [],
+    };
+  }
   if (allow != null) {
     const hits = changedPaths.filter((p) => !isPathAllowedByPolicy(p, allow));
     if (hits.length > 0) {

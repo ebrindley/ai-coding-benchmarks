@@ -1,90 +1,125 @@
 #!/usr/bin/env bash
-# Structural oracle for the god-class refactor.
-# Empty or near-empty *Service.java shells must not satisfy the requirement:
-# extracted services need real methods, and OrderService must wire them in.
+# Fixture-specific structural oracle for the required responsibility split.
 set -euo pipefail
 
-SERVICE_DIR="src/main/java/com/example/service"
-ORDER_SERVICE="${SERVICE_DIR}/OrderService.java"
-
-if [[ ! -f "$ORDER_SERVICE" ]]; then
-  echo "[SERVICE_COUNT] missing OrderService.java" >&2
-  exit 31
-fi
-
-# Portable (macOS Bash 3.2): no mapfile.
-extracted=()
-while IFS= read -r file; do
-  [[ -n "$file" ]] || continue
-  extracted+=("$file")
-done < <(
-  find "$SERVICE_DIR" -maxdepth 1 -type f -name '*Service.java' ! -name 'OrderService.java' | sort
-)
-
-count="${#extracted[@]}"
-if [[ "$count" -lt 3 ]]; then
-  echo "[SERVICE_COUNT] expected >= 3 extracted services, got $count" >&2
-  exit 31
-fi
-
-# Count non-empty, non-comment source lines (// and /* */ stripped coarsely).
-substance_lines() {
-  python3 - "$1" <<'PY'
-import re, sys
+python3 - <<'PY'
+import re
+import sys
 from pathlib import Path
-text = Path(sys.argv[1]).read_text(encoding="utf-8")
-text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-lines = []
-for line in text.splitlines():
-    s = re.sub(r"//.*$", "", line).strip()
-    if not s:
-        continue
-    if s in ("{", "}", "};"):
-        continue
-    if s.startswith("package ") or s.startswith("import "):
-        continue
-    lines.append(s)
-print(len(lines))
-PY
+
+service_dir = Path("src/main/java/com/example/service")
+order_path = service_dir / "OrderService.java"
+
+if not order_path.is_file():
+    print("[SERVICE_COUNT] missing OrderService.java", file=sys.stderr)
+    raise SystemExit(31)
+
+
+def clean_java(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"//.*$", "", text, flags=re.M)
+
+
+def method_body(src: str, method: str) -> str | None:
+    match = re.search(
+        rf"\bpublic\s+\S+(?:\s*<[^>]+>)?\s+{re.escape(method)}\s*\([^)]*\)\s*\{{",
+        src,
+    )
+    if not match:
+        return None
+    depth = 1
+    pos = match.end()
+    while pos < len(src) and depth:
+        if src[pos] == "{":
+            depth += 1
+        elif src[pos] == "}":
+            depth -= 1
+        pos += 1
+    return src[match.end():pos - 1] if depth == 0 else None
+
+
+contracts = {
+    "InventoryService": "reserveInventory",
+    "PaymentService": "processPayment",
+    "NotificationService": "sendOrderNotification",
 }
+order_src = clean_java(order_path.read_text(encoding="utf-8"))
+fields: dict[str, str] = {}
 
-public_method_count() {
-  python3 - "$1" <<'PY'
-import re, sys
-from pathlib import Path
-src = Path(sys.argv[1]).read_text(encoding="utf-8")
-pat = re.compile(
-    r"^\s*public\s+(?!class\b)(?:static\s+)?(?![\w.]+\s*\()\S+(?:\s*<[^>]+>)?\s+(\w+)\s*\([^;]*\)\s*\{",
-    re.M,
-)
-print(len(pat.findall(src)))
+for class_name, method_name in contracts.items():
+    service_path = service_dir / f"{class_name}.java"
+    if not service_path.is_file():
+        print(f"[SERVICE_COUNT] missing required {class_name}.java", file=sys.stderr)
+        raise SystemExit(31)
+    service_src = clean_java(service_path.read_text(encoding="utf-8"))
+    if not re.search(rf"\bclass\s+{class_name}\b", service_src):
+        print(f"[SERVICE_COUNT] {service_path} does not declare {class_name}", file=sys.stderr)
+        raise SystemExit(31)
+    if not re.search(rf"\bpublic\s+\S+(?:\s*<[^>]+>)?\s+{method_name}\s*\(", service_src):
+        print(
+            f"[SERVICE_COUNT] {class_name} must own public {method_name}(...) behavior",
+            file=sys.stderr,
+        )
+        raise SystemExit(31)
+    substantive = [
+        line.strip()
+        for line in service_src.splitlines()
+        if line.strip()
+        and line.strip() not in {"{", "}", "};"}
+        and not line.strip().startswith(("package ", "import "))
+    ]
+    if len(substantive) < 8:
+        print(f"[SERVICE_COUNT] {class_name} is too thin", file=sys.stderr)
+        raise SystemExit(31)
+
+    field = re.search(
+        rf"\bprivate\s+final\s+{class_name}\s+([A-Za-z_]\w*)\s*;",
+        order_src,
+    )
+    if not field:
+        print(
+            f"[SERVICE_COUNT] OrderService must hold final {class_name}",
+            file=sys.stderr,
+        )
+        raise SystemExit(31)
+    fields[class_name] = field.group(1)
+
+constructors = re.findall(r"\bpublic\s+OrderService\s*\(([^)]*)\)", order_src, re.S)
+if not any(all(class_name in params for class_name in contracts) for params in constructors):
+    print(
+        "[SERVICE_COUNT] OrderService needs a constructor injecting all three collaborators",
+        file=sys.stderr,
+    )
+    raise SystemExit(31)
+
+for class_name, method_name in contracts.items():
+    field = fields[class_name]
+    if not re.search(rf"\bthis\.{re.escape(field)}\s*=", order_src):
+        print(f"[SERVICE_COUNT] injected {field} is not assigned", file=sys.stderr)
+        raise SystemExit(31)
+    body = method_body(order_src, method_name)
+    if body is None or not re.search(
+        rf"\b{re.escape(field)}\.{method_name}\s*\(",
+        body,
+    ):
+        print(
+            f"[SERVICE_COUNT] OrderService.{method_name} must delegate to {field}",
+            file=sys.stderr,
+        )
+        raise SystemExit(31)
+
+for method_name, retained_state in {
+    "reserveInventory": "stock",
+    "processPayment": "payments",
+    "sendOrderNotification": "notifications",
+}.items():
+    body = method_body(order_src, method_name) or ""
+    if re.search(rf"\b{retained_state}\b", body):
+        print(
+            f"[SERVICE_COUNT] OrderService.{method_name} retains {retained_state} responsibility",
+            file=sys.stderr,
+        )
+        raise SystemExit(31)
+
+print("[OK] required services own and receive delegated responsibilities")
 PY
-}
-
-for file in "${extracted[@]}"; do
-  base="$(basename "$file" .java)"
-  if ! grep -qE "class[[:space:]]+${base}[[:space:]]" "$file"; then
-    echo "[SERVICE_COUNT] $file does not declare class ${base}" >&2
-    exit 31
-  fi
-
-  lines="$(substance_lines "$file")"
-  methods="$(public_method_count "$file")"
-  # Reject empty/near-empty shells; a real collaborator typically has fields + methods.
-  if [[ "$lines" -lt 8 ]]; then
-    echo "[SERVICE_COUNT] $file is too thin ($lines substantive lines; need >= 8)" >&2
-    exit 31
-  fi
-  if [[ "$methods" -lt 1 ]]; then
-    echo "[SERVICE_COUNT] $file has no public methods (empty shell)" >&2
-    exit 31
-  fi
-
-  # OrderService must actually use the extracted collaborator (not a dead file).
-  if ! grep -qE "${base}" "$ORDER_SERVICE"; then
-    echo "[SERVICE_COUNT] OrderService.java does not reference extracted ${base}" >&2
-    exit 31
-  fi
-done
-
-echo "[OK] extracted service count: $count (each substantive and wired into OrderService)"

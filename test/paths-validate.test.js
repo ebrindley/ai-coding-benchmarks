@@ -75,6 +75,23 @@ describe('paths + validate', () => {
     assert.throws(() => validateSuite({ name: '', tasks: [] }), /./);
   });
 
+  it('rejects malformed baseline-diff allow policies', async () => {
+    const { loadTask } = await import('../harness/load.js');
+    const { validateTask } = await import('../harness/validate.js');
+    const task = await loadTask(
+      path.join(CORPUS, 'tasks', 'greenfield', '005-sqlite-schema.yaml'),
+    );
+    const gates = task.eligibilityGates.map((gate) =>
+      gate.gate === 'baseline-diff'
+        ? { ...gate, baselineDiffPolicy: { allow: 'schema.sql' } }
+        : gate,
+    );
+    assert.throws(
+      () => validateTask({ ...task, eligibilityGates: gates }),
+      /baselineDiffPolicy\.allow|non-empty array/i,
+    );
+  });
+
   it('corpus oracle tasks declare oraclePath; static task declares evidenceGate', async () => {
     const { loadTask } = await import('../harness/load.js');
     const {

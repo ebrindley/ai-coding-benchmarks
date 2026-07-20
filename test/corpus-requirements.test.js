@@ -345,9 +345,18 @@ describe('corpus task-oracle contracts', () => {
     );
     assert.match(
       checkScript,
-      /substance|substantive|too thin|public methods|does not reference/i,
+      /too thin|must own public/i,
       'service-count oracle must reject empty/thin shells',
     );
+    assert.match(checkScript, /must delegate|delegate to/i);
+    assert.match(checkScript, /constructor injecting all three collaborators/i);
+    for (const name of [
+      'InventoryService',
+      'PaymentService',
+      'NotificationService',
+    ]) {
+      assert.ok(checkScript.includes(name), `oracle missing ${name} contract`);
+    }
   });
 
   it('spring createBook contract requires exact HTTP 201', async () => {
@@ -450,6 +459,8 @@ describe('corpus task-oracle contracts', () => {
       'total_orders',
       'total_revenue',
       'avg_order_value',
+      'Sentinel Customer',
+      'destroyed existing',
     ]) {
       assert.ok(testSrc.includes(needle), `schema tests missing: ${needle}`);
     }
@@ -473,5 +484,22 @@ describe('corpus task-oracle contracts', () => {
     assert.match(reportTests, /assertEqual\(len\(rows\), 50\)/);
     assert.match(reportTests, /101,\s*105,\s*112/);
     assert.match(reportTests, /45 \* 2500/);
+  });
+
+  it('TypeScript migration allows only required source and config edits', async () => {
+    const { loadTask } = await import('../harness/load.js');
+    const task = await loadTask(
+      path.join(TASKS_ROOT, 'brownfield', '008-js-to-ts-migration.yaml'),
+    );
+    const gate = task.eligibilityGates.find((item) => item.gate === 'baseline-diff');
+    const allow = gate?.baselineDiffPolicy?.allow;
+    assert.ok(Array.isArray(allow));
+    assert.ok(allow.includes('package.json'));
+    assert.ok(allow.includes('tsconfig.json'));
+    for (const stem of ['array-utils', 'async-utils', 'index', 'object-utils', 'string-utils']) {
+      assert.ok(allow.includes(`src/${stem}.js`));
+      assert.ok(allow.includes(`src/${stem}.ts`));
+    }
+    assert.equal(allow.some((entry) => entry.startsWith('test/')), false);
   });
 });

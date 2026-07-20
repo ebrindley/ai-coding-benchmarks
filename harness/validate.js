@@ -191,6 +191,31 @@ function validateEligibilityGate(gate, path) {
       });
     }
   }
+  if (obj.baselineDiffPolicy !== undefined) {
+    const policyPath = joinPath(path, 'baselineDiffPolicy');
+    assertObject(obj.baselineDiffPolicy, policyPath);
+    const policy = /** @type {Record<string, unknown>} */ (obj.baselineDiffPolicy);
+    if (!Array.isArray(policy.allow) || policy.allow.length < 1) {
+      throw new ValidationError(
+        'baselineDiffPolicy.allow must be a non-empty array',
+        { path: joinPath(policyPath, 'allow'), code: 'TYPE' },
+      );
+    }
+    for (let i = 0; i < policy.allow.length; i++) {
+      const entryPath = joinPath(policyPath, `allow[${i}]`);
+      const entry = requireNonEmptyString(policy.allow[i], entryPath);
+      if (
+        entry.startsWith('/') ||
+        entry.startsWith('\\') ||
+        entry.split(/[\\/]+/).includes('..')
+      ) {
+        throw new ValidationError(
+          'baselineDiffPolicy.allow entries must be workspace-relative paths without traversal',
+          { path: entryPath, code: 'PATH' },
+        );
+      }
+    }
+  }
 }
 
 /**

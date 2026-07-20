@@ -1803,6 +1803,14 @@ process.exit(1);
     }
   });
 
+  it('baseline-diff: .NET solution and project selection files are protected', async () => {
+    const { isProtectedPath } = await import('../harness/gates.js');
+    assert.equal(isProtectedPath('OrderService.sln'), true);
+    assert.equal(isProtectedPath('src/OrderService/OrderService.csproj'), true);
+    assert.equal(isProtectedPath('src/App/App.fsproj'), true);
+    assert.equal(isProtectedPath('src/App/App.vbproj'), true);
+  });
+
   it('baseline-diff: root co-located test tampering is protected', async () => {
     const { evaluateBaselineDiff, isProtectedPath } = await import(
       '../harness/gates.js'
@@ -1954,5 +1962,14 @@ process.exit(1);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('baseline-diff: malformed allow policy fails closed', async () => {
+    const { evaluateBaselineDiffPolicy } = await import('../harness/gates.js');
+    const result = evaluateBaselineDiffPolicy([], {
+      baselineDiffPolicy: { allow: 'schema.sql' },
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /invalid baselineDiffPolicy/i);
   });
 });

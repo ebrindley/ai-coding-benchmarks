@@ -304,6 +304,7 @@ export function buildHarnessGitEnv(baseEnv = process.env) {
     LC_ALL: 'C',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+    GIT_NO_REPLACE_OBJECTS: '1',
     GIT_TERMINAL_PROMPT: '0',
     GIT_OPTIONAL_LOCKS: '0',
     GIT_PAGER: 'cat',
