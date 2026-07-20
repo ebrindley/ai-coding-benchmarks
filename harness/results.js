@@ -13,6 +13,8 @@
 import {
   readFile,
   access,
+  rm,
+  lstat,
 } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -700,6 +702,159 @@ export async function readTrialResult(campaignDir, trialId) {
     label: 'readTrialResult',
   });
   return result;
+}
+
+/**
+ * Remove a trial subdirectory under a campaign child root when present.
+ * Containment-checked; never follows a leaf symlink as a directory root.
+ * @param {string} campaignRoot
+ * @param {'results' | 'raw' | 'artifacts'} kind
+ * @param {string} trialId
+ * @returns {Promise<boolean>} true when something was removed
+ */
+async function removeTrialSubdirIfPresent(campaignRoot, kind, trialId) {
+  const parent = path.join(path.resolve(campaignRoot), kind);
+  // trialPathUnder enforces containment (safe id + resolveUnder).
+  // Do not re-check with lexical isPathInside: macOS /var vs /private/var
+  // realpath normalization would false-reject valid temps.
+  const target = await trialPathUnder(parent, trialId);
+  try {
+    const st = await lstat(target);
+    if (st.isSymbolicLink()) {
+      // Leaf symlink: unlink only (do not follow into host).
+      await rm(target, { force: true });
+      return true;
+    }
+    await rm(target, { recursive: true, force: true });
+    return true;
+  } catch (err) {
+    const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+    if (code === 'ENOENT') return false;
+    throw err;
+  }
+}
+
+/**
+ * Clear durable trial state (results/, raw/, artifacts/) so a re-run cannot
+ * adopt stale evidence. Fail closed on boundary / unexpected FS errors.
+ *
+ * @param {string} campaignDir
+ * @param {string} trialId
+ * @returns {Promise<{ cleared: string[] }>}
+ */
+export async function clearTrialDurableState(campaignDir, trialId) {
+  if (!campaignDir) throw new Error('clearTrialDurableState: campaignDir is required');
+  if (!trialId) throw new Error('clearTrialDurableState: trialId is required');
+  const safeId = assertSafeTrialId(trialId);
+  const campaignRoot = await assertCampaignFilesystemBoundary(campaignDir);
+  /** @type {string[]} */
+  const cleared = [];
+  for (const kind of /** @type {const} */ (['results', 'raw', 'artifacts'])) {
+    const removed = await removeTrialSubdirIfPresent(campaignRoot, kind, safeId);
+    if (removed) cleared.push(kind);
+  }
+  return { cleared };
+}
+
+/**
+ * Terminal states a durable result may claim when adopting a crash-window write.
+ */
+const ADOPTABLE_RESULT_STATES = new Set(['completed', 'failed']);
+
+/**
+ * Try to adopt a verified durable result for a crash-window / resume path.
+ *
+ * A result is adoptable when:
+ * - result.json exists and passes schema
+ * - identity binds exactly to the frozen manifest trial row
+ * - digests.resultDigest matches the recomputed final-record digest
+ * - result.state is completed|failed
+ *
+ * Full raw/artifact byte re-verify is best-effort for adoption diagnostics but
+ * identity + resultDigest are the hard gates (result was written only after
+ * those were stamped). When rawEvidenceUnavailable is set, still adopt if
+ * identity+resultDigest hold so infra-failure crash windows resume cleanly.
+ *
+ * @param {string} campaignDir
+ * @param {object} manifestTrial frozen trial row from the campaign manifest
+ * @returns {Promise<
+ *   | { ok: true, result: object, state: string, classification: string | null }
+ *   | { ok: false, reason: string }
+ * >}
+ */
+export async function tryAdoptDurableTrialResult(campaignDir, manifestTrial) {
+  if (!campaignDir) {
+    return { ok: false, reason: 'campaignDir required' };
+  }
+  if (!manifestTrial || typeof manifestTrial !== 'object') {
+    return { ok: false, reason: 'manifestTrial required' };
+  }
+  const trialId =
+    manifestTrial.id != null ? String(manifestTrial.id) : '';
+  if (!trialId) {
+    return { ok: false, reason: 'manifestTrial.id required' };
+  }
+
+  /** @type {object} */
+  let result;
+  try {
+    result = await readTrialResult(campaignDir, trialId);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `no durable result: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  const state = result.state != null ? String(result.state) : '';
+  if (!ADOPTABLE_RESULT_STATES.has(state)) {
+    return {
+      ok: false,
+      reason: `durable result state not terminal: ${state || '(missing)'}`,
+    };
+  }
+
+  const idMismatches = collectManifestIdentityMismatches(result, manifestTrial);
+  if (idMismatches.length > 0) {
+    return {
+      ok: false,
+      reason: `identity mismatch: ${idMismatches.join(', ')}`,
+    };
+  }
+
+  if (!result.digests || typeof result.digests !== 'object') {
+    return { ok: false, reason: 'missing digests' };
+  }
+  const stored = /** @type {Record<string, unknown>} */ (result.digests);
+  const expectedResultDigest = computeFinalResultDigest(result);
+  if (stored.resultDigest == null || stored.resultDigest === '') {
+    return { ok: false, reason: 'resultDigest missing' };
+  }
+  if (String(stored.resultDigest) !== expectedResultDigest) {
+    return { ok: false, reason: 'resultDigest mismatch' };
+  }
+
+  // Optional fixture authority when the frozen row carries it.
+  if (
+    manifestTrial.expectedFixtureDigest != null &&
+    String(manifestTrial.expectedFixtureDigest).trim() !== ''
+  ) {
+    const expected = String(manifestTrial.expectedFixtureDigest);
+    if (
+      stored.fixtureDigest == null ||
+      String(stored.fixtureDigest) !== expected
+    ) {
+      return { ok: false, reason: 'fixtureDigest mismatch vs frozen authority' };
+    }
+  }
+
+  return {
+    ok: true,
+    result,
+    state,
+    classification:
+      result.classification != null ? String(result.classification) : null,
+  };
 }
 
 /**

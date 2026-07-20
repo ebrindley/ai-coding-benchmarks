@@ -839,3 +839,88 @@ process.exit(0);
     }
   });
 });
+
+describe('harness-owned git isolation (neutral config)', () => {
+  it('malicious core.fsmonitor is not executed by harness git', async () => {
+    const {
+      initWorkspaceGit,
+      runHarnessGit,
+      buildHarnessGitArgv,
+      buildHarnessGitEnv,
+      FIXTURE_BASELINE_REF,
+    } = await import('../harness/workspace.js');
+    const { collectBaselineChangedPaths, evaluateBaselineDiff } = await import(
+      '../harness/gates.js'
+    );
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-fsmonitor-'));
+    try {
+      await writeFile(path.join(dir, 'main.js'), 'export default 0;\n', 'utf8');
+      await initWorkspaceGit(dir, { trialId: 'fsmon' });
+
+      const marker = path.join(dir, 'FSMONITOR_RAN');
+      const hook = path.join(dir, 'evil-fsmonitor.sh');
+      await writeFile(
+        hook,
+        `#!/bin/sh\necho ran > "${marker}"\nexit 0\n`,
+        'utf8',
+      );
+      await chmod(hook, 0o755);
+
+      // Provider-controlled local config tries to install a callback.
+      const cfg = await runHarnessGit(dir, [
+        'config',
+        'core.fsmonitor',
+        hook,
+      ]);
+      assert.equal(cfg.exitCode, 0);
+
+      // Neutral argv/env always force-disable fsmonitor on the command line.
+      const argv = buildHarnessGitArgv(['status', '--porcelain']);
+      assert.ok(argv.includes('core.fsmonitor='));
+      const env = buildHarnessGitEnv();
+      assert.equal(env.GIT_CONFIG_NOSYSTEM, '1');
+      assert.ok(env.GIT_CONFIG_GLOBAL);
+
+      const collected = await collectBaselineChangedPaths(dir);
+      assert.equal(collected.ok, true, collected.error);
+      assert.equal(collected.baselineRef, FIXTURE_BASELINE_REF);
+
+      // Marker must not exist — fsmonitor hook never ran.
+      await assert.rejects(() => access(marker), /ENOENT/);
+
+      // baseline-diff still evaluates (no helper callback failure).
+      const gate = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate: { gate: 'baseline-diff', order: 1 },
+      });
+      assert.equal(gate.status, 'passed');
+      assert.notEqual(gate.classificationSignal, 'INFRA_FAIL');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('initWorkspaceGit tags immutable fixture baseline ref', async () => {
+    const {
+      initWorkspaceGit,
+      runHarnessGit,
+      FIXTURE_BASELINE_REF,
+    } = await import('../harness/workspace.js');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-baseline-tag-'));
+    try {
+      await writeFile(path.join(dir, 'a.txt'), 'a\n', 'utf8');
+      const init = await initWorkspaceGit(dir, { trialId: 'tag-check' });
+      assert.equal(init.baselineRef, FIXTURE_BASELINE_REF);
+      const rev = await runHarnessGit(dir, [
+        'rev-parse',
+        '--verify',
+        `${FIXTURE_BASELINE_REF}^{commit}`,
+      ]);
+      assert.equal(rev.exitCode, 0);
+      assert.match(String(rev.stdout).trim(), /^[0-9a-f]{40}$/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

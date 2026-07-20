@@ -53,6 +53,10 @@ import {
   spawnControlled,
 } from './invokers/spawn-controlled.js';
 import { isPathInside, PathEscapeError, resolveUnder } from './paths.js';
+import {
+  FIXTURE_BASELINE_REF,
+  runHarnessGit,
+} from './workspace.js';
 
 /** Gates that are structural / non-command-executable without a command field. */
 const STRUCTURAL_GATES = new Set(['baseline-diff', 'requirements']);
@@ -62,11 +66,79 @@ const PROTECTED_PATH_PREFIXES = Object.freeze([
   'test/',
   'tests/',
   'src/test/',
+  'src/tests/',
   '__tests__/',
   'scripts/',
   'oracle/',
   'oracles/',
   'baseline/',
+  'spec/',
+  'specs/',
+]);
+
+/**
+ * Package/build manifests that can redirect install/test tooling.
+ * Basename match (any depth) — tampering is a protected edit.
+ */
+const PROTECTED_MANIFEST_BASENAMES = Object.freeze(
+  new Set([
+    'package.json',
+    'package-lock.json',
+    'npm-shrinkwrap.json',
+    'yarn.lock',
+    'pnpm-lock.yaml',
+    'pom.xml',
+    'build.gradle',
+    'build.gradle.kts',
+    'settings.gradle',
+    'settings.gradle.kts',
+    'go.mod',
+    'go.sum',
+    'cargo.toml',
+    'cargo.lock',
+    'pyproject.toml',
+    'setup.py',
+    'setup.cfg',
+    'requirements.txt',
+    'requirements-dev.txt',
+    'pipfile',
+    'pipfile.lock',
+    'poetry.lock',
+    'composer.json',
+    'composer.lock',
+    'gemfile',
+    'gemfile.lock',
+    'makefile',
+    'cmakelists.txt',
+    'tsconfig.json',
+    'jsconfig.json',
+    'jest.config.js',
+    'jest.config.cjs',
+    'jest.config.mjs',
+    'jest.config.ts',
+    'vitest.config.js',
+    'vitest.config.ts',
+    'vitest.config.mjs',
+    'phpunit.xml',
+    'phpunit.xml.dist',
+  ]),
+);
+
+/**
+ * Root / co-located test filename patterns (basename).
+ * Covers Go `*_test.go`, Node/TS `*.test.*` / `*.spec.*`, Python `test_*.py` / `*_test.py`.
+ */
+const PROTECTED_TEST_BASENAME_RES = Object.freeze([
+  /_test\.go$/i,
+  /\.test\.[^.]+$/i,
+  /\.spec\.[^.]+$/i,
+  /^test_.*\.py$/i,
+  /_test\.py$/i,
+  /_test\.rb$/i,
+  /_spec\.rb$/i,
+  /Tests?\.cs$/i,
+  /Test\.java$/i,
+  /Tests\.java$/i,
 ]);
 
 const EVIDENCE_TRUNCATE = 8192;
@@ -979,13 +1051,25 @@ export function isBookkeepingPath(relPath) {
 }
 
 /**
- * Whether a relative path is protected (tests/validators/oracles/etc.).
+ * Normalize a workspace-relative path for policy comparison.
+ * @param {string} relPath
+ * @returns {string}
+ */
+export function normalizeRelPath(relPath) {
+  return String(relPath || '')
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/^\/+/, '');
+}
+
+/**
+ * Whether a relative path is protected (tests/validators/oracles/manifests/etc.).
  * @param {string} relPath
  * @returns {boolean}
  */
 export function isProtectedPath(relPath) {
-  const norm = relPath.replace(/\\/g, '/').replace(/^\.\//, '');
-  if (isBookkeepingPath(norm)) return false;
+  const norm = normalizeRelPath(relPath);
+  if (!norm || isBookkeepingPath(norm)) return false;
   for (const prefix of PROTECTED_PATH_PREFIXES) {
     if (norm === prefix.slice(0, -1) || norm.startsWith(prefix)) {
       return true;
@@ -997,11 +1081,55 @@ export function isProtectedPath(relPath) {
   if (/(^|\/)oracles?\//i.test(norm)) {
     return true;
   }
+  const base = norm.includes('/') ? norm.slice(norm.lastIndexOf('/') + 1) : norm;
+  const baseLower = base.toLowerCase();
+  if (PROTECTED_MANIFEST_BASENAMES.has(baseLower)) {
+    return true;
+  }
+  for (const re of PROTECTED_TEST_BASENAME_RES) {
+    if (re.test(base)) return true;
+  }
   return false;
 }
 
 /**
+ * Parse allow-list entries from a gate's baselineDiffPolicy.allow.
+ * @param {unknown} gate
+ * @returns {string[] | null} normalized allow paths, or null when policy absent
+ */
+export function resolveBaselineDiffAllow(gate) {
+  if (!gate || typeof gate !== 'object') return null;
+  const policy = /** @type {Record<string, unknown>} */ (gate).baselineDiffPolicy;
+  if (!policy || typeof policy !== 'object') return null;
+  const allow = /** @type {Record<string, unknown>} */ (policy).allow;
+  if (!Array.isArray(allow)) return null;
+  /** @type {string[]} */
+  const out = [];
+  for (const entry of allow) {
+    if (typeof entry !== 'string') continue;
+    const n = normalizeRelPath(entry);
+    if (n) out.push(n);
+  }
+  return out;
+}
+
+/**
+ * True when a changed path is permitted by an allow list (exact path match).
+ * @param {string} relPath
+ * @param {string[]} allow
+ * @returns {boolean}
+ */
+export function isPathAllowedByPolicy(relPath, allow) {
+  const norm = normalizeRelPath(relPath);
+  if (!norm) return false;
+  return allow.some((a) => a === norm);
+}
+
+/**
  * Parse git status --porcelain / diff --name-only lines into relative paths.
+ * Line-oriented fallback (non-NUL). For renames with ` -> `, returns destination only;
+ * prefer {@link parseGitNameStatusZ} / {@link collectChangedPathsFromGitOutputs}
+ * for rename source+destination inspection.
  * @param {string} text
  * @returns {string[]}
  */
@@ -1014,13 +1142,127 @@ export function parseChangedPaths(text) {
       if (/^[ MADRCU?!]{1,2}\s+/.test(line)) {
         const rest = line.slice(2).trim();
         if (rest.includes(' -> ')) {
+          // Legacy single-path parse keeps destination; callers needing both
+          // paths should use parseGitNameStatusZ.
           return rest.split(' -> ').pop().trim();
         }
         return rest.replace(/^"+|"+$/g, '');
       }
+      // name-status without porcelain prefix: "M\tpath" or "R100\told\tnew"
+      if (/^[A-Z][0-9]{0,3}\t/.test(line) || /^[A-Z]\t/.test(line)) {
+        const parts = line.split('\t');
+        if (parts.length >= 3) {
+          // rename/copy: return dest; source handled in z-parser
+          return parts[parts.length - 1].trim();
+        }
+        if (parts.length === 2) return parts[1].trim();
+      }
       return line;
     })
+    .filter(Boolean)
+    .map(normalizeRelPath)
     .filter(Boolean);
+}
+
+/**
+ * Parse `git diff --name-status -z` output (NUL-safe).
+ * Returns every path involved: for renames/copies, both source and destination.
+ * @param {string | Buffer} data
+ * @returns {string[]}
+ */
+export function parseGitNameStatusZ(data) {
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data ?? ''), 'utf8');
+  if (buf.length === 0) return [];
+  const parts = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i += 1) {
+    if (buf[i] === 0) {
+      parts.push(buf.subarray(start, i).toString('utf8'));
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) {
+    parts.push(buf.subarray(start).toString('utf8'));
+  }
+  /** @type {string[]} */
+  const paths = [];
+  let i = 0;
+  while (i < parts.length) {
+    const status = parts[i];
+    if (!status) {
+      i += 1;
+      continue;
+    }
+    // Status tokens: M, A, D, T, U, X, or R100 / C50, etc.
+    const code = status.charAt(0);
+    if (!/[A-Z]/.test(code)) {
+      // Not a status token — treat as a bare path (defensive).
+      const p = normalizeRelPath(status);
+      if (p) paths.push(p);
+      i += 1;
+      continue;
+    }
+    if (code === 'R' || code === 'C') {
+      const src = parts[i + 1] ?? '';
+      const dst = parts[i + 2] ?? '';
+      const ns = normalizeRelPath(src);
+      const nd = normalizeRelPath(dst);
+      if (ns) paths.push(ns);
+      if (nd) paths.push(nd);
+      i += 3;
+      continue;
+    }
+    const p = normalizeRelPath(parts[i + 1] ?? '');
+    if (p) paths.push(p);
+    i += 2;
+  }
+  return paths;
+}
+
+/**
+ * Parse `git ls-files -z` / porcelain -z path lists (NUL-separated).
+ * @param {string | Buffer} data
+ * @returns {string[]}
+ */
+export function parseGitPathListZ(data) {
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data ?? ''), 'utf8');
+  if (buf.length === 0) return [];
+  /** @type {string[]} */
+  const paths = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i += 1) {
+    if (buf[i] === 0) {
+      const p = normalizeRelPath(buf.subarray(start, i).toString('utf8'));
+      if (p) paths.push(p);
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) {
+    const p = normalizeRelPath(buf.subarray(start).toString('utf8'));
+    if (p) paths.push(p);
+  }
+  return paths;
+}
+
+/**
+ * Merge changed paths from baseline name-status + untracked lists.
+ * @param {string | Buffer} nameStatusZ
+ * @param {string | Buffer} untrackedZ
+ * @returns {string[]}
+ */
+export function collectChangedPathsFromGitOutputs(nameStatusZ, untrackedZ) {
+  const seen = new Set();
+  /** @type {string[]} */
+  const out = [];
+  for (const p of [
+    ...parseGitNameStatusZ(nameStatusZ),
+    ...parseGitPathListZ(untrackedZ),
+  ]) {
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    out.push(p);
+  }
+  return out;
 }
 
 /**
@@ -1043,7 +1285,131 @@ export function countMeaningfulChangedFiles(porcelainText) {
 }
 
 /**
- * Evaluate baseline-diff: controlled git argv only; reject protected path edits.
+ * Collect workspace paths that differ from the immutable fixture baseline.
+ * Detects committed, staged, unstaged, deleted, untracked, and renamed content
+ * (rename source + destination). Fail closed on git/helper errors.
+ *
+ * @param {string} workspaceDir
+ * @param {{
+ *   baselineRef?: string,
+ *   gitSpawn?: (args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }>,
+ * }} [opts]
+ * @returns {Promise<{ ok: true, paths: string[], baselineRef: string } | { ok: false, error: string, paths?: string[] }>}
+ */
+export async function collectBaselineChangedPaths(workspaceDir, opts = {}) {
+  const cwd = path.resolve(workspaceDir);
+  const baselineRef =
+    typeof opts.baselineRef === 'string' && opts.baselineRef.trim()
+      ? opts.baselineRef.trim()
+      : FIXTURE_BASELINE_REF;
+  const gitOpts = opts.gitSpawn ? { gitSpawn: opts.gitSpawn } : {};
+
+  // Confirm baseline ref resolves (immutable authority present).
+  const rev = await runHarnessGit(
+    cwd,
+    ['rev-parse', '--verify', `${baselineRef}^{commit}`],
+    gitOpts,
+  );
+  if (rev.exitCode !== 0) {
+    return {
+      ok: false,
+      error:
+        rev.stderr ||
+        rev.stdout ||
+        `fixture baseline ref unavailable: ${baselineRef}`,
+    };
+  }
+
+  // Tree vs working tree (covers committed+dirty+staged relative to baseline).
+  // -M: detect renames so source and dest are both reported.
+  const diff = await runHarnessGit(
+    cwd,
+    [
+      'diff',
+      '--name-status',
+      '-z',
+      '-M',
+      '--find-renames',
+      baselineRef,
+      '--',
+    ],
+    gitOpts,
+  );
+  if (diff.exitCode !== 0) {
+    return {
+      ok: false,
+      error: diff.stderr || diff.stdout || 'git diff against fixture baseline failed',
+    };
+  }
+
+  // Untracked (not in index): still gaming surface if tests/oracles appear.
+  const untracked = await runHarnessGit(
+    cwd,
+    ['ls-files', '-z', '--others', '--exclude-standard'],
+    gitOpts,
+  );
+  if (untracked.exitCode !== 0) {
+    return {
+      ok: false,
+      error:
+        untracked.stderr ||
+        untracked.stdout ||
+        'git ls-files untracked failed',
+    };
+  }
+
+  const paths = collectChangedPathsFromGitOutputs(diff.stdout, untracked.stdout);
+  return { ok: true, paths, baselineRef };
+}
+
+/**
+ * Count meaningful baseline-relative changes in a workspace (harness-owned git).
+ * @param {string} workspaceDir
+ * @param {{ baselineRef?: string, gitSpawn?: Function }} [opts]
+ * @returns {Promise<number | null>} null on helper failure (caller may fail closed)
+ */
+export async function countMeaningfulBaselineChangedFiles(workspaceDir, opts = {}) {
+  const collected = await collectBaselineChangedPaths(workspaceDir, opts);
+  if (!collected.ok) return null;
+  return filterMeaningfulChangedPaths(collected.paths).length;
+}
+
+/**
+ * Classify baseline-diff policy hits for a set of changed paths.
+ * - When baselineDiffPolicy.allow is present: only allow-listed paths may change.
+ * - Otherwise: reject protected path edits (tests/oracles/manifests/…).
+ *
+ * @param {string[]} changedPaths meaningful paths
+ * @param {Record<string, unknown>} gate
+ * @returns {{ ok: true } | { ok: false, reason: string, hits: string[] }}
+ */
+export function evaluateBaselineDiffPolicy(changedPaths, gate) {
+  const allow = resolveBaselineDiffAllow(gate);
+  if (allow != null) {
+    const hits = changedPaths.filter((p) => !isPathAllowedByPolicy(p, allow));
+    if (hits.length > 0) {
+      return {
+        ok: false,
+        reason: `paths outside baselineDiffPolicy.allow modified: ${hits.join(', ')}`,
+        hits,
+      };
+    }
+    return { ok: true };
+  }
+  const protectedHits = changedPaths.filter((p) => isProtectedPath(p));
+  if (protectedHits.length > 0) {
+    return {
+      ok: false,
+      reason: `protected paths modified: ${protectedHits.join(', ')}`,
+      hits: protectedHits,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Evaluate baseline-diff against immutable fixture-baseline authority.
+ * Uses harness-owned git (neutral config/env); honors gate.baselineDiffPolicy.allow.
  * @param {object} opts
  * @param {string} opts.workspaceDir
  * @param {Record<string, unknown>} opts.gate
@@ -1055,14 +1421,11 @@ export async function evaluateBaselineDiff({ workspaceDir, gate }) {
   const required = gate.required === undefined ? true : Boolean(gate.required);
   const check = typeof gate.check === 'string' ? gate.check : undefined;
 
-  const status = await spawnControlled({
-    command: 'git',
-    args: ['-C', path.resolve(workspaceDir), 'status', '--porcelain'],
-    timeoutMs: 15_000,
-    captureLimit: DEFAULT_CAPTURE_LIMIT,
-  });
-
-  if (status.infraFailure || status.timedOut || status.exitCode !== 0) {
+  let collected;
+  try {
+    collected = await collectBaselineChangedPaths(workspaceDir);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     return {
       gate: name,
       order,
@@ -1070,19 +1433,36 @@ export async function evaluateBaselineDiff({ workspaceDir, gate }) {
       command: null,
       expectedExitCode: 0,
       status: 'execution_unavailable',
-      exitCode: status.exitCode,
-      timedOut: Boolean(status.timedOut),
-      evidence: status.infraFailure || status.stderr || 'git status failed',
-      infraFailure: status.infraFailure || 'git status unavailable',
+      exitCode: null,
+      timedOut: false,
+      evidence: msg,
+      infraFailure: msg,
       classificationSignal: 'INFRA_FAIL',
       check,
     };
   }
 
-  const changed = filterMeaningfulChangedPaths(parseChangedPaths(status.stdout));
-  const protectedHits = changed.filter((p) => isProtectedPath(p));
+  if (!collected.ok) {
+    return {
+      gate: name,
+      order,
+      required,
+      command: null,
+      expectedExitCode: 0,
+      status: 'execution_unavailable',
+      exitCode: 1,
+      timedOut: false,
+      evidence: collected.error,
+      infraFailure: collected.error,
+      classificationSignal: 'INFRA_FAIL',
+      check,
+    };
+  }
 
-  if (protectedHits.length > 0) {
+  const changed = filterMeaningfulChangedPaths(collected.paths);
+  const policy = evaluateBaselineDiffPolicy(changed, gate || {});
+
+  if (!policy.ok) {
     return {
       gate: name,
       order,
@@ -1092,7 +1472,7 @@ export async function evaluateBaselineDiff({ workspaceDir, gate }) {
       status: 'failed',
       exitCode: 1,
       timedOut: false,
-      evidence: `protected paths modified: ${protectedHits.join(', ')}`,
+      evidence: policy.reason,
       classificationSignal: 'FAIL',
       check,
     };
@@ -1107,7 +1487,7 @@ export async function evaluateBaselineDiff({ workspaceDir, gate }) {
     status: 'passed',
     exitCode: 0,
     timedOut: false,
-    evidence: `baseline-diff ok; ${changed.length} meaningful changed path(s), none protected`,
+    evidence: `baseline-diff ok vs ${collected.baselineRef}; ${changed.length} meaningful changed path(s)`,
     classificationSignal: 'PASS',
     check,
   };

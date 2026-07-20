@@ -1706,4 +1706,223 @@ process.exit(1);
       'INFRA_FAIL',
     );
   });
+
+  it('baseline-diff: commit-then-clean protected edits fail vs fixture baseline', async () => {
+    const {
+      evaluateBaselineDiff,
+      isProtectedPath,
+    } = await import('../harness/gates.js');
+    const { initWorkspaceGit, runHarnessGit } = await import(
+      '../harness/workspace.js'
+    );
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bd-commit-'));
+    try {
+      await mkdir(path.join(dir, 'test'), { recursive: true });
+      await writeFile(path.join(dir, 'src.js'), 'export const n = 1;\n', 'utf8');
+      await writeFile(
+        path.join(dir, 'test', 'src.test.js'),
+        'assert.equal(1, 1);\n',
+        'utf8',
+      );
+      await initWorkspaceGit(dir, { trialId: 'commit-clean' });
+
+      // Tamper with a protected test, commit, leave working tree clean.
+      await writeFile(
+        path.join(dir, 'test', 'src.test.js'),
+        'assert.equal(1, 1); // gamed\n',
+        'utf8',
+      );
+      assert.equal(isProtectedPath('test/src.test.js'), true);
+      const add = await runHarnessGit(dir, ['add', '-A']);
+      assert.equal(add.exitCode, 0);
+      const commit = await runHarnessGit(dir, [
+        'commit',
+        '-m',
+        'game: weaken test',
+      ]);
+      assert.equal(commit.exitCode, 0);
+      const status = await runHarnessGit(dir, ['status', '--porcelain']);
+      assert.equal(status.exitCode, 0);
+      assert.equal(String(status.stdout).trim(), '', 'status clean after commit');
+
+      const result = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate: { gate: 'baseline-diff', order: 1, required: true },
+      });
+      assert.equal(result.status, 'failed');
+      assert.equal(result.classificationSignal, 'FAIL');
+      assert.match(String(result.evidence), /protected|test\/src\.test\.js/i);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('baseline-diff: package script tampering is protected', async () => {
+    const { evaluateBaselineDiff, isProtectedPath } = await import(
+      '../harness/gates.js'
+    );
+    const { initWorkspaceGit } = await import('../harness/workspace.js');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bd-pkg-'));
+    try {
+      await writeFile(
+        path.join(dir, 'package.json'),
+        JSON.stringify({ name: 'x', scripts: { test: 'node test.js' } }, null, 2),
+        'utf8',
+      );
+      await writeFile(path.join(dir, 'index.js'), 'module.exports = 1;\n', 'utf8');
+      await initWorkspaceGit(dir, { trialId: 'pkg' });
+      assert.equal(isProtectedPath('package.json'), true);
+
+      await writeFile(
+        path.join(dir, 'package.json'),
+        JSON.stringify(
+          { name: 'x', scripts: { test: 'node -e "process.exit(0)"' } },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+      const result = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate: { gate: 'baseline-diff', order: 1 },
+      });
+      assert.equal(result.status, 'failed');
+      assert.match(String(result.evidence), /package\.json/i);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('baseline-diff: root co-located test tampering is protected', async () => {
+    const { evaluateBaselineDiff, isProtectedPath } = await import(
+      '../harness/gates.js'
+    );
+    const { initWorkspaceGit } = await import('../harness/workspace.js');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bd-root-'));
+    try {
+      await writeFile(path.join(dir, 'store.go'), 'package store\n', 'utf8');
+      await writeFile(
+        path.join(dir, 'store_test.go'),
+        'package store\n',
+        'utf8',
+      );
+      await initWorkspaceGit(dir, { trialId: 'root-test' });
+      assert.equal(isProtectedPath('store_test.go'), true);
+      assert.equal(isProtectedPath('foo.test.js'), true);
+      assert.equal(isProtectedPath('bar.spec.ts'), true);
+
+      await writeFile(
+        path.join(dir, 'store_test.go'),
+        'package store\n// weakened\n',
+        'utf8',
+      );
+      const result = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate: { gate: 'baseline-diff', order: 1 },
+      });
+      assert.equal(result.status, 'failed');
+      assert.match(String(result.evidence), /store_test\.go/i);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('baseline-diff: rename inspects source and destination', async () => {
+    const {
+      evaluateBaselineDiff,
+      parseGitNameStatusZ,
+    } = await import('../harness/gates.js');
+    const { initWorkspaceGit, runHarnessGit } = await import(
+      '../harness/workspace.js'
+    );
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bd-rename-'));
+    try {
+      await mkdir(path.join(dir, 'tests'), { recursive: true });
+      await writeFile(path.join(dir, 'app.js'), 'export default 1;\n', 'utf8');
+      await writeFile(
+        path.join(dir, 'tests', 'app.test.js'),
+        'ok\n',
+        'utf8',
+      );
+      await initWorkspaceGit(dir, { trialId: 'rename' });
+
+      // Rename protected test into a non-test path to evade naive path checks.
+      const mv = await runHarnessGit(dir, [
+        'mv',
+        'tests/app.test.js',
+        'app.helper.js',
+      ]);
+      assert.equal(mv.exitCode, 0);
+
+      // Unit: rename name-status -z yields both paths.
+      const both = parseGitNameStatusZ('R100\0tests/app.test.js\0app.helper.js\0');
+      assert.ok(both.includes('tests/app.test.js'));
+      assert.ok(both.includes('app.helper.js'));
+
+      const result = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate: { gate: 'baseline-diff', order: 1 },
+      });
+      assert.equal(result.status, 'failed');
+      assert.match(
+        String(result.evidence),
+        /tests\/app\.test\.js|app\.helper\.js|protected/i,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('baseline-diff: honors SQL-only baselineDiffPolicy.allow', async () => {
+    const { evaluateBaselineDiff } = await import('../harness/gates.js');
+    const { initWorkspaceGit } = await import('../harness/workspace.js');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bd-sql-'));
+    try {
+      await mkdir(path.join(dir, 'tests'), { recursive: true });
+      await writeFile(
+        path.join(dir, 'schema.sql'),
+        'CREATE TABLE t(id INT);\n',
+        'utf8',
+      );
+      await writeFile(
+        path.join(dir, 'tests', 'test_schema.py'),
+        'def test_ok():\n  assert True\n',
+        'utf8',
+      );
+      await initWorkspaceGit(dir, { trialId: 'sql-allow' });
+
+      const gate = {
+        gate: 'baseline-diff',
+        order: 1,
+        baselineDiffPolicy: { allow: ['schema.sql'] },
+      };
+
+      // Only allowed SQL file → pass
+      await writeFile(
+        path.join(dir, 'schema.sql'),
+        'CREATE TABLE t(id INT, name TEXT);\n',
+        'utf8',
+      );
+      const ok = await evaluateBaselineDiff({ workspaceDir: dir, gate });
+      assert.equal(ok.status, 'passed', ok.evidence);
+
+      // Touch a non-allowed path → fail even if not in default protected set
+      await writeFile(path.join(dir, 'notes.txt'), 'extra\n', 'utf8');
+      const badExtra = await evaluateBaselineDiff({ workspaceDir: dir, gate });
+      assert.equal(badExtra.status, 'failed');
+      assert.match(String(badExtra.evidence), /baselineDiffPolicy\.allow|notes\.txt/i);
+
+      // Touch protected tests → fail under allow policy
+      await writeFile(
+        path.join(dir, 'tests', 'test_schema.py'),
+        'def test_ok():\n  assert False\n',
+        'utf8',
+      );
+      const badTest = await evaluateBaselineDiff({ workspaceDir: dir, gate });
+      assert.equal(badTest.status, 'failed');
+      assert.match(String(badTest.evidence), /test_schema|allow/i);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
