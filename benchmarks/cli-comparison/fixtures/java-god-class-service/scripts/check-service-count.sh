@@ -20,9 +20,9 @@ def clean_java(text: str) -> str:
     return re.sub(r"//.*$", "", text, flags=re.M)
 
 
-def method_body(src: str, method: str) -> str | None:
+def method_body(src: str, method: str, visibility: str = "public") -> str | None:
     match = re.search(
-        rf"\bpublic\s+\S+(?:\s*<[^>]+>)?\s+{re.escape(method)}\s*\([^)]*\)\s*\{{",
+        rf"\b{visibility}\s+\S+(?:\s*<[^>]+>)?\s+{re.escape(method)}\s*\([^)]*\)\s*\{{",
         src,
     )
     if not match:
@@ -36,6 +36,24 @@ def method_body(src: str, method: str) -> str | None:
             depth -= 1
         pos += 1
     return src[match.end():pos - 1] if depth == 0 else None
+
+
+def reachable_behavior(src: str, root_body: str) -> str:
+    bodies = [root_body]
+    pending = [root_body]
+    seen: set[str] = set()
+    keywords = {"if", "for", "while", "switch", "catch", "return", "throw", "new"}
+    while pending:
+        body = pending.pop()
+        for helper in re.findall(r"(?<![\w.])(?:this\.)?([A-Za-z_]\w*)\s*\(", body):
+            if helper in keywords or helper in seen:
+                continue
+            seen.add(helper)
+            helper_body = method_body(src, helper, "private")
+            if helper_body is not None:
+                bodies.append(helper_body)
+                pending.append(helper_body)
+    return "\n".join(bodies)
 
 
 contracts = {
@@ -62,10 +80,14 @@ for class_name, method_name in contracts.items():
         )
         raise SystemExit(31)
     service_body = method_body(service_src, method_name)
+    behavior = reachable_behavior(service_src, service_body or "")
     if (
         service_body is None
-        or "throw " not in service_body
-        or not re.search(r"\.put\s*\(", service_body)
+        or not re.search(r"\bthrow\b", behavior)
+        or not re.search(
+            r"\.(?:put|compute(?:IfAbsent|IfPresent)?|merge|replace|add|set|save|record|reserve|charge|send)\s*\(",
+            behavior,
+        )
     ):
         print(
             f"[SERVICE_COUNT] {class_name}.{method_name} must contain validation and state mutation",
