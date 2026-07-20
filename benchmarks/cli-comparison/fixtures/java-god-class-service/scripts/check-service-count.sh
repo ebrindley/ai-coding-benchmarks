@@ -132,7 +132,7 @@ for class_name, method_name in contracts.items():
         raise SystemExit(31)
     body = method_body(order_src, method_name)
     if body is None or not re.fullmatch(
-        rf"\s*{re.escape(field)}\.{method_name}\s*\([^;]+\)\s*;\s*",
+        rf"\s*(?:this\.)?{re.escape(field)}\.{method_name}\s*\([^;]+\)\s*;\s*",
         body,
     ):
         print(
