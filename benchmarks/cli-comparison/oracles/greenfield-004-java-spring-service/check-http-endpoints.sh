@@ -138,13 +138,13 @@ RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | head -n -1)
 
-if [[ "$HTTP_CODE" != "201" ]] && [[ "$HTTP_CODE" != "200" ]]; then
-  echo "ERROR: POST /books returned HTTP $HTTP_CODE (expected 201 or 200)"
+if [[ "$HTTP_CODE" != "201" ]]; then
+  echo "ERROR: POST /books returned HTTP $HTTP_CODE (expected 201)"
   echo "Response body: $BODY"
   exit 1
 fi
 
-echo "✓ POST /books creates book (HTTP $HTTP_CODE)"
+echo "✓ POST /books creates book (HTTP 201)"
 
 # Test 3: GET /books/{id} (retrieve created book)
 echo ""

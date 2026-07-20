@@ -63,7 +63,11 @@ describe('capability isolation: workspaces outside campaign tree', () => {
         campaignId: 'camp-safe-1',
         campaignDir: campaign,
         trialId: 'trial-1',
-        gitSpawn: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+        gitSpawn: async (args) => ({
+          exitCode: 0,
+          stdout: args[0] === 'rev-parse' ? `${'a'.repeat(40)}\n` : '',
+          stderr: '',
+        }),
       });
 
       assert.ok(created.workspaceDir);
@@ -847,7 +851,6 @@ describe('harness-owned git isolation (neutral config)', () => {
       runHarnessGit,
       buildHarnessGitArgv,
       buildHarnessGitEnv,
-      FIXTURE_BASELINE_REF,
     } = await import('../harness/workspace.js');
     const { collectBaselineChangedPaths, evaluateBaselineDiff } = await import(
       '../harness/gates.js'
@@ -856,7 +859,9 @@ describe('harness-owned git isolation (neutral config)', () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-fsmonitor-'));
     try {
       await writeFile(path.join(dir, 'main.js'), 'export default 0;\n', 'utf8');
-      await initWorkspaceGit(dir, { trialId: 'fsmon' });
+      const { baselineCommit } = await initWorkspaceGit(dir, {
+        trialId: 'fsmon',
+      });
 
       const marker = path.join(dir, 'FSMONITOR_RAN');
       const hook = path.join(dir, 'evil-fsmonitor.sh');
@@ -882,9 +887,11 @@ describe('harness-owned git isolation (neutral config)', () => {
       assert.equal(env.GIT_CONFIG_NOSYSTEM, '1');
       assert.ok(env.GIT_CONFIG_GLOBAL);
 
-      const collected = await collectBaselineChangedPaths(dir);
+      const collected = await collectBaselineChangedPaths(dir, {
+        baselineCommit,
+      });
       assert.equal(collected.ok, true, collected.error);
-      assert.equal(collected.baselineRef, FIXTURE_BASELINE_REF);
+      assert.equal(collected.baselineCommit, baselineCommit);
 
       // Marker must not exist — fsmonitor hook never ran.
       await assert.rejects(() => access(marker), /ENOENT/);
@@ -893,6 +900,7 @@ describe('harness-owned git isolation (neutral config)', () => {
       const gate = await evaluateBaselineDiff({
         workspaceDir: dir,
         gate: { gate: 'baseline-diff', order: 1 },
+        baselineCommit,
       });
       assert.equal(gate.status, 'passed');
       assert.notEqual(gate.classificationSignal, 'INFRA_FAIL');
@@ -901,24 +909,22 @@ describe('harness-owned git isolation (neutral config)', () => {
     }
   });
 
-  it('initWorkspaceGit tags immutable fixture baseline ref', async () => {
-    const {
-      initWorkspaceGit,
-      runHarnessGit,
-      FIXTURE_BASELINE_REF,
-    } = await import('../harness/workspace.js');
+  it('initWorkspaceGit returns a sealed fixture baseline commit', async () => {
+    const { initWorkspaceGit, runHarnessGit } = await import(
+      '../harness/workspace.js'
+    );
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-baseline-tag-'));
     try {
       await writeFile(path.join(dir, 'a.txt'), 'a\n', 'utf8');
       const init = await initWorkspaceGit(dir, { trialId: 'tag-check' });
-      assert.equal(init.baselineRef, FIXTURE_BASELINE_REF);
+      assert.match(init.baselineCommit, /^[0-9a-f]{40,64}$/);
       const rev = await runHarnessGit(dir, [
         'rev-parse',
         '--verify',
-        `${FIXTURE_BASELINE_REF}^{commit}`,
+        `${init.baselineCommit}^{commit}`,
       ]);
       assert.equal(rev.exitCode, 0);
-      assert.match(String(rev.stdout).trim(), /^[0-9a-f]{40}$/);
+      assert.equal(String(rev.stdout).trim(), init.baselineCommit);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

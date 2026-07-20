@@ -478,7 +478,11 @@ process.exit(0);
       const log = [];
       const gitSpawn = async (args) => {
         log.push([...args]);
-        return { exitCode: 0, stdout: '', stderr: '' };
+        return {
+          exitCode: 0,
+          stdout: args[0] === 'rev-parse' ? `${'a'.repeat(40)}\n` : '',
+          stderr: '',
+        };
       };
       const trialId = 'arm__task__r1__abc';
       const result = await initWorkspaceGit(dir, { trialId, gitSpawn });
@@ -1724,7 +1728,9 @@ process.exit(1);
         'assert.equal(1, 1);\n',
         'utf8',
       );
-      await initWorkspaceGit(dir, { trialId: 'commit-clean' });
+      const { baselineCommit } = await initWorkspaceGit(dir, {
+        trialId: 'commit-clean',
+      });
 
       // Tamper with a protected test, commit, leave working tree clean.
       await writeFile(
@@ -1748,6 +1754,7 @@ process.exit(1);
       const result = await evaluateBaselineDiff({
         workspaceDir: dir,
         gate: { gate: 'baseline-diff', order: 1, required: true },
+        baselineCommit,
       });
       assert.equal(result.status, 'failed');
       assert.equal(result.classificationSignal, 'FAIL');
@@ -1770,7 +1777,9 @@ process.exit(1);
         'utf8',
       );
       await writeFile(path.join(dir, 'index.js'), 'module.exports = 1;\n', 'utf8');
-      await initWorkspaceGit(dir, { trialId: 'pkg' });
+      const { baselineCommit } = await initWorkspaceGit(dir, {
+        trialId: 'pkg',
+      });
       assert.equal(isProtectedPath('package.json'), true);
 
       await writeFile(
@@ -1785,6 +1794,7 @@ process.exit(1);
       const result = await evaluateBaselineDiff({
         workspaceDir: dir,
         gate: { gate: 'baseline-diff', order: 1 },
+        baselineCommit,
       });
       assert.equal(result.status, 'failed');
       assert.match(String(result.evidence), /package\.json/i);
@@ -1806,7 +1816,9 @@ process.exit(1);
         'package store\n',
         'utf8',
       );
-      await initWorkspaceGit(dir, { trialId: 'root-test' });
+      const { baselineCommit } = await initWorkspaceGit(dir, {
+        trialId: 'root-test',
+      });
       assert.equal(isProtectedPath('store_test.go'), true);
       assert.equal(isProtectedPath('foo.test.js'), true);
       assert.equal(isProtectedPath('bar.spec.ts'), true);
@@ -1819,6 +1831,7 @@ process.exit(1);
       const result = await evaluateBaselineDiff({
         workspaceDir: dir,
         gate: { gate: 'baseline-diff', order: 1 },
+        baselineCommit,
       });
       assert.equal(result.status, 'failed');
       assert.match(String(result.evidence), /store_test\.go/i);
@@ -1844,7 +1857,9 @@ process.exit(1);
         'ok\n',
         'utf8',
       );
-      await initWorkspaceGit(dir, { trialId: 'rename' });
+      const { baselineCommit } = await initWorkspaceGit(dir, {
+        trialId: 'rename',
+      });
 
       // Rename protected test into a non-test path to evade naive path checks.
       const mv = await runHarnessGit(dir, [
@@ -1862,6 +1877,7 @@ process.exit(1);
       const result = await evaluateBaselineDiff({
         workspaceDir: dir,
         gate: { gate: 'baseline-diff', order: 1 },
+        baselineCommit,
       });
       assert.equal(result.status, 'failed');
       assert.match(
@@ -1889,7 +1905,9 @@ process.exit(1);
         'def test_ok():\n  assert True\n',
         'utf8',
       );
-      await initWorkspaceGit(dir, { trialId: 'sql-allow' });
+      const { baselineCommit } = await initWorkspaceGit(dir, {
+        trialId: 'sql-allow',
+      });
 
       const gate = {
         gate: 'baseline-diff',
@@ -1903,12 +1921,20 @@ process.exit(1);
         'CREATE TABLE t(id INT, name TEXT);\n',
         'utf8',
       );
-      const ok = await evaluateBaselineDiff({ workspaceDir: dir, gate });
+      const ok = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate,
+        baselineCommit,
+      });
       assert.equal(ok.status, 'passed', ok.evidence);
 
       // Touch a non-allowed path → fail even if not in default protected set
       await writeFile(path.join(dir, 'notes.txt'), 'extra\n', 'utf8');
-      const badExtra = await evaluateBaselineDiff({ workspaceDir: dir, gate });
+      const badExtra = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate,
+        baselineCommit,
+      });
       assert.equal(badExtra.status, 'failed');
       assert.match(String(badExtra.evidence), /baselineDiffPolicy\.allow|notes\.txt/i);
 
@@ -1918,7 +1944,11 @@ process.exit(1);
         'def test_ok():\n  assert False\n',
         'utf8',
       );
-      const badTest = await evaluateBaselineDiff({ workspaceDir: dir, gate });
+      const badTest = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate,
+        baselineCommit,
+      });
       assert.equal(badTest.status, 'failed');
       assert.match(String(badTest.evidence), /test_schema|allow/i);
     } finally {

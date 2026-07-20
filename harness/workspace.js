@@ -233,12 +233,6 @@ export async function cleanupExecutionWorkspace(workspaceDir, opts = {}) {
 }
 
 /**
- * Immutable fixture-baseline ref created at workspace init.
- * baseline-diff and changed-file counting compare against this, never mutable HEAD/status alone.
- */
-export const FIXTURE_BASELINE_REF = 'aicb-fixture-baseline';
-
-/**
  * Non-protected trial branch for in-place Poetic edits.
  * @param {string} trialId
  * @returns {string}
@@ -516,7 +510,7 @@ export async function copyFixtureTree(fixtureRoot, destRoot) {
  * @param {object} [opts]
  * @param {string} [opts.trialId]
  * @param {(args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }>} [opts.gitSpawn]
- * @returns {Promise<{ branch: string, gitArgvLog: string[][] }>}
+ * @returns {Promise<{ branch: string, baselineCommit: string, gitArgvLog: string[][] }>}
  */
 export async function initWorkspaceGit(workspaceDir, opts = {}) {
   const cwd = path.resolve(workspaceDir);
@@ -545,9 +539,6 @@ export async function initWorkspaceGit(workspaceDir, opts = {}) {
     ['config', 'core.fsmonitor', ''],
     ['add', '-A'],
     ['commit', '--allow-empty', '-m', 'aicb-harness fixture baseline'],
-    // Immutable authority for baseline-diff: tag the pristine fixture commit.
-    // Diff compares to this ref, not mutable HEAD or dirty-status alone.
-    ['tag', '-m', 'aicb fixture baseline', FIXTURE_BASELINE_REF],
   ]) {
     const result = await run(args);
     if (result.exitCode !== 0) {
@@ -555,6 +546,16 @@ export async function initWorkspaceGit(workspaceDir, opts = {}) {
         `git ${args[0]} failed in workspace (exit ${result.exitCode}): ${result.stderr || result.stdout}`,
       );
     }
+  }
+
+  const baseline = await run(['rev-parse', 'HEAD']);
+  const baselineCommit = String(baseline.stdout || '').trim();
+  if (baseline.exitCode !== 0 || !/^[0-9a-f]{40,64}$/i.test(baselineCommit)) {
+    throw new Error(
+      `git rev-parse HEAD failed after baseline commit (exit ${baseline.exitCode}): ${
+        baseline.stderr || baseline.stdout
+      }`,
+    );
   }
 
   const branch = trialBranchName(opts.trialId ?? 'trial');
@@ -566,7 +567,7 @@ export async function initWorkspaceGit(workspaceDir, opts = {}) {
     );
   }
 
-  return { branch, gitArgvLog, baselineRef: FIXTURE_BASELINE_REF };
+  return { branch, baselineCommit, gitArgvLog };
 }
 
 /**
@@ -583,7 +584,7 @@ export async function initWorkspaceGit(workspaceDir, opts = {}) {
  * @param {string} [opts.campaignDir] - when set, assert workspace is outside campaign tree
  * @param {string} opts.trialId - unique trial identifier
  * @param {(args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }>} [opts.gitSpawn]
- * @returns {Promise<{ workspaceDir: string, fixtureHash: string, branch: string, executionRoot: string }>}
+ * @returns {Promise<{ workspaceDir: string, fixtureHash: string, branch: string, baselineCommit: string, executionRoot: string }>}
  */
 export async function createIsolatedWorkspace({
   fixtureDir,
@@ -647,6 +648,7 @@ export async function createIsolatedWorkspace({
     workspaceDir,
     fixtureHash,
     branch: git.branch,
+    baselineCommit: git.baselineCommit,
     executionRoot: parent,
   };
 }

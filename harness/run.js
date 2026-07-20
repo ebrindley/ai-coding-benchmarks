@@ -936,8 +936,18 @@ export async function runCampaign(opts) {
       if (typeof peers.clearTrialDurableState === 'function') {
         try {
           await peers.clearTrialDurableState(campaignDir, t.id);
-        } catch {
-          /* best-effort clear; still recover to pending */
+        } catch (err) {
+          return {
+            ok: false,
+            stage: 'resume',
+            campaignDir,
+            manifest,
+            errors: [
+              `failed to clear stale durable state for ${t.id}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ],
+          };
         }
       }
       peers.updateTrial(manifest, t.id, {
@@ -985,18 +995,24 @@ export async function runCampaign(opts) {
         try {
           await peers.clearTrialDurableState(campaignDir, trial.id);
         } catch (err) {
+          const message = `failed to clear stale durable state before re-run: ${
+            err instanceof Error ? err.message : String(err)
+          }`;
           peers.updateTrial(manifest, trial.id, {
-            state: 'failed',
-            classification: 'INFRA_FAIL',
-            classificationReason: `failed to clear stale durable state before re-run: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-            finishedAt: new Date().toISOString(),
+            state: 'pending',
+            error: message,
+            classification: null,
           });
           await peers.saveManifest(campaignDir, manifest);
-          executed += 1;
-          pending = manifest.trials.filter((t) => t.state === 'pending');
-          continue;
+          return {
+            ok: false,
+            stage: 'execution',
+            campaignDir,
+            manifest,
+            executed,
+            remaining: manifest.trials.filter((t) => t.state === 'pending').length,
+            errors: [message],
+          };
         }
       }
       peers.updateTrial(manifest, trial.id, {
@@ -1009,6 +1025,8 @@ export async function runCampaign(opts) {
       let trialUpdate = {};
       /** @type {boolean} */
       let durableWriteOk = false;
+      /** @type {string | null} */
+      let durableWriteError = null;
       /** @type {string | null} */
       let trialWorkspaceDir = null;
       /** @type {string | null} */
@@ -1202,6 +1220,7 @@ export async function runCampaign(opts) {
         const gateResults = await peers.runGates({
           gates: task.eligibilityGates || [],
           workspaceDir: workspace.workspaceDir,
+          baselineCommit: workspace.baselineCommit,
           oracleRoot,
           confinement,
           task,
@@ -1225,6 +1244,7 @@ export async function runCampaign(opts) {
           );
           changedFileCount = await countMeaningfulBaselineChangedFiles(
             workspace.workspaceDir,
+            { baselineCommit: workspace.baselineCommit },
           );
         } catch {
           changedFileCount = null;
@@ -1362,9 +1382,10 @@ export async function runCampaign(opts) {
           (trialUpdate.state === 'completed' || trialUpdate.state === 'failed');
         if (classifiedAlready) {
           durableWriteOk = false;
+          durableWriteError = `durable result write failed: ${message}`;
           trialUpdate = {
             state: 'pending',
-            error: `durable result write failed; recovered to pending: ${message}`,
+            error: durableWriteError,
             classification: null,
             classificationReason: undefined,
             finishedAt: undefined,
@@ -1420,11 +1441,12 @@ export async function runCampaign(opts) {
             durableWriteOk = true;
           } catch (writeErr) {
             durableWriteOk = false;
+            durableWriteError = `durable result write failed: ${
+              writeErr instanceof Error ? writeErr.message : String(writeErr)
+            } (prior: ${message})`;
             trialUpdate = {
               state: 'pending',
-              error: `durable result write failed; recovered to pending: ${
-                writeErr instanceof Error ? writeErr.message : String(writeErr)
-              } (prior: ${message})`,
+              error: durableWriteError,
               classification: null,
               classificationReason: undefined,
               finishedAt: undefined,
@@ -1466,8 +1488,10 @@ export async function runCampaign(opts) {
         if (typeof peers.clearTrialDurableState === 'function') {
           try {
             await peers.clearTrialDurableState(campaignDir, trial.id);
-          } catch {
-            /* best-effort */
+          } catch (err) {
+            durableWriteError = `${durableWriteError || 'durable result write failed'}; partial state cleanup failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`;
           }
         }
         peers.updateTrial(manifest, trial.id, {
@@ -1484,6 +1508,17 @@ export async function runCampaign(opts) {
       executed += 1;
       pending = manifest.trials.filter((t) => t.state === 'pending');
       log(`trial ${trial.id} → ${trialUpdate.classification || trialUpdate.state}`);
+      if (durableWriteError) {
+        return {
+          ok: false,
+          stage: 'result-write',
+          campaignDir,
+          manifest,
+          executed,
+          remaining: pending.length,
+          errors: [durableWriteError],
+        };
+      }
     }
 
     const trialResults = [];

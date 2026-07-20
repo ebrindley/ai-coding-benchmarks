@@ -53,10 +53,7 @@ import {
   spawnControlled,
 } from './invokers/spawn-controlled.js';
 import { isPathInside, PathEscapeError, resolveUnder } from './paths.js';
-import {
-  FIXTURE_BASELINE_REF,
-  runHarnessGit,
-} from './workspace.js';
+import { runHarnessGit } from './workspace.js';
 
 /** Gates that are structural / non-command-executable without a command field. */
 const STRUCTURAL_GATES = new Set(['baseline-diff', 'requirements']);
@@ -1291,23 +1288,28 @@ export function countMeaningfulChangedFiles(porcelainText) {
  *
  * @param {string} workspaceDir
  * @param {{
- *   baselineRef?: string,
+ *   baselineCommit: string,
  *   gitSpawn?: (args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }>,
  * }} [opts]
- * @returns {Promise<{ ok: true, paths: string[], baselineRef: string } | { ok: false, error: string, paths?: string[] }>}
+ * @returns {Promise<{ ok: true, paths: string[], baselineCommit: string } | { ok: false, error: string, paths?: string[] }>}
  */
 export async function collectBaselineChangedPaths(workspaceDir, opts = {}) {
   const cwd = path.resolve(workspaceDir);
-  const baselineRef =
-    typeof opts.baselineRef === 'string' && opts.baselineRef.trim()
-      ? opts.baselineRef.trim()
-      : FIXTURE_BASELINE_REF;
+  const baselineCommit =
+    typeof opts.baselineCommit === 'string' ? opts.baselineCommit.trim() : '';
+  if (!/^[0-9a-f]{40,64}$/i.test(baselineCommit)) {
+    return {
+      ok: false,
+      error: 'sealed fixture baseline commit is missing or invalid',
+    };
+  }
   const gitOpts = opts.gitSpawn ? { gitSpawn: opts.gitSpawn } : {};
 
-  // Confirm baseline ref resolves (immutable authority present).
+  // Confirm the harness-sealed object id still resolves. The provider may
+  // rewrite refs in workspace .git, but cannot redirect this object id.
   const rev = await runHarnessGit(
     cwd,
-    ['rev-parse', '--verify', `${baselineRef}^{commit}`],
+    ['rev-parse', '--verify', `${baselineCommit}^{commit}`],
     gitOpts,
   );
   if (rev.exitCode !== 0) {
@@ -1316,7 +1318,7 @@ export async function collectBaselineChangedPaths(workspaceDir, opts = {}) {
       error:
         rev.stderr ||
         rev.stdout ||
-        `fixture baseline ref unavailable: ${baselineRef}`,
+        `fixture baseline commit unavailable: ${baselineCommit}`,
     };
   }
 
@@ -1330,7 +1332,7 @@ export async function collectBaselineChangedPaths(workspaceDir, opts = {}) {
       '-z',
       '-M',
       '--find-renames',
-      baselineRef,
+      baselineCommit,
       '--',
     ],
     gitOpts,
@@ -1359,13 +1361,13 @@ export async function collectBaselineChangedPaths(workspaceDir, opts = {}) {
   }
 
   const paths = collectChangedPathsFromGitOutputs(diff.stdout, untracked.stdout);
-  return { ok: true, paths, baselineRef };
+  return { ok: true, paths, baselineCommit };
 }
 
 /**
  * Count meaningful baseline-relative changes in a workspace (harness-owned git).
  * @param {string} workspaceDir
- * @param {{ baselineRef?: string, gitSpawn?: Function }} [opts]
+ * @param {{ baselineCommit: string, gitSpawn?: Function }} [opts]
  * @returns {Promise<number | null>} null on helper failure (caller may fail closed)
  */
 export async function countMeaningfulBaselineChangedFiles(workspaceDir, opts = {}) {
@@ -1413,9 +1415,14 @@ export function evaluateBaselineDiffPolicy(changedPaths, gate) {
  * @param {object} opts
  * @param {string} opts.workspaceDir
  * @param {Record<string, unknown>} opts.gate
+ * @param {string} opts.baselineCommit harness-sealed pristine fixture commit
  * @returns {Promise<GateResult>}
  */
-export async function evaluateBaselineDiff({ workspaceDir, gate }) {
+export async function evaluateBaselineDiff({
+  workspaceDir,
+  gate,
+  baselineCommit,
+}) {
   const name = typeof gate.gate === 'string' ? gate.gate : 'baseline-diff';
   const order = typeof gate.order === 'number' ? gate.order : 1;
   const required = gate.required === undefined ? true : Boolean(gate.required);
@@ -1423,7 +1430,9 @@ export async function evaluateBaselineDiff({ workspaceDir, gate }) {
 
   let collected;
   try {
-    collected = await collectBaselineChangedPaths(workspaceDir);
+    collected = await collectBaselineChangedPaths(workspaceDir, {
+      baselineCommit,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -1487,7 +1496,7 @@ export async function evaluateBaselineDiff({ workspaceDir, gate }) {
     status: 'passed',
     exitCode: 0,
     timedOut: false,
-    evidence: `baseline-diff ok vs ${collected.baselineRef}; ${changed.length} meaningful changed path(s)`,
+    evidence: `baseline-diff ok vs sealed fixture commit; ${changed.length} meaningful changed path(s)`,
     classificationSignal: 'PASS',
     check,
   };
@@ -1862,6 +1871,7 @@ export async function resolveCommandlessOraclePath(oracleRoot, oraclePathRel) {
  *
  * @param {object} opts
  * @param {string} opts.workspaceDir
+ * @param {string} [opts.baselineCommit] harness-sealed pristine fixture commit
  * @param {Record<string, unknown>} opts.gate
  * @param {string} [opts.oracleRoot]
  * @param {ConfinementInfo} opts.confinement
@@ -2632,6 +2642,7 @@ export function resolveNetworkAllowed(task) {
 export async function runGates({
   gates,
   workspaceDir,
+  baselineCommit,
   oracleRoot,
   confinement: confinementOpt,
   timeoutMs,
@@ -2701,6 +2712,7 @@ export async function runGates({
         await evaluateBaselineDiff({
           workspaceDir: path.resolve(workspaceDir),
           gate,
+          baselineCommit,
         }),
       );
       continue;

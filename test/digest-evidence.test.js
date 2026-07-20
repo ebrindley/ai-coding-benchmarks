@@ -1445,7 +1445,7 @@ describe('digest leaf swap / no-follow identity', () => {
     const {
       clearTrialDurableState,
       quarantineRawOutput,
-      tryAdoptDurableTrialResult,
+      readTrialResult,
     } = await import('../harness/results.js');
     const { writeCompleteTrial, completeManifestTrial } = await import(
       './helpers/complete-trial.js'
@@ -1476,16 +1476,15 @@ describe('digest leaf swap / no-follow identity', () => {
         { manifestTrial },
       );
 
-      const before = await tryAdoptDurableTrialResult(campaign, manifestTrial);
-      assert.equal(before.ok, true, before.reason);
+      const before = await readTrialResult(campaign, trialId);
+      assert.equal(before.id, trialId);
 
       const cleared = await clearTrialDurableState(campaign, trialId);
       assert.ok(cleared.cleared.includes('results'));
       assert.ok(cleared.cleared.includes('raw'));
       assert.ok(cleared.cleared.includes('artifacts'));
 
-      const after = await tryAdoptDurableTrialResult(campaign, manifestTrial);
-      assert.equal(after.ok, false);
+      await assert.rejects(() => readTrialResult(campaign, trialId));
     } finally {
       await rm(campaign, { recursive: true, force: true });
     }

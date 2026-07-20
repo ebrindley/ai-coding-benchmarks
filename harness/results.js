@@ -768,12 +768,8 @@ const ADOPTABLE_RESULT_STATES = new Set(['completed', 'failed']);
  * - result.json exists and passes schema
  * - identity binds exactly to the frozen manifest trial row
  * - digests.resultDigest matches the recomputed final-record digest
+ * - raw/artifact/fixture evidence passes the normal campaign verifier
  * - result.state is completed|failed
- *
- * Full raw/artifact byte re-verify is best-effort for adoption diagnostics but
- * identity + resultDigest are the hard gates (result was written only after
- * those were stamped). When rawEvidenceUnavailable is set, still adopt if
- * identity+resultDigest hold so infra-failure crash windows resume cleanly.
  *
  * @param {string} campaignDir
  * @param {object} manifestTrial frozen trial row from the campaign manifest
@@ -846,6 +842,21 @@ export async function tryAdoptDurableTrialResult(campaignDir, manifestTrial) {
     ) {
       return { ok: false, reason: 'fixtureDigest mismatch vs frozen authority' };
     }
+  }
+
+  const evidence = await verifyCampaignEvidenceDigests(
+    campaignDir,
+    [{ ...manifestTrial, state }],
+    [result],
+    { failOnUnavailable: true },
+  );
+  if (!evidence.ok || evidence.verified !== 1) {
+    return {
+      ok: false,
+      reason:
+        evidence.error ||
+        'durable result evidence is unavailable or failed verification',
+    };
   }
 
   return {

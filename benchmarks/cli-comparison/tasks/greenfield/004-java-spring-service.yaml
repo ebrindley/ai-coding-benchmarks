@@ -42,16 +42,10 @@ expectedOutcome:
       artifactRef: src/test/java/com/example/BookControllerTest.java::getBookById
 
     - id: create-book
-      description: POST /books creates book and returns exactly HTTP 201 (not 200/generic 2xx)
+      description: POST /books creates book and returns 201
       substantiation: test
       evidenceGate: tests
       artifactRef: src/test/java/com/example/BookControllerTest.java::createBook
-
-    - id: create-book-status-201
-      description: POST /books implementation and createBook test require HTTP 201
-      substantiation: static
-      evidenceGate: post-status-201
-      artifactRef: scripts/check-post-returns-201.sh
 
     - id: delete-book
       description: DELETE /books/{id} removes book
@@ -111,20 +105,14 @@ eligibilityGates:
     expectedExitCode: 0
     order: 5
 
-  - gate: post-status-201
-    check: POST /books requires exactly HTTP 201 in controller and createBook test
-    command: bash scripts/check-post-returns-201.sh
-    expectedExitCode: 0
-    order: 6
-
   - gate: oracle
     check: External oracle validates HTTP endpoints end-to-end
     oraclePath: greenfield-004-java-spring-service/check-http-endpoints.sh
-    order: 7
+    order: 6
 
   - gate: requirements
     check: All must_have items substantiated by test results
-    order: 8
+    order: 7
 
 networkPolicy:
   allowed: true

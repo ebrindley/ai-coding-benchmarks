@@ -29,12 +29,11 @@ public class BookControllerTest {
 
   @Test
   void createBook() throws Exception {
-    // Contract: POST /books must return exactly HTTP 201 Created (not 200/2xx generic).
     mvc.perform(
             post("/books")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"id\":1,\"title\":\"Test Book\",\"author\":\"Test Author\"}"))
-        .andExpect(status().is(201))
+        .andExpect(status().isCreated())
         .andExpect(jsonPath("$.id", is(1)))
         .andExpect(jsonPath("$.title", is("Test Book")));
   }
@@ -45,7 +44,7 @@ public class BookControllerTest {
             post("/books")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"id\":1,\"title\":\"Test Book\",\"author\":\"Test Author\"}"))
-        .andExpect(status().is(201));
+        .andExpect(status().isCreated());
 
     mvc.perform(get("/books/1"))
         .andExpect(status().isOk())
@@ -59,7 +58,7 @@ public class BookControllerTest {
             post("/books")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"id\":1,\"title\":\"Test Book\",\"author\":\"Test Author\"}"))
-        .andExpect(status().is(201));
+        .andExpect(status().isCreated());
 
     mvc.perform(delete("/books/1")).andExpect(status().isNoContent());
     mvc.perform(get("/books/1")).andExpect(status().isNotFound());

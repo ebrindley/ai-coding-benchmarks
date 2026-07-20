@@ -22,6 +22,37 @@ import { spawnSync } from 'node:child_process';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CORPUS = path.join(REPO, 'benchmarks');
 
+async function writeAdoptableTrial(campaignDir, trialId, partial, manifestTrial) {
+  const {
+    quarantineRawOutput,
+    computeArtifactDigest,
+    buildTrialDigests,
+  } = await import('../harness/results.js');
+  const { writeCompleteTrial } = await import('./helpers/complete-trial.js');
+
+  const raw = await quarantineRawOutput(campaignDir, trialId, {
+    stdout: 'provider stdout\n',
+    stderr: '',
+  });
+  const artifactDir = path.join(campaignDir, 'artifacts', trialId);
+  await mkdir(artifactDir, { recursive: true });
+  await writeFile(path.join(artifactDir, 'output.json'), '{"ok":true}\n', 'utf8');
+  const artifactDigest = await computeArtifactDigest(artifactDir);
+  return writeCompleteTrial(
+    campaignDir,
+    trialId,
+    {
+      ...partial,
+      artifactDir,
+      digests: buildTrialDigests({
+        artifactDigest,
+        ...raw.digests,
+      }),
+    },
+    { manifestTrial },
+  );
+}
+
 describe('lock + atomic resume', () => {
   it('acquire/release lock exclusivity', async () => {
     const { acquireLock, releaseLock, readLock } = await import('../harness/lock.js');
@@ -1067,7 +1098,7 @@ describe('lock acquire under grandparent swap / pinned boundary', () => {
       tryAdoptDurableTrialResult,
       clearTrialDurableState,
     } = await import('../harness/results.js');
-    const { writeCompleteTrial, completeManifestTrial } = await import(
+    const { completeManifestTrial } = await import(
       './helpers/complete-trial.js'
     );
 
@@ -1086,7 +1117,7 @@ describe('lock acquire under grandparent swap / pinned boundary', () => {
       });
 
       // Simulate crash after durable result write, before manifest terminal update.
-      const written = await writeCompleteTrial(
+      const written = await writeAdoptableTrial(
         dir,
         trialId,
         {
@@ -1098,9 +1129,8 @@ describe('lock acquire under grandparent swap / pinned boundary', () => {
           requestedModel: 'm1',
           state: 'completed',
           classification: 'PASS',
-          digests: { rawEvidenceUnavailable: true },
         },
-        { manifestTrial },
+        manifestTrial,
       );
 
       const adopted = await tryAdoptDurableTrialResult(dir, {
@@ -1143,7 +1173,7 @@ describe('lock acquire under grandparent swap / pinned boundary', () => {
       clearTrialDurableState,
       readTrialResult,
     } = await import('../harness/results.js');
-    const { writeCompleteTrial, completeManifestTrial } = await import(
+    const { completeManifestTrial } = await import(
       './helpers/complete-trial.js'
     );
 
@@ -1154,15 +1184,14 @@ describe('lock acquire under grandparent swap / pinned boundary', () => {
         id: trialId,
         state: 'running',
       });
-      await writeCompleteTrial(
+      await writeAdoptableTrial(
         dir,
         trialId,
         {
           state: 'completed',
           classification: 'PASS',
-          digests: { rawEvidenceUnavailable: true },
         },
-        { manifestTrial },
+        manifestTrial,
       );
 
       // Tamper resultDigest → adoption fails closed.
@@ -1182,15 +1211,14 @@ describe('lock acquire under grandparent swap / pinned boundary', () => {
         /ENOENT|unreadable|fail|required|schema/i,
       );
 
-      const fresh = await writeCompleteTrial(
+      const fresh = await writeAdoptableTrial(
         dir,
         trialId,
         {
           state: 'completed',
           classification: 'FAIL',
-          digests: { rawEvidenceUnavailable: true },
         },
-        { manifestTrial },
+        manifestTrial,
       );
       const ok = await tryAdoptDurableTrialResult(dir, manifestTrial);
       assert.equal(ok.ok, true, ok.reason);

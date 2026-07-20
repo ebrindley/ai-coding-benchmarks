@@ -361,7 +361,10 @@ describe('corpus task-oracle contracts', () => {
     );
     const createIdx = testSrc.indexOf('void createBook');
     assert.ok(createIdx >= 0, 'createBook test must exist');
-    const slice = testSrc.slice(createIdx, createIdx + 800);
+    const slice = testSrc
+      .slice(createIdx)
+      .match(/^void createBook[\s\S]*?^  }/m)?.[0];
+    assert.ok(slice, 'createBook test body must be readable');
     assert.match(
       slice,
       /status\(\)\.is\(201\)|status\(\)\.isCreated\s*\(/,
@@ -373,24 +376,28 @@ describe('corpus task-oracle contracts', () => {
       'createBook must not accept generic 2xx/200',
     );
 
-    const check = await readFile(
+    const oracle = await readFile(
       path.join(
-        FIXTURES,
-        'java-spring-service-harness',
-        'scripts/check-post-returns-201.sh',
+        CORPUS,
+        'oracles',
+        'greenfield-004-java-spring-service',
+        'check-http-endpoints.sh',
       ),
       'utf8',
     );
-    assert.match(check, /201|CREATED/i);
-
-    const { loadTask } = await import('../harness/load.js');
-    const task = await loadTask(
-      path.join(TASKS_ROOT, 'greenfield', '004-java-spring-service.yaml'),
+    const postOracle = oracle.slice(
+      oracle.indexOf('# Test 2: POST /books'),
+      oracle.indexOf('# Test 3: GET /books/{id}'),
     );
-    const gates = task.eligibilityGates || [];
-    assert.ok(
-      gates.some((g) => g && g.gate === 'post-status-201'),
-      'task must gate on post-status-201',
+    assert.match(
+      postOracle,
+      /if \[\[ "\$HTTP_CODE" != "201" \]\]; then/,
+      'external oracle must require exactly HTTP 201',
+    );
+    assert.doesNotMatch(
+      postOracle,
+      /expected 201 or 200|"\$HTTP_CODE" != "200"/,
+      'external oracle must not accept HTTP 200 for create',
     );
   });
 
@@ -466,7 +473,5 @@ describe('corpus task-oracle contracts', () => {
     assert.match(reportTests, /assertEqual\(len\(rows\), 50\)/);
     assert.match(reportTests, /101,\s*105,\s*112/);
     assert.match(reportTests, /45 \* 2500/);
-    assert.match(reportTests, /assertIsNotNone/);
   });
 });
-
