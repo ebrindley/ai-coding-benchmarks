@@ -161,12 +161,21 @@ class TestSchema(unittest.TestCase):
         conn.execute("PRAGMA foreign_keys=ON;")
         try:
             conn.executescript(sql)
-            conn.execute("INSERT INTO customers VALUES (9001, 'Sentinel Customer')")
-            conn.execute("INSERT INTO products VALUES (9001, 'Sentinel Product', 1234)")
             conn.execute(
-                "INSERT INTO orders VALUES (9001, 9001, '2030-01-01T00:00:00Z')"
+                "INSERT INTO customers(id, name) VALUES (9001, 'Sentinel Customer')"
             )
-            conn.execute("INSERT INTO order_items VALUES (9001, 9001, 9001, 2)")
+            conn.execute(
+                "INSERT INTO products(id, name, price_cents) "
+                "VALUES (9001, 'Sentinel Product', 1234)"
+            )
+            conn.execute(
+                "INSERT INTO orders(id, customer_id, order_date) "
+                "VALUES (9001, 9001, '2030-01-01T00:00:00Z')"
+            )
+            conn.execute(
+                "INSERT INTO order_items(id, order_id, product_id, quantity) "
+                "VALUES (9001, 9001, 9001, 2)"
+            )
             conn.commit()
 
             conn.executescript(sql)

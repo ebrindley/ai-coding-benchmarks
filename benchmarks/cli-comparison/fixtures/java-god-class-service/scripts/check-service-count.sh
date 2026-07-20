@@ -61,6 +61,17 @@ for class_name, method_name in contracts.items():
             file=sys.stderr,
         )
         raise SystemExit(31)
+    service_body = method_body(service_src, method_name)
+    if (
+        service_body is None
+        or "throw " not in service_body
+        or not re.search(r"\.put\s*\(", service_body)
+    ):
+        print(
+            f"[SERVICE_COUNT] {class_name}.{method_name} must contain validation and state mutation",
+            file=sys.stderr,
+        )
+        raise SystemExit(31)
     substantive = [
         line.strip()
         for line in service_src.splitlines()
@@ -98,8 +109,8 @@ for class_name, method_name in contracts.items():
         print(f"[SERVICE_COUNT] injected {field} is not assigned", file=sys.stderr)
         raise SystemExit(31)
     body = method_body(order_src, method_name)
-    if body is None or not re.search(
-        rf"\b{re.escape(field)}\.{method_name}\s*\(",
+    if body is None or not re.fullmatch(
+        rf"\s*{re.escape(field)}\.{method_name}\s*\([^;]+\)\s*;\s*",
         body,
     ):
         print(

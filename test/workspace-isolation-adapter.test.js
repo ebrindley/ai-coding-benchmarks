@@ -935,7 +935,9 @@ describe('harness-owned git isolation (neutral config)', () => {
     const { initWorkspaceGit, runHarnessGit } = await import(
       '../harness/workspace.js'
     );
-    const { collectBaselineChangedPaths } = await import('../harness/gates.js');
+    const { collectBaselineChangedPaths, evaluateBaselineDiff } = await import(
+      '../harness/gates.js'
+    );
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-clean-filter-'));
     try {
       await mkdir(path.join(dir, 'tests'), { recursive: true });
@@ -969,6 +971,13 @@ describe('harness-owned git isolation (neutral config)', () => {
       });
       assert.equal(collected.ok, false);
       assert.match(collected.error, /unsafe repository-local git config|filter\.hide/i);
+      const result = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate: { gate: 'baseline-diff', order: 1 },
+        baselineCommit,
+      });
+      assert.equal(result.status, 'failed');
+      assert.equal(result.classificationSignal, 'FAIL');
       await assert.rejects(() => access(marker), /ENOENT/);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -1014,7 +1023,9 @@ describe('harness-owned git isolation (neutral config)', () => {
     const { initWorkspaceGit, runHarnessGit } = await import(
       '../harness/workspace.js'
     );
-    const { collectBaselineChangedPaths } = await import('../harness/gates.js');
+    const { collectBaselineChangedPaths, evaluateBaselineDiff } = await import(
+      '../harness/gates.js'
+    );
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-index-flags-'));
     try {
       await mkdir(path.join(dir, 'tests'), { recursive: true });
@@ -1033,6 +1044,13 @@ describe('harness-owned git isolation (neutral config)', () => {
         });
         assert.equal(collected.ok, false);
         assert.match(collected.error, /index concealment flags|guard\.test\.js/i);
+        const result = await evaluateBaselineDiff({
+          workspaceDir: dir,
+          gate: { gate: 'baseline-diff', order: 1 },
+          baselineCommit,
+        });
+        assert.equal(result.status, 'failed');
+        assert.equal(result.classificationSignal, 'FAIL');
 
         const clear =
           flag === '--assume-unchanged'

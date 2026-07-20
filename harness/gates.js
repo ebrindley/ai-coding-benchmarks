@@ -1319,7 +1319,10 @@ export function countMeaningfulChangedFiles(porcelainText) {
  *   baselineCommit: string,
  *   gitSpawn?: (args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }>,
  * }} [opts]
- * @returns {Promise<{ ok: true, paths: string[], baselineCommit: string } | { ok: false, error: string, paths?: string[] }>}
+ * @returns {Promise<
+ *   { ok: true, paths: string[], baselineCommit: string } |
+ *   { ok: false, error: string, paths?: string[], workspaceViolation?: boolean }
+ * >}
  */
 export async function collectBaselineChangedPaths(workspaceDir, opts = {}) {
   const cwd = path.resolve(workspaceDir);
@@ -1363,6 +1366,7 @@ export async function collectBaselineChangedPaths(workspaceDir, opts = {}) {
     return {
       ok: false,
       error: `unsafe repository-local git config: ${unsafeConfigKeys.join(', ')}`,
+      workspaceViolation: true,
     };
   }
 
@@ -1395,6 +1399,7 @@ export async function collectBaselineChangedPaths(workspaceDir, opts = {}) {
       ok: false,
       error: `git index concealment flags present: ${concealedPaths.join(', ')}`,
       paths: concealedPaths,
+      workspaceViolation: true,
     };
   }
 
@@ -1557,6 +1562,21 @@ export async function evaluateBaselineDiff({
   }
 
   if (!collected.ok) {
+    if (collected.workspaceViolation) {
+      return {
+        gate: name,
+        order,
+        required,
+        command: null,
+        expectedExitCode: 0,
+        status: 'failed',
+        exitCode: 1,
+        timedOut: false,
+        evidence: collected.error,
+        classificationSignal: 'FAIL',
+        check,
+      };
+    }
     return {
       gate: name,
       order,
