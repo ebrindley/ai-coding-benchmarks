@@ -34,8 +34,24 @@ Two practical implications:
 
 ## The composite score and sub-scores
 
-Scoring is deliberately **simple and equal-weight**, so it is easy to compute
-and easy to interpret (no hidden weighting math):
+**Automated scoring is binary eligibility-gate classification.** The harness
+records each trial as PASS / FAIL / NO_OP / INFRA_FAIL / TIMEOUT from required
+gate outcomes only. There is no weighted multi-axis scorer, no partial credit
+from YAML weight maps, and no `toolEvidencePolicy` evaluation path.
+
+Task YAML may still document historical or aspirational blocks — treat them as
+**non-operational**:
+
+| YAML field | Operational? | What the harness actually uses |
+|---|---|---|
+| `eligibilityGates` (+ `expectedOutcome` gate bindings) | **Yes** | Binary gate run + classification |
+| `networkPolicy.allowed` | **Yes** | Only this boolean is consumed (network under confinement) |
+| `scoring` (weights / evidence lists) | **No** | Not consumed; omit on new tasks |
+| `toolEvidencePolicy` | **No** | Not consumed; omit on new tasks |
+| Other `networkPolicy.*` (`provenanceRequired`, `record`, …) | **No** | Ignored |
+
+Suite-level analysis is deliberately **simple and equal-weight** over those
+binary task outcomes (no hidden weighting math):
 
 - **Task score** = pass/fail. A task passes only when every required
   eligibility gate passes (build/lint/typecheck/tests + anti-gaming + oracle

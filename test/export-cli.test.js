@@ -29,7 +29,9 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
  * @param {string} [opts.trialId]
  * @param {object} [opts.resultExtras]
  * @param {string} [opts.stdout]
- * @returns {Promise<{ trialId: string, artDir: string }>}
+ * @param {object} [opts.inputDigests]
+ * @param {object} [opts.experiment]
+ * @returns {Promise<{ trialId: string, artDir: string, frozen: object }>}
  */
 async function seedVerifiedCampaign(campaign, opts = {}) {
   const {
@@ -92,23 +94,93 @@ async function seedVerifiedCampaign(campaign, opts = {}) {
   );
 
   const now = new Date().toISOString();
+  /** @type {Record<string, unknown>} */
+  const manifestBody = {
+    campaignId: 'export-camp',
+    schemaVersion: 1,
+    status: 'completed',
+    experimentId: 'exp-export',
+    lock: { held: false, owner: null },
+    host: { user: 'localuser', platform: 'darwin' },
+    trials: [frozen],
+    createdAt: now,
+    updatedAt: now,
+  };
+  if (opts.inputDigests != null) {
+    manifestBody.inputDigests = opts.inputDigests;
+  }
+  if (opts.experiment != null) {
+    manifestBody.experiment = opts.experiment;
+  }
   await writeFile(
     path.join(campaign, 'manifest.json'),
-    JSON.stringify({
-      campaignId: 'export-camp',
-      schemaVersion: 1,
-      status: 'completed',
-      experimentId: 'exp-export',
-      lock: { held: false, owner: null },
-      host: { user: 'localuser', platform: 'darwin' },
-      trials: [frozen],
-      createdAt: now,
-      updatedAt: now,
-    }),
+    JSON.stringify(manifestBody),
     'utf8',
   );
 
   return { trialId, artDir, frozen };
+}
+
+/** @returns {Record<string, string | number>} */
+function sampleInputDigests(extra = {}) {
+  return {
+    schemaVersion: 1,
+    experiment: 'a'.repeat(64),
+    suite: 'b'.repeat(64),
+    tasks: 'c'.repeat(64),
+    harness: 'd'.repeat(64),
+    fixtures: 'e'.repeat(64),
+    oracles: 'f'.repeat(64),
+    ...extra,
+  };
+}
+
+/** @returns {Record<string, unknown>} */
+function sampleFrozenExperiment(extra = {}) {
+  return {
+    id: 'exp-export',
+    schemaVersion: 1,
+    corpusRoot: '/Users/localuser/secret-corpus',
+    suiteId: 'cli-comparison',
+    suitePath: '/Users/localuser/secret-corpus/cli-comparison/suite.yaml',
+    taskIds: ['greenfield-003-js-event-emitter', 'brownfield-002-js-rate-limiter-bug'],
+    repetitions: 3,
+    seed: 'export-seed-1',
+    timeoutMs: 900000,
+    metadata: {
+      purpose: 'must-not-export free-form',
+      apiKey: 'sk-leaked-credential',
+      prompt: 'secret system prompt must not export',
+    },
+    arms: [
+      {
+        name: 'arm-a',
+        provider: 'provider-a',
+        model: 'model-a',
+        invocationPath: 'poetic-adapter',
+        sandboxMode: 'read-only',
+        promptTransport: 'stdin',
+        command: '/Users/localuser/bin/evil-cli',
+        args: ['--cwd', '/Users/localuser/secret-workspace', '--token', 'SECRET_TOKEN'],
+        envAllowlist: ['OPENAI_API_KEY', 'DATABASE_URL'],
+        posture: {
+          secretPath: '/Users/localuser/.config/creds',
+          prompt: 'arm posture prompt leak',
+        },
+        unknownArmField: 'drop-me',
+        env: { OPENAI_API_KEY: 'sk-live-must-not-export' },
+      },
+      {
+        name: 'arm-b',
+        provider: 'provider-b',
+        model: 'model-b',
+        invocationPath: 'native-cli',
+        sandboxMode: null,
+      },
+    ],
+    unknownTopField: { nested: 'drop' },
+    ...extra,
+  };
 }
 
 describe('export + quarantine + cli', () => {
@@ -175,6 +247,231 @@ describe('export + quarantine + cli', () => {
       assert.ok(body.includes('stdoutDigest'));
     } finally {
       await rm(campaign, { recursive: true, force: true });
+    }
+  });
+
+  it('export retains portable provenance and excludes unsafe experiment fields', async () => {
+    const {
+      exportSanitizedBundle,
+      projectInputDigestsForExport,
+      projectFrozenExperimentForExport,
+    } = await import('../harness/export.js');
+
+    const digests = sampleInputDigests({
+      // Unknown keys must be dropped by allowlist projection
+      leakedPath: '/Users/localuser/secret',
+      extra: 'drop-me',
+    });
+    const projectedDigests = projectInputDigestsForExport(digests);
+    assert.deepEqual(projectedDigests, {
+      schemaVersion: 1,
+      experiment: 'a'.repeat(64),
+      suite: 'b'.repeat(64),
+      tasks: 'c'.repeat(64),
+      harness: 'd'.repeat(64),
+      fixtures: 'e'.repeat(64),
+      oracles: 'f'.repeat(64),
+    });
+    assert.equal(Object.prototype.hasOwnProperty.call(projectedDigests, 'extra'), false);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(projectedDigests, 'leakedPath'),
+      false,
+    );
+
+    const projectedExp = projectFrozenExperimentForExport(sampleFrozenExperiment());
+    assert.equal(projectedExp.id, 'exp-export');
+    assert.equal(projectedExp.schemaVersion, 1);
+    assert.equal(projectedExp.suiteId, 'cli-comparison');
+    assert.deepEqual(projectedExp.taskIds, [
+      'greenfield-003-js-event-emitter',
+      'brownfield-002-js-rate-limiter-bug',
+    ]);
+    assert.equal(projectedExp.repetitions, 3);
+    assert.equal(projectedExp.seed, 'export-seed-1');
+    assert.equal(projectedExp.timeoutMs, 900000);
+    assert.equal(projectedExp.corpusRoot, undefined);
+    assert.equal(projectedExp.suitePath, undefined);
+    assert.equal(projectedExp.metadata, undefined);
+    assert.equal(projectedExp.unknownTopField, undefined);
+    assert.deepEqual(projectedExp.arms, [
+      {
+        name: 'arm-a',
+        provider: 'provider-a',
+        model: 'model-a',
+        invocationPath: 'poetic-adapter',
+        sandboxMode: 'read-only',
+        promptTransport: 'stdin',
+      },
+      {
+        name: 'arm-b',
+        provider: 'provider-b',
+        model: 'model-b',
+        invocationPath: 'native-cli',
+        sandboxMode: null,
+      },
+    ]);
+
+    // Relative suitePath is a safe suite selector; absolute is excluded.
+    const withRelSuite = projectFrozenExperimentForExport(
+      sampleFrozenExperiment({
+        suitePath: 'cli-comparison/suite.yaml',
+        corpusRoot: 'benchmarks',
+      }),
+    );
+    assert.equal(withRelSuite.suitePath, 'cli-comparison/suite.yaml');
+    assert.equal(withRelSuite.corpusRoot, undefined);
+
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-camp-prov-'));
+    const out = await mkdtemp(path.join(os.tmpdir(), 'aicb-out-prov-'));
+    try {
+      await seedVerifiedCampaign(campaign, {
+        inputDigests: digests,
+        experiment: sampleFrozenExperiment(),
+        resultExtras: {
+          workspaceDir: path.join(campaign, 'workspaces', 't1'),
+        },
+      });
+
+      await exportSanitizedBundle({
+        campaignDir: campaign,
+        outDir: out,
+        includeRaw: false,
+      });
+
+      const man = JSON.parse(
+        await readFile(path.join(out, 'manifest.json'), 'utf8'),
+      );
+
+      // inputDigests retained unchanged (allowlisted fields only)
+      assert.deepEqual(man.inputDigests, {
+        schemaVersion: 1,
+        experiment: 'a'.repeat(64),
+        suite: 'b'.repeat(64),
+        tasks: 'c'.repeat(64),
+        harness: 'd'.repeat(64),
+        fixtures: 'e'.repeat(64),
+        oracles: 'f'.repeat(64),
+      });
+      assert.equal(man.inputDigests.extra, undefined);
+      assert.equal(man.inputDigests.leakedPath, undefined);
+
+      // Frozen experiment safe projection retained
+      assert.equal(man.experiment.id, 'exp-export');
+      assert.equal(man.experiment.suiteId, 'cli-comparison');
+      assert.deepEqual(man.experiment.taskIds, [
+        'greenfield-003-js-event-emitter',
+        'brownfield-002-js-rate-limiter-bug',
+      ]);
+      assert.equal(man.experiment.repetitions, 3);
+      assert.equal(man.experiment.seed, 'export-seed-1');
+      assert.equal(man.experiment.timeoutMs, 900000);
+      assert.equal(man.experiment.arms[0].provider, 'provider-a');
+      assert.equal(man.experiment.arms[0].model, 'model-a');
+      assert.equal(man.experiment.arms[0].invocationPath, 'poetic-adapter');
+      assert.equal(man.experiment.arms[0].sandboxMode, 'read-only');
+
+      const manText = JSON.stringify(man);
+      // Path-bearing / secret / free-form material excluded or redacted
+      assert.ok(!manText.includes('/Users/localuser'));
+      assert.ok(!manText.includes('secret-corpus'));
+      assert.ok(!manText.includes('SECRET_TOKEN'));
+      assert.ok(!manText.includes('sk-leaked-credential'));
+      assert.ok(!manText.includes('sk-live-must-not-export'));
+      assert.ok(!manText.includes('secret system prompt'));
+      assert.ok(!manText.includes('arm posture prompt leak'));
+      assert.ok(!manText.includes('OPENAI_API_KEY'));
+      assert.ok(!manText.includes('DATABASE_URL'));
+      assert.ok(!manText.includes('evil-cli'));
+      assert.ok(!manText.includes('unknownTopField'));
+      assert.ok(!manText.includes('unknownArmField'));
+      assert.ok(!manText.includes('envAllowlist'));
+      assert.ok(!manText.includes('"command"'));
+      assert.ok(!manText.includes('"args"'));
+      assert.ok(!manText.includes('"posture"'));
+      assert.ok(!manText.includes('"metadata"'));
+      assert.ok(!manText.includes('"corpusRoot"'));
+      assert.ok(!manText.includes('leakedPath'));
+
+      const readme = await readFile(path.join(out, 'EXPORT_README.txt'), 'utf8');
+      assert.ok(readme.includes('inputDigests'));
+      assert.ok(readme.toLowerCase().includes('experiment'));
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+      await rm(out, { recursive: true, force: true });
+    }
+  });
+
+  it('export fails closed on invalid inputDigests; omits provenance when absent', async () => {
+    const {
+      exportSanitizedBundle,
+      projectInputDigestsForExport,
+    } = await import('../harness/export.js');
+
+    assert.equal(projectInputDigestsForExport(undefined), undefined);
+    assert.throws(
+      () => projectInputDigestsForExport({ schemaVersion: 1, experiment: 'short' }),
+      /sha256|fail closed/i,
+    );
+    assert.throws(
+      () =>
+        projectInputDigestsForExport({
+          schemaVersion: 99,
+          experiment: 'a'.repeat(64),
+          suite: 'b'.repeat(64),
+          tasks: 'c'.repeat(64),
+          harness: 'd'.repeat(64),
+        }),
+      /schemaVersion|fail closed/i,
+    );
+
+    // Absent provenance: export still succeeds; fields omitted
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-camp-noprov-'));
+    const out = await mkdtemp(path.join(os.tmpdir(), 'aicb-out-noprov-'));
+    try {
+      await seedVerifiedCampaign(campaign);
+      await exportSanitizedBundle({
+        campaignDir: campaign,
+        outDir: out,
+        includeRaw: false,
+      });
+      const man = JSON.parse(
+        await readFile(path.join(out, 'manifest.json'), 'utf8'),
+      );
+      assert.equal(man.inputDigests, undefined);
+      assert.equal(man.experiment, undefined);
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+      await rm(out, { recursive: true, force: true });
+    }
+
+    // Present but invalid inputDigests → fail closed (no partial export)
+    const bad = await mkdtemp(path.join(os.tmpdir(), 'aicb-camp-baddig-'));
+    const outBad = await mkdtemp(path.join(os.tmpdir(), 'aicb-out-baddig-'));
+    try {
+      await seedVerifiedCampaign(bad, {
+        inputDigests: {
+          schemaVersion: 1,
+          experiment: 'not-a-digest',
+          suite: 'b'.repeat(64),
+          tasks: 'c'.repeat(64),
+          harness: 'd'.repeat(64),
+        },
+      });
+      await assert.rejects(
+        () =>
+          exportSanitizedBundle({
+            campaignDir: bad,
+            outDir: outBad,
+            includeRaw: false,
+          }),
+        /inputDigests|sha256|fail closed/i,
+      );
+      // Destination must remain empty / unpublished on failure
+      const listing = await readdir(outBad);
+      assert.deepEqual(listing, []);
+    } finally {
+      await rm(bad, { recursive: true, force: true });
+      await rm(outBad, { recursive: true, force: true });
     }
   });
 
