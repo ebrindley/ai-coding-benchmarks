@@ -98,33 +98,8 @@ eligibilityGates:
     check: All must_have items substantiated by test results
     order: 6
 
-scoring:
-  delivery:
-    weight: 0.4
-    evidence:
-      - diff
-      - file_changes
-  correctness:
-    weight: 0.4
-    evidence:
-      - test_results
-  quality:
-    weight: 0.2
-    evidence:
-      - linter_delta
-      - complexity_delta
-
-toolEvidencePolicy:
-  requiredWhen: tests are part of success_criteria
-  neutralWhen: never
-
 networkPolicy:
   allowed: true
-  provenanceRequired: true
-  record:
-    - urls
-    - timestamps
-    - content_hash
 
 fixturePath: ts-pagination-api
 

@@ -1,7 +1,9 @@
 /**
- * Corpus-wide requirements evidence binding completeness.
+ * Corpus-wide requirements evidence binding completeness and task-oracle contracts.
  * Ensures every mustHave on a task with a requirements gate resolves to a real
  * eligibility gate that precedes the requirements gate (by order).
+ * Also guards demonstrated oracle honesty defects (metadata, scale claims, 201,
+ * externalized RPN tests, SQLite stated requirements).
  * No live providers. No corpus mutation.
  */
 
@@ -9,12 +11,13 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readdir } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '..');
 const CORPUS = path.join(REPO, 'benchmarks', 'cli-comparison');
 const TASKS_ROOT = path.join(CORPUS, 'tasks');
+const FIXTURES = path.join(CORPUS, 'fixtures');
 
 /**
  * @param {string} dir
@@ -248,3 +251,222 @@ describe('corpus requirements evidence binding', () => {
     );
   });
 });
+
+describe('corpus task-oracle contracts', () => {
+  it('task YAML has no dead scoring/toolEvidencePolicy; networkPolicy only allowed', async () => {
+    const { loadTask } = await import('../harness/load.js');
+    const taskFiles = await listYamlFiles(TASKS_ROOT);
+    /** @type {string[]} */
+    const failures = [];
+
+    for (const taskPath of taskFiles.sort()) {
+      const raw = await readFile(taskPath, 'utf8');
+      const taskId = path.basename(taskPath);
+      if (/^scoring:/m.test(raw)) {
+        failures.push(`${taskId}: non-operational scoring block present`);
+      }
+      if (/^toolEvidencePolicy:/m.test(raw)) {
+        failures.push(`${taskId}: non-operational toolEvidencePolicy present`);
+      }
+      if (/provenanceRequired:/.test(raw) || /^\s+record:/m.test(raw)) {
+        failures.push(
+          `${taskId}: networkPolicy must not include provenanceRequired/record`,
+        );
+      }
+
+      const task = await loadTask(taskPath);
+      if (task.scoring != null) {
+        failures.push(`${taskId}: loaded task still has scoring`);
+      }
+      if (task.toolEvidencePolicy != null) {
+        failures.push(`${taskId}: loaded task still has toolEvidencePolicy`);
+      }
+      if (task.networkPolicy != null) {
+        if (typeof task.networkPolicy !== 'object') {
+          failures.push(`${taskId}: networkPolicy must be an object`);
+        } else {
+          const keys = Object.keys(task.networkPolicy).sort();
+          if (keys.length !== 1 || keys[0] !== 'allowed') {
+            failures.push(
+              `${taskId}: networkPolicy keys must be only [allowed], got ${JSON.stringify(keys)}`,
+            );
+          }
+          if (typeof task.networkPolicy.allowed !== 'boolean') {
+            failures.push(`${taskId}: networkPolicy.allowed must be boolean`);
+          }
+        }
+      }
+    }
+
+    assert.deepEqual(failures, [], failures.join('\n'));
+  });
+
+  it('java god-class description matches compact fixture scale', async () => {
+    const { loadTask } = await import('../harness/load.js');
+    const taskPath = path.join(
+      TASKS_ROOT,
+      'brownfield',
+      '006-java-refactor-god-class.yaml',
+    );
+    const task = await loadTask(taskPath);
+    const desc = String(task.description || '');
+    assert.doesNotMatch(
+      desc,
+      /2000\+?\s*lines|45 methods|12 dependencies/i,
+      'description must not claim inflated god-class scale',
+    );
+    assert.match(
+      desc,
+      /~?90 lines|compact fixture|mixed-responsibility/i,
+      'description should state actual compact fixture scale',
+    );
+
+    const orderService = await readFile(
+      path.join(
+        FIXTURES,
+        'java-god-class-service',
+        'src/main/java/com/example/service/OrderService.java',
+      ),
+      'utf8',
+    );
+    const lineCount = orderService.split(/\r?\n/).length;
+    assert.ok(
+      lineCount < 200,
+      `fixture OrderService is compact (${lineCount} lines); description must stay honest`,
+    );
+
+    const checkScript = await readFile(
+      path.join(
+        FIXTURES,
+        'java-god-class-service',
+        'scripts/check-service-count.sh',
+      ),
+      'utf8',
+    );
+    assert.match(
+      checkScript,
+      /substance|substantive|too thin|public methods|does not reference/i,
+      'service-count oracle must reject empty/thin shells',
+    );
+  });
+
+  it('spring createBook contract requires exact HTTP 201', async () => {
+    const testSrc = await readFile(
+      path.join(
+        FIXTURES,
+        'java-spring-service-harness',
+        'src/test/java/com/example/BookControllerTest.java',
+      ),
+      'utf8',
+    );
+    const createIdx = testSrc.indexOf('void createBook');
+    assert.ok(createIdx >= 0, 'createBook test must exist');
+    const slice = testSrc.slice(createIdx, createIdx + 800);
+    assert.match(
+      slice,
+      /status\(\)\.is\(201\)|status\(\)\.isCreated\s*\(/,
+      'createBook must assert exact 201/Created',
+    );
+    assert.doesNotMatch(
+      slice,
+      /is2xxSuccessful|status\(\)\.isOk\s*\(/,
+      'createBook must not accept generic 2xx/200',
+    );
+
+    const check = await readFile(
+      path.join(
+        FIXTURES,
+        'java-spring-service-harness',
+        'scripts/check-post-returns-201.sh',
+      ),
+      'utf8',
+    );
+    assert.match(check, /201|CREATED/i);
+
+    const { loadTask } = await import('../harness/load.js');
+    const task = await loadTask(
+      path.join(TASKS_ROOT, 'greenfield', '004-java-spring-service.yaml'),
+    );
+    const gates = task.eligibilityGates || [];
+    assert.ok(
+      gates.some((g) => g && g.gate === 'post-status-201'),
+      'task must gate on post-status-201',
+    );
+  });
+
+  it('rust RPN tests live under protected tests/ and starter is incomplete', async () => {
+    const libPath = path.join(FIXTURES, 'rust-rpn-calc', 'src/lib.rs');
+    const lib = await readFile(libPath, 'utf8');
+    assert.doesNotMatch(
+      lib,
+      /#\[cfg\(test\)\]/,
+      'tests must not live inside editable src/lib.rs',
+    );
+    assert.match(
+      lib,
+      /todo!|unimplemented!/,
+      'starter eval must be genuinely incomplete',
+    );
+
+    const external = await readFile(
+      path.join(FIXTURES, 'rust-rpn-calc', 'tests/eval_tests.rs'),
+      'utf8',
+    );
+    assert.match(external, /fn multiplication_and_addition/);
+    assert.match(external, /fn divide_by_zero_is_error/);
+
+    const { loadTask } = await import('../harness/load.js');
+    const task = await loadTask(
+      path.join(TASKS_ROOT, 'greenfield', '008-rust-rpn-calculator.yaml'),
+    );
+    const refs = (task.expectedOutcome?.mustHave || [])
+      .map((m) => String(m.artifactRef || ''))
+      .join('\n');
+    assert.match(refs, /tests\/eval_tests\.rs/);
+    assert.doesNotMatch(refs, /src\/lib\.rs::tests/);
+  });
+
+  it('sqlite schema tests enforce stated columns, indexes, view, idempotency', async () => {
+    const testSrc = await readFile(
+      path.join(FIXTURES, 'sqlite-analytics-schema', 'tests/test_schema.py'),
+      'utf8',
+    );
+    for (const needle of [
+      'REQUIRED_COLUMNS',
+      'REQUIRED_INDEX_TARGETS',
+      'order_date',
+      'customer_id',
+      'product_id',
+      'test_schema_idempotent',
+      'daily_sales_summary',
+      'sale_date',
+      'total_orders',
+      'total_revenue',
+      'avg_order_value',
+    ]) {
+      assert.ok(testSrc.includes(needle), `schema tests missing: ${needle}`);
+    }
+    assert.match(
+      testSrc,
+      /\(\s*["']orders["']\s*,\s*["']order_date["']\s*\)/,
+    );
+    assert.match(
+      testSrc,
+      /\(\s*["']orders["']\s*,\s*["']customer_id["']\s*\)/,
+    );
+    assert.match(
+      testSrc,
+      /\(\s*["']order_items["']\s*,\s*["']product_id["']\s*\)/,
+    );
+
+    const reportTests = await readFile(
+      path.join(FIXTURES, 'sqlite-ecommerce-reports', 'tests/test_reports.py'),
+      'utf8',
+    );
+    assert.match(reportTests, /assertEqual\(len\(rows\), 50\)/);
+    assert.match(reportTests, /101,\s*105,\s*112/);
+    assert.match(reportTests, /45 \* 2500/);
+    assert.match(reportTests, /assertIsNotNone/);
+  });
+});
+

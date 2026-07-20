@@ -85,8 +85,6 @@ eligibilityGates:
 
 networkPolicy:
   allowed: false
-  provenanceRequired: false
-  record: []
 
 fixturePath: sqlite-ecommerce-reports
 
