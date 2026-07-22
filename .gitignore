@@ -44,3 +44,6 @@ raw-provider-output/
 id_rsa
 id_ed25519
 .npmrc
+
+# Poetic runtime data (dropped by poetic CLI invocations from this cwd)
+.poetic/
