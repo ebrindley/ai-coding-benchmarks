@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "typecheck": "npx --yes typescript@5.4.5 tsc --noEmit"
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5"
   }
 }

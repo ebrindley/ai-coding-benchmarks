@@ -6,7 +6,6 @@
 # Estimated Time: 25 minutes
 #
 # Bug: Duplicate items appear across page boundaries
-# Root cause: Missing secondary sort causing unstable ordering
 
 taskId: brownfield-004-ts-pagination-bug
 type: brownfield
@@ -21,10 +20,6 @@ description: |
   - Happens when items have the same created_at timestamp
   - Users report seeing duplicate entries when scrolling through lists
 
-  Root cause hints:
-  - Check the ORDER BY clause in the query
-  - Missing secondary sort key (should be: ORDER BY created_at, id)
-  - OFFSET without stable sort causes duplicates when data has ties
 
   Constraints:
   - Fix must be in the query/repository layer, not client-side dedup
@@ -53,12 +48,6 @@ expectedOutcome:
       description: All existing tests still pass
       substantiation: test
       artifactRef: npm test exits 0
-
-  niceToHave:
-    - id: index-optimized
-      description: Query uses index (EXPLAIN shows index scan)
-      substantiation: test
-      artifactRef: tests/pagination.test.ts::uses-index
 
   successCriteria:
     - All must-have tests pass

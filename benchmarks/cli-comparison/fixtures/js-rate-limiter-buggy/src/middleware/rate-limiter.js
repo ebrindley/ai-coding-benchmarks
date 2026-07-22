@@ -4,9 +4,6 @@
  * Implements a per-IP fixed-window limiter:
  * - maxRequests per windowMs
  * - dependency-injected clock via options.now (required by task)
- *
- * Seeded bug:
- * - shouldReset() uses `>` instead of `>=`, so the window resets at 60001ms.
  */
 
 function getClientIp(req) {
@@ -26,7 +23,6 @@ function createRateLimiter(options = {}) {
   const stateByIp = new Map();
 
   function shouldReset(windowStart, currentTime) {
-    // BUG: Should be >= so the window resets at exactly 60000ms.
     return currentTime - windowStart > windowMs;
   }
 

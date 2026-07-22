@@ -110,7 +110,7 @@ echo ""
 echo "Test 1: GET /books"
 RESPONSE=$(curl -s -w "\n%{http_code}" "http://localhost:${PORT}/books")
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-BODY=$(echo "$RESPONSE" | head -n -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
 
 if [[ "$HTTP_CODE" != "200" ]]; then
   echo "ERROR: GET /books returned HTTP $HTTP_CODE (expected 200)"
@@ -136,7 +136,7 @@ RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
   -d "$PAYLOAD" \
   "http://localhost:${PORT}/books")
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-BODY=$(echo "$RESPONSE" | head -n -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
 
 if [[ "$HTTP_CODE" != "201" ]] && [[ "$HTTP_CODE" != "200" ]]; then
   echo "ERROR: POST /books returned HTTP $HTTP_CODE (expected 201 or 200)"
@@ -151,7 +151,7 @@ echo ""
 echo "Test 3: GET /books/1"
 RESPONSE=$(curl -s -w "\n%{http_code}" "http://localhost:${PORT}/books/1")
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-BODY=$(echo "$RESPONSE" | head -n -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
 
 if [[ "$HTTP_CODE" != "200" ]]; then
   echo "ERROR: GET /books/1 returned HTTP $HTTP_CODE (expected 200)"

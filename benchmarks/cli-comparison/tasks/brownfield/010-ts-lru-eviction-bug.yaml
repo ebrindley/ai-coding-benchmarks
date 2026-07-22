@@ -49,19 +49,24 @@ eligibilityGates:
   - gate: baseline-diff
     check: Only implementation files changed (no test edits)
     order: 1
+  - gate: install
+    check: Dependencies installed
+    command: npm install --no-audit --no-fund --package-lock=false
+    expectedExitCode: 0
+    order: 2
   - gate: typecheck
     check: TypeScript compiles with no errors
     command: npm run typecheck
     expectedExitCode: 0
-    order: 2
+    order: 3
   - gate: tests
     check: All tests pass
     command: npm test
     expectedExitCode: 0
-    order: 3
+    order: 4
   - gate: requirements
     check: All must_have items substantiated by test results
-    order: 4
+    order: 5
 
 scoring:
   delivery:

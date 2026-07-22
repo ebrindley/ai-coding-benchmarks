@@ -1,7 +1,5 @@
--- Monthly sales report (BUGGY)
+-- Monthly sales report
 -- Returns one row per order with item_count and revenue_cents.
---
--- BUG: INNER JOIN excludes orders with no items; should include all orders.
 
 SELECT
   o.id AS order_id,

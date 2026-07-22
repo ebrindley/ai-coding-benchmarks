@@ -1,4 +1,4 @@
-# Brownfield Task: Fix Off-by-One Bug in Rate Limiter
+# Brownfield Task: Fix Rate Limiter Window Bug
 #
 # Category: Bug Fix (starter-code)
 # Language: JavaScript (Node.js/Express)
@@ -6,7 +6,6 @@
 # Estimated Time: 25 minutes
 #
 # Bug: Rate limiter window resets incorrectly, allowing 101st request
-# Root cause: Off-by-one in timestamp comparison
 # Key constraint: Implementation MUST accept injected clock function for testability
 
 taskId: brownfield-002-js-rate-limiter-bug
@@ -15,16 +14,13 @@ codeType: starter-code
 category: bugfix
 language: javascript
 description: |
-  Fix an off-by-one bug in a rate limiter middleware.
+  Fix a bug in a rate limiter middleware.
 
   Bug symptoms:
   - Limit is 100 requests per 60 seconds per IP
   - 101st request within window sometimes succeeds when it shouldn't
   - Window reset timing is inconsistent
 
-  Root cause hints:
-  - Check the timestamp comparison logic in shouldReset()
-  - Off-by-one: using > instead of >= (or vice versa)
 
   Constraints:
   - Implementation MUST accept a clock function via dependency injection
