@@ -242,20 +242,97 @@ export function trialBranchName(trialId) {
 }
 
 /**
- * Default argv-only git spawn (no shell). Injectable for tests via opts.gitSpawn.
- * @param {string[]} args
+ * Neutral local Git config overrides so provider-controlled repo config cannot
+ * run hooks, fsmonitor, external diff/textconv, LFS filters, or editors.
+ * Applied as `git -c key=value …` on every harness-owned Git invocation.
+ */
+export const HARNESS_GIT_NEUTRAL_CONFIG = Object.freeze([
+  ['core.hooksPath', process.platform === 'win32' ? 'NUL' : '/dev/null'],
+  ['core.fsmonitor', ''],
+  ['core.fsmonitorHook', ''],
+  ['core.useBuiltinFSMonitor', 'false'],
+  ['diff.external', ''],
+  ['diff.renames', 'true'],
+  ['pager.diff', 'false'],
+  ['pager.status', 'false'],
+  ['interactive.diffFilter', ''],
+  ['filter.lfs.process', ''],
+  ['filter.lfs.smudge', ''],
+  ['filter.lfs.clean', ''],
+  ['filter.lfs.required', 'false'],
+  ['commit.gpgsign', 'false'],
+  ['tag.gpgsign', 'false'],
+  ['log.showSignature', 'false'],
+  ['advice.detachedHead', 'false'],
+  ['gc.auto', '0'],
+]);
+
+/**
+ * Build argv for harness-owned git: neutral `-c` overrides then caller args.
+ * Caller args should be the git subcommand form (e.g. `['status', '--porcelain']`),
+ * not including the `git` binary itself.
+ * @param {string[]} gitArgs
+ * @returns {string[]}
+ */
+export function buildHarnessGitArgv(gitArgs) {
+  /** @type {string[]} */
+  const argv = [];
+  for (const [key, value] of HARNESS_GIT_NEUTRAL_CONFIG) {
+    argv.push('-c', `${key}=${value}`);
+  }
+  if (Array.isArray(gitArgs)) {
+    for (const a of gitArgs) argv.push(String(a));
+  }
+  return argv;
+}
+
+/**
+ * Minimal env for harness-owned git. Strips GIT_DIR / worktree overrides and
+ * blocks system/global config so repo-local provider config cannot re-enable
+ * callbacks via include.path tricks at those layers.
+ * @param {NodeJS.ProcessEnv | Record<string, string | undefined>} [baseEnv]
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function buildHarnessGitEnv(baseEnv = process.env) {
+  const pathEnv =
+    (baseEnv && typeof baseEnv.PATH === 'string' && baseEnv.PATH) ||
+    '/usr/bin:/bin:/usr/local/bin';
+  /** @type {NodeJS.ProcessEnv} */
+  const env = {
+    PATH: pathEnv,
+    LANG: (baseEnv && baseEnv.LANG) || 'C',
+    LC_ALL: 'C',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+    GIT_NO_REPLACE_OBJECTS: '1',
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_PAGER: 'cat',
+    GIT_EDITOR: 'true',
+    GIT_TEMPLATE_DIR: '',
+    // Never inherit provider-influenced identity/worktree overrides.
+    // (Explicit absence — do not set GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR.)
+  };
+  // Preserve HOME only when present (some git builds want it); never required.
+  if (baseEnv && typeof baseEnv.HOME === 'string' && baseEnv.HOME) {
+    env.HOME = baseEnv.HOME;
+  }
+  return env;
+}
+
+/**
+ * Default argv-only git spawn (no shell) with harness-neutral config/env.
+ * Injectable for tests via opts.gitSpawn (receives *logical* args, pre -c wrap,
+ * so tests can assert subcommands without depending on neutral flag lists).
+ * @param {string[]} args logical git args (e.g. ['status', '--porcelain', '-z'])
  * @param {string} cwd
  * @returns {Promise<{ exitCode: number | null, stdout: string, stderr: string }>}
  */
 export function defaultGitSpawn(args, cwd) {
+  const argv = buildHarnessGitArgv(args);
+  const env = buildHarnessGitEnv(process.env);
   return new Promise((resolve, reject) => {
-    /** @type {NodeJS.ProcessEnv} */
-    const env = { ...process.env };
-    delete env.GIT_DIR;
-    delete env.GIT_WORK_TREE;
-    delete env.GIT_COMMON_DIR;
-    env.GIT_TEMPLATE_DIR = '';
-    const child = spawn('git', args, {
+    const child = spawn('git', argv, {
       cwd,
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -263,21 +340,38 @@ export function defaultGitSpawn(args, cwd) {
     });
     let stdout = '';
     let stderr = '';
-    child.stdout?.setEncoding('utf8');
-    child.stderr?.setEncoding('utf8');
+    // Binary-safe accumulation: git -z paths may contain non-utf8 bytes.
+    /** @type {Buffer[]} */
+    const stdoutChunks = [];
+    /** @type {Buffer[]} */
+    const stderrChunks = [];
     child.stdout?.on('data', (c) => {
-      stdout += c;
+      stdoutChunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
     });
     child.stderr?.on('data', (c) => {
-      stderr += c;
+      stderrChunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
     });
     child.on('error', (err) => {
       reject(err);
     });
     child.on('close', (code) => {
+      stdout = Buffer.concat(stdoutChunks).toString('utf8');
+      stderr = Buffer.concat(stderrChunks).toString('utf8');
       resolve({ exitCode: code, stdout, stderr });
     });
   });
+}
+
+/**
+ * Run a harness-owned git command in cwd (neutral config/env).
+ * @param {string} cwd
+ * @param {string[]} args logical git args
+ * @param {{ gitSpawn?: (args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }> }} [opts]
+ * @returns {Promise<{ exitCode: number | null, stdout: string, stderr: string }>}
+ */
+export async function runHarnessGit(cwd, args, opts = {}) {
+  const spawnFn = opts.gitSpawn ?? defaultGitSpawn;
+  return spawnFn(args, path.resolve(cwd));
 }
 
 /**
@@ -417,7 +511,7 @@ export async function copyFixtureTree(fixtureRoot, destRoot) {
  * @param {object} [opts]
  * @param {string} [opts.trialId]
  * @param {(args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }>} [opts.gitSpawn]
- * @returns {Promise<{ branch: string, gitArgvLog: string[][] }>}
+ * @returns {Promise<{ branch: string, baselineCommit: string, gitArgvLog: string[][] }>}
  */
 export async function initWorkspaceGit(workspaceDir, opts = {}) {
   const cwd = path.resolve(workspaceDir);
@@ -441,6 +535,9 @@ export async function initWorkspaceGit(workspaceDir, opts = {}) {
   for (const args of [
     ['config', 'user.email', 'harness@local'],
     ['config', 'user.name', 'aicb-harness'],
+    // Record identity only in this workspace; do not enable hooks/fsmonitor.
+    ['config', 'core.hooksPath', process.platform === 'win32' ? 'NUL' : '/dev/null'],
+    ['config', 'core.fsmonitor', ''],
     ['add', '-A'],
     ['commit', '--allow-empty', '-m', 'aicb-harness fixture baseline'],
   ]) {
@@ -452,6 +549,16 @@ export async function initWorkspaceGit(workspaceDir, opts = {}) {
     }
   }
 
+  const baseline = await run(['rev-parse', 'HEAD']);
+  const baselineCommit = String(baseline.stdout || '').trim();
+  if (baseline.exitCode !== 0 || !/^[0-9a-f]{40,64}$/i.test(baselineCommit)) {
+    throw new Error(
+      `git rev-parse HEAD failed after baseline commit (exit ${baseline.exitCode}): ${
+        baseline.stderr || baseline.stdout
+      }`,
+    );
+  }
+
   const branch = trialBranchName(opts.trialId ?? 'trial');
   // Create/switch to non-protected trial branch for in-place edits
   const co = await run(['checkout', '-B', branch]);
@@ -461,7 +568,7 @@ export async function initWorkspaceGit(workspaceDir, opts = {}) {
     );
   }
 
-  return { branch, gitArgvLog };
+  return { branch, baselineCommit, gitArgvLog };
 }
 
 /**
@@ -478,7 +585,7 @@ export async function initWorkspaceGit(workspaceDir, opts = {}) {
  * @param {string} [opts.campaignDir] - when set, assert workspace is outside campaign tree
  * @param {string} opts.trialId - unique trial identifier
  * @param {(args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }>} [opts.gitSpawn]
- * @returns {Promise<{ workspaceDir: string, fixtureHash: string, branch: string, executionRoot: string }>}
+ * @returns {Promise<{ workspaceDir: string, fixtureHash: string, branch: string, baselineCommit: string, executionRoot: string }>}
  */
 export async function createIsolatedWorkspace({
   fixtureDir,
@@ -542,6 +649,7 @@ export async function createIsolatedWorkspace({
     workspaceDir,
     fixtureHash,
     branch: git.branch,
+    baselineCommit: git.baselineCommit,
     executionRoot: parent,
   };
 }

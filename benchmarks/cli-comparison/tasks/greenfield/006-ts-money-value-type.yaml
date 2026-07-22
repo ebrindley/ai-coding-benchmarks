@@ -77,21 +77,6 @@ eligibilityGates:
     check: All must_have items substantiated by test results
     order: 5
 
-scoring:
-  delivery:
-    weight: 0.4
-    evidence:
-      - diff
-      - file_changes
-  correctness:
-    weight: 0.4
-    evidence:
-      - test_results
-  quality:
-    weight: 0.2
-    evidence:
-      - typecheck_delta
-
 fixturePath: ts-money
 
 tags:

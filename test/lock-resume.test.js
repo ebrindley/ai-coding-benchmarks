@@ -22,6 +22,37 @@ import { spawnSync } from 'node:child_process';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CORPUS = path.join(REPO, 'benchmarks');
 
+async function writeAdoptableTrial(campaignDir, trialId, partial, manifestTrial) {
+  const {
+    quarantineRawOutput,
+    computeArtifactDigest,
+    buildTrialDigests,
+  } = await import('../harness/results.js');
+  const { writeCompleteTrial } = await import('./helpers/complete-trial.js');
+
+  const raw = await quarantineRawOutput(campaignDir, trialId, {
+    stdout: 'provider stdout\n',
+    stderr: '',
+  });
+  const artifactDir = path.join(campaignDir, 'artifacts', trialId);
+  await mkdir(artifactDir, { recursive: true });
+  await writeFile(path.join(artifactDir, 'output.json'), '{"ok":true}\n', 'utf8');
+  const artifactDigest = await computeArtifactDigest(artifactDir);
+  return writeCompleteTrial(
+    campaignDir,
+    trialId,
+    {
+      ...partial,
+      artifactDir,
+      digests: buildTrialDigests({
+        artifactDigest,
+        ...raw.digests,
+      }),
+    },
+    { manifestTrial },
+  );
+}
+
 describe('lock + atomic resume', () => {
   it('acquire/release lock exclusivity', async () => {
     const { acquireLock, releaseLock, readLock } = await import('../harness/lock.js');
@@ -1057,6 +1088,145 @@ describe('lock acquire under grandparent swap / pinned boundary', () => {
           /symlink|fail closed|UNSAFE/i.test(String(err)),
       );
       assert.equal(await readFile(external, 'utf8'), SENTINEL);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('durable-result crash-window: adopt verified result for running trial', async () => {
+    const {
+      tryAdoptDurableTrialResult,
+      clearTrialDurableState,
+    } = await import('../harness/results.js');
+    const { completeManifestTrial } = await import(
+      './helpers/complete-trial.js'
+    );
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-adopt-'));
+    try {
+      const trialId = 'arm__task__r1__adopt1';
+      const manifestTrial = completeManifestTrial({
+        id: trialId,
+        state: 'running',
+        experimentId: 'exp-adopt',
+        arm: 'a1',
+        provider: 'fake',
+        taskId: 'task-a',
+        invocationPath: 'native-cli',
+        requestedModel: 'm1',
+      });
+
+      // Simulate crash after durable result write, before manifest terminal update.
+      const written = await writeAdoptableTrial(
+        dir,
+        trialId,
+        {
+          experimentId: 'exp-adopt',
+          arm: 'a1',
+          provider: 'fake',
+          taskId: 'task-a',
+          invocationPath: 'native-cli',
+          requestedModel: 'm1',
+          state: 'completed',
+          classification: 'PASS',
+        },
+        manifestTrial,
+      );
+
+      const adopted = await tryAdoptDurableTrialResult(dir, {
+        ...manifestTrial,
+        state: 'running',
+      });
+      assert.equal(adopted.ok, true, adopted.reason);
+      assert.equal(adopted.state, 'completed');
+      assert.equal(adopted.classification, 'PASS');
+      assert.equal(
+        adopted.result.digests.resultDigest,
+        written.result.digests.resultDigest,
+      );
+
+      // Invalid identity must not adopt.
+      const rejected = await tryAdoptDurableTrialResult(dir, {
+        ...manifestTrial,
+        taskId: 'other-task',
+        state: 'running',
+      });
+      assert.equal(rejected.ok, false);
+      assert.match(String(rejected.reason), /identity/i);
+
+      // After clear, no durable result remains.
+      await clearTrialDurableState(dir, trialId);
+      const gone = await tryAdoptDurableTrialResult(dir, {
+        ...manifestTrial,
+        state: 'running',
+      });
+      assert.equal(gone.ok, false);
+      assert.match(String(gone.reason), /no durable result|ENOENT|unreadable|fail/i);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('invalid/stale result rejected; clear enables clean rerun', async () => {
+    const {
+      tryAdoptDurableTrialResult,
+      clearTrialDurableState,
+      readTrialResult,
+    } = await import('../harness/results.js');
+    const { completeManifestTrial } = await import(
+      './helpers/complete-trial.js'
+    );
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-stale-'));
+    try {
+      const trialId = 'arm__task__r1__stale1';
+      const manifestTrial = completeManifestTrial({
+        id: trialId,
+        state: 'running',
+      });
+      await writeAdoptableTrial(
+        dir,
+        trialId,
+        {
+          state: 'completed',
+          classification: 'PASS',
+        },
+        manifestTrial,
+      );
+
+      // Tamper resultDigest → adoption fails closed.
+      const resultPath = path.join(dir, 'results', trialId, 'result.json');
+      const raw = JSON.parse(await readFile(resultPath, 'utf8'));
+      raw.digests.resultDigest = '0'.repeat(64);
+      await writeFile(resultPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+
+      const bad = await tryAdoptDurableTrialResult(dir, manifestTrial);
+      assert.equal(bad.ok, false);
+      assert.match(String(bad.reason), /resultDigest/i);
+
+      // Clear stale state and write a fresh durable result (clean rerun path).
+      await clearTrialDurableState(dir, trialId);
+      await assert.rejects(
+        () => readTrialResult(dir, trialId),
+        /ENOENT|unreadable|fail|required|schema/i,
+      );
+
+      const fresh = await writeAdoptableTrial(
+        dir,
+        trialId,
+        {
+          state: 'completed',
+          classification: 'FAIL',
+        },
+        manifestTrial,
+      );
+      const ok = await tryAdoptDurableTrialResult(dir, manifestTrial);
+      assert.equal(ok.ok, true, ok.reason);
+      assert.equal(ok.classification, 'FAIL');
+      assert.equal(
+        ok.result.digests.resultDigest,
+        fresh.result.digests.resultDigest,
+      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

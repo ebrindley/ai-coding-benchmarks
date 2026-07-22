@@ -33,7 +33,7 @@ expectedOutcome:
     - id: tables-created
       description: All tables exist with required columns
       substantiation: test
-      artifactRef: tests/test_schema.py::test_tables_exist
+      artifactRef: tests/test_schema.py::test_required_columns
 
     - id: foreign-keys
       description: Foreign key constraints are enforced
@@ -41,14 +41,19 @@ expectedOutcome:
       artifactRef: tests/test_schema.py::test_foreign_keys_enforced
 
     - id: indexes-present
-      description: Required indexes exist
+      description: Required indexes exist on stated column targets
       substantiation: test
       artifactRef: tests/test_schema.py::test_indexes_exist
 
     - id: view-correct
-      description: daily_sales_summary computes correct aggregates for seed data
+      description: daily_sales_summary has required columns and correct aggregates
       substantiation: test
       artifactRef: tests/test_schema.py::test_daily_sales_summary
+
+    - id: schema-idempotent
+      description: schema.sql can be applied repeatedly without error
+      substantiation: test
+      artifactRef: tests/test_schema.py::test_schema_idempotent
 
   successCriteria:
     - Schema applies without errors
@@ -80,8 +85,6 @@ eligibilityGates:
 
 networkPolicy:
   allowed: false
-  provenanceRequired: false
-  record: []
 
 fixturePath: sqlite-analytics-schema
 

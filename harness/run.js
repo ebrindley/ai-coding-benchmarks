@@ -4,7 +4,7 @@
  * Resumable and deterministic.
  */
 
-import { mkdir, access, lstat, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, access, lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -209,7 +209,12 @@ async function loadPeers() {
       assertWorkspaceOutsideCampaign,
     },
     { getInvoker, buildInvocationRequest },
-    { runGates, detectConfinement, sanitizeGateResultsForStorage },
+    {
+      runGates,
+      detectConfinement,
+      sanitizeGateResultsForStorage,
+      assertHarnessCacheDir,
+    },
     { classifyTrial },
     {
       writeTrialResult,
@@ -220,6 +225,8 @@ async function loadPeers() {
       computeResultDigest,
       computeArtifactDigest,
       verifyCampaignEvidenceDigests,
+      tryAdoptDurableTrialResult,
+      clearTrialDurableState,
     },
     { buildReport, formatHumanSummary },
     {
@@ -267,6 +274,7 @@ async function loadPeers() {
     runGates,
     detectConfinement,
     sanitizeGateResultsForStorage,
+    assertHarnessCacheDir,
     classifyTrial,
     writeTrialResult,
     quarantineRawOutput,
@@ -276,6 +284,8 @@ async function loadPeers() {
     computeResultDigest,
     computeArtifactDigest,
     verifyCampaignEvidenceDigests,
+    tryAdoptDurableTrialResult,
+    clearTrialDurableState,
     buildReport,
     formatHumanSummary,
     assertSafeTrialId,
@@ -885,14 +895,70 @@ export async function runCampaign(opts) {
     let executed = 0;
     const maxTrials = opts.maxTrials ?? Number.POSITIVE_INFINITY;
 
+    // Crash-window resume: adopt a verified durable result when present;
+    // otherwise recover running → pending and clear stale durable state so a
+    // re-run cannot reuse partial/forged artifacts.
     for (const t of manifest.trials) {
-      if (t.state === 'running') {
-        peers.updateTrial(manifest, t.id, {
-          state: 'pending',
-          error: 'recovered from interrupted running state',
-        });
+      if (t.state !== 'running') continue;
+      let adopted = null;
+      if (typeof peers.tryAdoptDurableTrialResult === 'function') {
+        try {
+          adopted = await peers.tryAdoptDurableTrialResult(campaignDir, t);
+        } catch (err) {
+          adopted = {
+            ok: false,
+            reason: err instanceof Error ? err.message : String(err),
+          };
+        }
       }
+      if (adopted && adopted.ok === true && adopted.result) {
+        const r = adopted.result;
+        peers.updateTrial(manifest, t.id, {
+          state: adopted.state,
+          classification:
+            adopted.classification ?? r.classification ?? null,
+          classificationReason:
+            r.classificationReason != null
+              ? String(r.classificationReason)
+              : 'adopted durable result on resume',
+          finishedAt:
+            r.finishedAt != null
+              ? String(r.finishedAt)
+              : new Date().toISOString(),
+          error: undefined,
+        });
+        log(
+          `trial ${t.id}: adopted durable result (${adopted.state}/${adopted.classification ?? 'n/a'})`,
+        );
+        continue;
+      }
+      // No valid durable result — recover to pending and scrub stale data.
+      if (typeof peers.clearTrialDurableState === 'function') {
+        try {
+          await peers.clearTrialDurableState(campaignDir, t.id);
+        } catch (err) {
+          return {
+            ok: false,
+            stage: 'resume',
+            campaignDir,
+            manifest,
+            errors: [
+              `failed to clear stale durable state for ${t.id}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            ],
+          };
+        }
+      }
+      peers.updateTrial(manifest, t.id, {
+        state: 'pending',
+        error:
+          adopted && adopted.reason
+            ? `recovered from interrupted running state (${adopted.reason})`
+            : 'recovered from interrupted running state',
+      });
     }
+    await peers.saveManifest(campaignDir, manifest);
     let pending = manifest.trials.filter((t) => t.state === 'pending');
 
     while (executed < maxTrials) {
@@ -923,6 +989,32 @@ export async function runCampaign(opts) {
 
       const task = tasksById[trial.taskId];
       const startedAt = new Date().toISOString();
+      // Real re-run: drop any stale durable result/raw/artifacts before invoke
+      // so a prior partial write cannot be adopted mid-trial or at next resume.
+      if (typeof peers.clearTrialDurableState === 'function') {
+        try {
+          await peers.clearTrialDurableState(campaignDir, trial.id);
+        } catch (err) {
+          const message = `failed to clear stale durable state before re-run: ${
+            err instanceof Error ? err.message : String(err)
+          }`;
+          peers.updateTrial(manifest, trial.id, {
+            state: 'pending',
+            error: message,
+            classification: null,
+          });
+          await peers.saveManifest(campaignDir, manifest);
+          return {
+            ok: false,
+            stage: 'execution',
+            campaignDir,
+            manifest,
+            executed,
+            remaining: manifest.trials.filter((t) => t.state === 'pending').length,
+            errors: [message],
+          };
+        }
+      }
       peers.updateTrial(manifest, trial.id, {
         state: 'running',
         startedAt,
@@ -931,8 +1023,14 @@ export async function runCampaign(opts) {
 
       /** @type {Record<string, unknown>} */
       let trialUpdate = {};
+      /** @type {boolean} */
+      let durableWriteOk = false;
+      /** @type {string | null} */
+      let durableWriteError = null;
       /** @type {string | null} */
       let trialWorkspaceDir = null;
+      /** @type {string | null} */
+      let trialCacheDir = null;
       try {
         // Prefer already-validated/canonical fixture dir from corpus loading.
         // Fall back only when absent, still contained under suite fixtures/.
@@ -976,6 +1074,23 @@ export async function runCampaign(opts) {
         }
 
         trialWorkspaceDir = workspace.workspaceDir;
+
+        // Per-trial harness-owned tool-cache dir: a SIBLING under the execution
+        // root (option b), not nested in the workspace. Kept out of the
+        // workspace so baseline-diff never sees cache artifacts as changed
+        // files and assertHarnessCacheDir's disjoint-from-workspace guard holds.
+        // Cleaned in the same finally as the workspace via the existing
+        // validated cleanupExecutionWorkspace remove — no new lifecycle code and
+        // no caches accumulating across trials.
+        trialCacheDir = await mkdtemp(
+          path.join(executionRoot, `${peers.assertSafeTrialId(trial.id)}-toolcache-`),
+        );
+        // Validate as a security boundary before it becomes a writable bind.
+        await peers.assertHarnessCacheDir({
+          cacheDir: trialCacheDir,
+          workspaceDir: workspace.workspaceDir,
+          executionRoot,
+        });
 
         const invoker = peers.getInvoker(arm.invocationPath);
         const timeoutMs = experiment.timeoutMs;
@@ -1105,11 +1220,15 @@ export async function runCampaign(opts) {
         const gateResults = await peers.runGates({
           gates: task.eligibilityGates || [],
           workspaceDir: workspace.workspaceDir,
+          baselineCommit: workspace.baselineCommit,
           oracleRoot,
           confinement,
           task,
           envAllowlist: arm.envAllowlist,
           sandboxMode: arm.sandboxMode,
+          // Per-trial writable tool-cache dir: HOME + NuGet/npm/pip/Cargo/Go/Maven
+          // caches redirect here inside confinement (host $HOME is invisible).
+          cacheDir: trialCacheDir,
         });
         const safeGateResults =
           typeof peers.sanitizeGateResultsForStorage === 'function'
@@ -1118,21 +1237,15 @@ export async function runCampaign(opts) {
 
         let changedFileCount = null;
         try {
-          const { spawnControlled } = await import(
-            './invokers/spawn-controlled.js'
+          // Baseline-relative count via harness-owned git (neutral config/env),
+          // same authority as baseline-diff — not mutable status alone.
+          const { countMeaningfulBaselineChangedFiles } = await import(
+            './gates.js'
           );
-          const { countMeaningfulChangedFiles } = await import('./gates.js');
-          const diff = await spawnControlled({
-            command: 'git',
-            args: ['-C', workspace.workspaceDir, 'status', '--porcelain'],
-            timeoutMs: 10_000,
-            // Trusted harness helper — not a provider; do not require campaign mask
-            confine: false,
-          });
-          if (diff.exitCode === 0) {
-            // Exclude .poetic/** bookkeeping so telemetry-only runs are NO_OP
-            changedFileCount = countMeaningfulChangedFiles(diff.stdout);
-          }
+          changedFileCount = await countMeaningfulBaselineChangedFiles(
+            workspace.workspaceDir,
+            { baselineCommit: workspace.baselineCommit },
+          );
         } catch {
           changedFileCount = null;
         }
@@ -1257,57 +1370,88 @@ export async function runCampaign(opts) {
           // Bind identity to frozen manifest trial row (lane B contract).
           { manifestTrial: trial },
         );
+        // Only mark durable write OK after result.json is fully persisted.
+        // Manifest terminal transitions require this flag (no swallow-and-complete).
+        durableWriteOk = true;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        trialUpdate = {
-          state: 'failed',
-          classification: 'INFRA_FAIL',
-          classificationReason: message,
-          error: message,
-          resolvedModel: null,
-          resolvedModelAvailable: false,
-          resolvedModelSource: 'unavailable',
-          finishedAt: new Date().toISOString(),
-          startedAt,
-          ...(trialWorkspaceDir
-            ? { workspaceDir: trialWorkspaceDir, executionRoot }
-            : { executionRoot }),
-        };
-        try {
-          // Infra path without provider raw artifacts: mark unavailable for reportability.
-          // resultDigest stamped by writeTrialResult over the final envelope.
-          const infraDigests = peers.buildTrialDigests({});
-          infraDigests.rawEvidenceUnavailable = true;
-          const {
-            expectedFixtureDigest: _expFix2,
-            fixturePath: _fixPath2,
-            ...trialPublicInfra
-          } = trial;
-          await peers.writeTrialResult(
-            campaignDir,
-            trial.id,
-            {
-              ...trialPublicInfra,
-              ...trialUpdate,
-              // Ensure required identity fields exist for schema write
-              experimentId: trial.experimentId ?? trialPublicInfra.experimentId,
-              arm: trial.arm ?? trialPublicInfra.arm,
-              taskId: trial.taskId ?? trialPublicInfra.taskId,
-              repetition: trial.repetition ?? trialPublicInfra.repetition,
-              scheduleSeed: trial.scheduleSeed ?? trialPublicInfra.scheduleSeed,
-              invocationPath:
-                trial.invocationPath ?? trialPublicInfra.invocationPath,
-              requestedModel:
-                trial.requestedModel !== undefined
-                  ? trial.requestedModel
-                  : trialPublicInfra.requestedModel ?? null,
-              exitCode: null,
-              digests: infraDigests,
-            },
-            { manifestTrial: trial },
-          );
-        } catch {
-          /* best effort */
+        // Classification completed but durable write failed: never mark the
+        // manifest terminal without a verified result.json — recover to pending.
+        const classifiedAlready =
+          trialUpdate &&
+          (trialUpdate.state === 'completed' || trialUpdate.state === 'failed');
+        if (classifiedAlready) {
+          durableWriteOk = false;
+          durableWriteError = `durable result write failed: ${message}`;
+          trialUpdate = {
+            state: 'pending',
+            error: durableWriteError,
+            classification: null,
+            classificationReason: undefined,
+            finishedAt: undefined,
+          };
+        } else {
+          // Pre-classification / early infra failure: try to persist an
+          // INFRA_FAIL durable result; if that write also fails, pending.
+          const infraUpdate = {
+            state: 'failed',
+            classification: 'INFRA_FAIL',
+            classificationReason: message,
+            error: message,
+            resolvedModel: null,
+            resolvedModelAvailable: false,
+            resolvedModelSource: 'unavailable',
+            finishedAt: new Date().toISOString(),
+            startedAt,
+            ...(trialWorkspaceDir
+              ? { workspaceDir: trialWorkspaceDir, executionRoot }
+              : { executionRoot }),
+          };
+          try {
+            const infraDigests = peers.buildTrialDigests({});
+            infraDigests.rawEvidenceUnavailable = true;
+            const {
+              expectedFixtureDigest: _expFix2,
+              fixturePath: _fixPath2,
+              ...trialPublicInfra
+            } = trial;
+            await peers.writeTrialResult(
+              campaignDir,
+              trial.id,
+              {
+                ...trialPublicInfra,
+                ...infraUpdate,
+                experimentId: trial.experimentId ?? trialPublicInfra.experimentId,
+                arm: trial.arm ?? trialPublicInfra.arm,
+                taskId: trial.taskId ?? trialPublicInfra.taskId,
+                repetition: trial.repetition ?? trialPublicInfra.repetition,
+                scheduleSeed: trial.scheduleSeed ?? trialPublicInfra.scheduleSeed,
+                invocationPath:
+                  trial.invocationPath ?? trialPublicInfra.invocationPath,
+                requestedModel:
+                  trial.requestedModel !== undefined
+                    ? trial.requestedModel
+                    : trialPublicInfra.requestedModel ?? null,
+                exitCode: null,
+                digests: infraDigests,
+              },
+              { manifestTrial: trial },
+            );
+            trialUpdate = infraUpdate;
+            durableWriteOk = true;
+          } catch (writeErr) {
+            durableWriteOk = false;
+            durableWriteError = `durable result write failed: ${
+              writeErr instanceof Error ? writeErr.message : String(writeErr)
+            } (prior: ${message})`;
+            trialUpdate = {
+              state: 'pending',
+              error: durableWriteError,
+              classification: null,
+              classificationReason: undefined,
+              finishedAt: undefined,
+            };
+          }
         }
       } finally {
         // Remove external execution workspace after trial when possible.
@@ -1318,13 +1462,63 @@ export async function runCampaign(opts) {
             })
             .catch(() => {});
         }
+        // Remove the per-trial tool-cache dir on success/failure/timeout so
+        // downloaded artifacts + candidate code never accumulate across trials.
+        // Same validated remove as the workspace (both are siblings under the
+        // execution root); refuses anything outside it.
+        if (trialCacheDir) {
+          await peers
+            .cleanupExecutionWorkspace(trialCacheDir, {
+              executionRoot,
+            })
+            .catch(() => {});
+        }
       }
 
-      peers.updateTrial(manifest, trial.id, trialUpdate);
+      // Manifest terminal states only when durable result write succeeded.
+      // Otherwise recover to pending so resume can re-execute cleanly.
+      if (
+        durableWriteOk &&
+        trialUpdate.state &&
+        (trialUpdate.state === 'completed' || trialUpdate.state === 'failed')
+      ) {
+        peers.updateTrial(manifest, trial.id, trialUpdate);
+      } else if (!durableWriteOk) {
+        // Clear any partial durable fragments before parking pending.
+        if (typeof peers.clearTrialDurableState === 'function') {
+          try {
+            await peers.clearTrialDurableState(campaignDir, trial.id);
+          } catch (err) {
+            durableWriteError = `${durableWriteError || 'durable result write failed'}; partial state cleanup failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+          }
+        }
+        peers.updateTrial(manifest, trial.id, {
+          state: 'pending',
+          error:
+            (trialUpdate && trialUpdate.error) ||
+            'durable result write failed; recovered to pending',
+          classification: null,
+        });
+      } else {
+        peers.updateTrial(manifest, trial.id, trialUpdate);
+      }
       await peers.saveManifest(campaignDir, manifest);
       executed += 1;
       pending = manifest.trials.filter((t) => t.state === 'pending');
       log(`trial ${trial.id} → ${trialUpdate.classification || trialUpdate.state}`);
+      if (durableWriteError) {
+        return {
+          ok: false,
+          stage: 'result-write',
+          campaignDir,
+          manifest,
+          executed,
+          remaining: pending.length,
+          errors: [durableWriteError],
+        };
+      }
     }
 
     const trialResults = [];

@@ -23,8 +23,9 @@ description: |
   - "invalid token: <token>" for an unrecognized token
   - "invalid expression" when more than one value remains at the end
 
-  Use only the standard library. Do not change the eval signature; do not edit
-  the #[cfg(test)] module. src/main.rs is a provided CLI wrapper.
+  Use only the standard library. Do not change the eval signature. Do not edit
+  files under tests/ (protected). The starter eval is intentionally incomplete
+  (todo!). src/main.rs is a provided CLI wrapper.
 complexity: medium
 
 expectedOutcome:
@@ -32,19 +33,19 @@ expectedOutcome:
     - id: basic-arithmetic
       description: Add/subtract/multiply/divide with correct operand order
       substantiation: test
-      artifactRef: src/lib.rs::tests::multiplication_and_addition
+      artifactRef: tests/eval_tests.rs::multiplication_and_addition
     - id: integer-division
       description: Division is integer division
       substantiation: test
-      artifactRef: src/lib.rs::tests::integer_division
+      artifactRef: tests/eval_tests.rs::integer_division
     - id: negative-numbers
       description: Negative integer literals parse correctly
       substantiation: test
-      artifactRef: src/lib.rs::tests::negative_numbers
+      artifactRef: tests/eval_tests.rs::negative_numbers
     - id: error-contract
       description: Empty, underflow, divide-by-zero, invalid-token, leftover errors
       substantiation: test
-      artifactRef: src/lib.rs::tests::divide_by_zero_is_error
+      artifactRef: tests/eval_tests.rs::divide_by_zero_is_error
 
   successCriteria:
     - All tests pass
@@ -53,7 +54,7 @@ expectedOutcome:
 
 eligibilityGates:
   - gate: baseline-diff
-    check: Only implementation files changed (no test-module edits)
+    check: Only implementation files changed (no test-directory edits)
     order: 1
   - gate: build
     check: cargo build succeeds
@@ -68,21 +69,6 @@ eligibilityGates:
   - gate: requirements
     check: All must_have items substantiated by test results
     order: 4
-
-scoring:
-  delivery:
-    weight: 0.4
-    evidence:
-      - diff
-      - file_changes
-  correctness:
-    weight: 0.4
-    evidence:
-      - test_results
-  quality:
-    weight: 0.2
-    evidence:
-      - build_warnings_delta
 
 fixturePath: rust-rpn-calc
 

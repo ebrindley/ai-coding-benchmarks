@@ -63,7 +63,11 @@ describe('capability isolation: workspaces outside campaign tree', () => {
         campaignId: 'camp-safe-1',
         campaignDir: campaign,
         trialId: 'trial-1',
-        gitSpawn: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+        gitSpawn: async (args) => ({
+          exitCode: 0,
+          stdout: args[0] === 'rev-parse' ? `${'a'.repeat(40)}\n` : '',
+          stderr: '',
+        }),
       });
 
       assert.ok(created.workspaceDir);
@@ -834,6 +838,228 @@ process.exit(0);
       assert.equal(noRaw.stdout, '');
       assert.equal(noRaw.stderr, '');
       assert.ok(noRaw.parsedOutput == null || noRaw.success === false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('harness-owned git isolation (neutral config)', () => {
+  it('malicious core.fsmonitor is not executed by harness git', async () => {
+    const {
+      initWorkspaceGit,
+      runHarnessGit,
+      buildHarnessGitArgv,
+      buildHarnessGitEnv,
+    } = await import('../harness/workspace.js');
+    const { collectBaselineChangedPaths, evaluateBaselineDiff } = await import(
+      '../harness/gates.js'
+    );
+
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-fsmonitor-'));
+    try {
+      await writeFile(path.join(dir, 'main.js'), 'export default 0;\n', 'utf8');
+      const { baselineCommit } = await initWorkspaceGit(dir, {
+        trialId: 'fsmon',
+      });
+
+      const marker = path.join(dir, 'FSMONITOR_RAN');
+      const hook = path.join(dir, 'evil-fsmonitor.sh');
+      await writeFile(
+        hook,
+        `#!/bin/sh\necho ran > "${marker}"\nexit 0\n`,
+        'utf8',
+      );
+      await chmod(hook, 0o755);
+
+      // Provider-controlled local config tries to install a callback.
+      const cfg = await runHarnessGit(dir, [
+        'config',
+        'core.fsmonitor',
+        hook,
+      ]);
+      assert.equal(cfg.exitCode, 0);
+
+      // Neutral argv/env always force-disable fsmonitor on the command line.
+      const argv = buildHarnessGitArgv(['status', '--porcelain']);
+      assert.ok(argv.includes('core.fsmonitor='));
+      const env = buildHarnessGitEnv();
+      assert.equal(env.GIT_CONFIG_NOSYSTEM, '1');
+      assert.ok(env.GIT_CONFIG_GLOBAL);
+      assert.equal(env.GIT_NO_REPLACE_OBJECTS, '1');
+
+      const collected = await collectBaselineChangedPaths(dir, {
+        baselineCommit,
+      });
+      assert.equal(collected.ok, true, collected.error);
+      assert.equal(collected.baselineCommit, baselineCommit);
+
+      // Marker must not exist — fsmonitor hook never ran.
+      await assert.rejects(() => access(marker), /ENOENT/);
+
+      // baseline-diff still evaluates (no helper callback failure).
+      const gate = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate: { gate: 'baseline-diff', order: 1 },
+        baselineCommit,
+      });
+      assert.equal(gate.status, 'passed');
+      assert.notEqual(gate.classificationSignal, 'INFRA_FAIL');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('initWorkspaceGit returns a sealed fixture baseline commit', async () => {
+    const { initWorkspaceGit, runHarnessGit } = await import(
+      '../harness/workspace.js'
+    );
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-baseline-tag-'));
+    try {
+      await writeFile(path.join(dir, 'a.txt'), 'a\n', 'utf8');
+      const init = await initWorkspaceGit(dir, { trialId: 'tag-check' });
+      assert.match(init.baselineCommit, /^[0-9a-f]{40,64}$/);
+      const rev = await runHarnessGit(dir, [
+        'rev-parse',
+        '--verify',
+        `${init.baselineCommit}^{commit}`,
+      ]);
+      assert.equal(rev.exitCode, 0);
+      assert.equal(String(rev.stdout).trim(), init.baselineCommit);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('baseline comparison rejects repository-local clean filters before execution', async () => {
+    const { initWorkspaceGit, runHarnessGit } = await import(
+      '../harness/workspace.js'
+    );
+    const { collectBaselineChangedPaths, evaluateBaselineDiff } = await import(
+      '../harness/gates.js'
+    );
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-clean-filter-'));
+    try {
+      await mkdir(path.join(dir, 'tests'), { recursive: true });
+      await writeFile(path.join(dir, 'tests', 'guard.test.js'), 'original\n', 'utf8');
+      const { baselineCommit } = await initWorkspaceGit(dir, {
+        trialId: 'clean-filter',
+      });
+      const marker = path.join(dir, 'FILTER_RAN');
+      const filter = path.join(dir, 'clean-filter.sh');
+      await writeFile(
+        filter,
+        `#!/bin/sh\necho ran > "${marker}"\nprintf 'original\\n'\n`,
+        'utf8',
+      );
+      await chmod(filter, 0o755);
+      await writeFile(
+        path.join(dir, '.gitattributes'),
+        'tests/guard.test.js filter=hide\n',
+        'utf8',
+      );
+      const configured = await runHarnessGit(dir, [
+        'config',
+        'filter.hide.clean',
+        filter,
+      ]);
+      assert.equal(configured.exitCode, 0);
+      await writeFile(path.join(dir, 'tests', 'guard.test.js'), 'weakened\n', 'utf8');
+
+      const collected = await collectBaselineChangedPaths(dir, {
+        baselineCommit,
+      });
+      assert.equal(collected.ok, false);
+      assert.match(collected.error, /unsafe repository-local git config|filter\.hide/i);
+      const result = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate: { gate: 'baseline-diff', order: 1 },
+        baselineCommit,
+      });
+      assert.equal(result.status, 'failed');
+      assert.equal(result.classificationSignal, 'FAIL');
+      await assert.rejects(() => access(marker), /ENOENT/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('sealed baseline ignores provider-created replacement refs', async () => {
+    const { initWorkspaceGit, runHarnessGit } = await import(
+      '../harness/workspace.js'
+    );
+    const { evaluateBaselineDiff } = await import('../harness/gates.js');
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-replace-ref-'));
+    try {
+      await mkdir(path.join(dir, 'tests'), { recursive: true });
+      await writeFile(path.join(dir, 'tests', 'guard.test.js'), 'original\n', 'utf8');
+      const { baselineCommit } = await initWorkspaceGit(dir, {
+        trialId: 'replace-ref',
+      });
+      await writeFile(path.join(dir, 'tests', 'guard.test.js'), 'weakened\n', 'utf8');
+      assert.equal((await runHarnessGit(dir, ['add', '-A'])).exitCode, 0);
+      assert.equal(
+        (await runHarnessGit(dir, ['commit', '-m', 'weaken protected test'])).exitCode,
+        0,
+      );
+      assert.equal(
+        (await runHarnessGit(dir, ['replace', baselineCommit, 'HEAD'])).exitCode,
+        0,
+      );
+
+      const result = await evaluateBaselineDiff({
+        workspaceDir: dir,
+        gate: { gate: 'baseline-diff', order: 1 },
+        baselineCommit,
+      });
+      assert.equal(result.status, 'failed');
+      assert.match(result.evidence, /guard\.test\.js|protected/i);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('baseline comparison rejects assume-unchanged and skip-worktree flags', async () => {
+    const { initWorkspaceGit, runHarnessGit } = await import(
+      '../harness/workspace.js'
+    );
+    const { collectBaselineChangedPaths, evaluateBaselineDiff } = await import(
+      '../harness/gates.js'
+    );
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-index-flags-'));
+    try {
+      await mkdir(path.join(dir, 'tests'), { recursive: true });
+      const rel = 'tests/guard.test.js';
+      const abs = path.join(dir, rel);
+      await writeFile(abs, 'original\n', 'utf8');
+      const { baselineCommit } = await initWorkspaceGit(dir, {
+        trialId: 'index-flags',
+      });
+
+      for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+        assert.equal((await runHarnessGit(dir, ['update-index', flag, rel])).exitCode, 0);
+        await writeFile(abs, `weakened by ${flag}\n`, 'utf8');
+        const collected = await collectBaselineChangedPaths(dir, {
+          baselineCommit,
+        });
+        assert.equal(collected.ok, false);
+        assert.match(collected.error, /index concealment flags|guard\.test\.js/i);
+        const result = await evaluateBaselineDiff({
+          workspaceDir: dir,
+          gate: { gate: 'baseline-diff', order: 1 },
+          baselineCommit,
+        });
+        assert.equal(result.status, 'failed');
+        assert.equal(result.classificationSignal, 'FAIL');
+
+        const clear =
+          flag === '--assume-unchanged'
+            ? '--no-assume-unchanged'
+            : '--no-skip-worktree';
+        assert.equal((await runHarnessGit(dir, ['update-index', clear, rel])).exitCode, 0);
+        await writeFile(abs, 'original\n', 'utf8');
+        assert.equal((await runHarnessGit(dir, ['update-index', '--refresh'])).exitCode, 0);
+      }
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

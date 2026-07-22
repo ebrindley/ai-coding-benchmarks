@@ -2,14 +2,21 @@
  * Human-readable and JSON summary reports (report.schema.json).
  *
  * Critical rule: never silently aggregate different invocationPath,
- * resolvedModel, or postureFingerprint into one stats cell. passRate is
- * computed only on homogeneous cells. Global totals may count n/completed
- * but leave passRate null when the set is heterogeneous.
+ * resolvedModel, or postureFingerprint into one stats cell. Rates
+ * (passRate, capabilityPassRate, infraRate, timeoutRate) are computed only
+ * on homogeneous cells. Global totals may count n/completed but leave rates
+ * null when the set is heterogeneous.
+ *
+ * Rate definitions (homogeneous cells only; null when refused or denom=0):
+ * - passRate (legacy): PASS / completed — all terminal outcomes in denom
+ * - capabilityPassRate: PASS / (PASS + FAIL + NO_OP) — INFRA_FAIL/TIMEOUT out
+ * - infraRate: INFRA_FAIL / completed
+ * - timeoutRate: TIMEOUT / completed
  */
 
 import { SCHEMA_VERSION, CLASSIFICATIONS } from './contracts.js';
 
-/** Dimensions that must not be mixed inside a passRate cell. */
+/** Dimensions that must not be mixed inside a rate cell. */
 export const HOMOGENEITY_DIMS = Object.freeze([
   'invocationPath',
   'resolvedModel',
@@ -18,7 +25,21 @@ export const HOMOGENEITY_DIMS = Object.freeze([
 ]);
 
 /**
- * @returns {{ n: number, completed: number, pass: number, fail: number, noOp: number, infraFail: number, timeout: number, passRate: number|null, meanDurationMs: number|null }}
+ * @returns {{
+ *   n: number,
+ *   completed: number,
+ *   pass: number,
+ *   fail: number,
+ *   noOp: number,
+ *   infraFail: number,
+ *   timeout: number,
+ *   passRate: number|null,
+ *   capabilityPassRate: number|null,
+ *   capabilityDenom: number,
+ *   infraRate: number|null,
+ *   timeoutRate: number|null,
+ *   meanDurationMs: number|null,
+ * }}
  */
 function emptyStats() {
   return {
@@ -29,7 +50,14 @@ function emptyStats() {
     noOp: 0,
     infraFail: 0,
     timeout: 0,
+    // Legacy all-terminal-outcome rate: PASS / completed
     passRate: null,
+    // Capability-only: PASS / (PASS + FAIL + NO_OP)
+    capabilityPassRate: null,
+    capabilityDenom: 0,
+    // Infrastructure / timeout rates over terminal trials
+    infraRate: null,
+    timeoutRate: null,
     meanDurationMs: null,
   };
 }
@@ -84,20 +112,43 @@ function accumulate(stats, trial, acc) {
 /**
  * @param {ReturnType<typeof emptyStats>} stats
  * @param {number[]} durations
- * @param {boolean} allowPassRate
+ * @param {boolean} allowRates  true only for homogeneous cells (same gate as legacy passRate)
  */
-function finalizeStats(stats, durations, allowPassRate) {
+function finalizeStats(stats, durations, allowRates) {
   if (durations.length > 0) {
     const sum = durations.reduce((a, b) => a + b, 0);
     stats.meanDurationMs = sum / durations.length;
   } else {
     stats.meanDurationMs = null;
   }
-  if (allowPassRate && stats.completed > 0) {
+
+  // Capability denominator always counted (even when rates are refused).
+  const capabilityDenom = stats.pass + stats.fail + stats.noOp;
+  stats.capabilityDenom = capabilityDenom;
+
+  // Legacy all-terminal-outcome rate: PASS / completed
+  if (allowRates && stats.completed > 0) {
     stats.passRate = stats.pass / stats.completed;
   } else {
     stats.passRate = null;
   }
+
+  // Capability: PASS / (PASS + FAIL + NO_OP); INFRA_FAIL/TIMEOUT excluded
+  if (allowRates && capabilityDenom > 0) {
+    stats.capabilityPassRate = stats.pass / capabilityDenom;
+  } else {
+    stats.capabilityPassRate = null;
+  }
+
+  // Infra / timeout over terminal (completed) trials
+  if (allowRates && stats.completed > 0) {
+    stats.infraRate = stats.infraFail / stats.completed;
+    stats.timeoutRate = stats.timeout / stats.completed;
+  } else {
+    stats.infraRate = null;
+    stats.timeoutRate = null;
+  }
+
   return stats;
 }
 
@@ -462,6 +513,32 @@ export function buildReport(manifest, trialResults) {
 }
 
 /**
+ * Format a rate for human output: fixed 3 decimals, or n/a when null/undefined.
+ * @param {number|null|undefined} rate
+ * @returns {string}
+ */
+function fmtRate(rate) {
+  return rate != null && Number.isFinite(rate) ? rate.toFixed(3) : 'n/a';
+}
+
+/**
+ * Compact rate line for totals / byArm / cells.
+ * Labels distinguish legacy all-terminal passRate from capability/infra/timeout.
+ * @param {object} s  stats block
+ * @returns {string}
+ */
+function formatStatsRates(s) {
+  const capDenom = s.capabilityDenom ?? 0;
+  return (
+    `passRate(legacy all-terminal)=${fmtRate(s.passRate)}` +
+    ` capabilityPassRate=PASS/(PASS+FAIL+NO_OP)=${fmtRate(s.capabilityPassRate)}` +
+    ` capabilityDenom=${capDenom}` +
+    ` infraRate=${fmtRate(s.infraRate)} (infraFail=${s.infraFail ?? 0}/${s.completed ?? 0})` +
+    ` timeoutRate=${fmtRate(s.timeoutRate)} (timeout=${s.timeout ?? 0}/${s.completed ?? 0})`
+  );
+}
+
+/**
  * Quiet multi-line human summary of a report.
  * @param {object} report
  * @returns {string}
@@ -482,8 +559,7 @@ export function formatHumanSummary(report) {
 
   const t = report.totals || {};
   lines.push(
-    `Totals: n=${t.n ?? 0} completed=${t.completed ?? 0}` +
-      (t.passRate != null ? ` passRate=${t.passRate.toFixed(3)}` : ' passRate=n/a'),
+    `Totals: n=${t.n ?? 0} completed=${t.completed ?? 0} ${formatStatsRates(t)}`,
   );
 
   if (report.classifications) {
@@ -497,10 +573,8 @@ export function formatHumanSummary(report) {
     lines.push('By arm:');
     for (const row of report.byArm) {
       const s = row.stats || {};
-      const rate =
-        s.passRate != null ? s.passRate.toFixed(3) : 'n/a';
       lines.push(
-        `  ${row.arm} path=${row.invocationPath ?? '?'} model=${row.resolvedModel ?? row.requestedModel ?? '?'} posture=${short(row.postureFingerprint)}: n=${s.n ?? 0} completed=${s.completed ?? 0} passRate=${rate}`,
+        `  ${row.arm} path=${row.invocationPath ?? '?'} model=${row.resolvedModel ?? row.requestedModel ?? '?'} posture=${short(row.postureFingerprint)}: n=${s.n ?? 0} completed=${s.completed ?? 0} ${formatStatsRates(s)}`,
       );
     }
   }
@@ -509,10 +583,8 @@ export function formatHumanSummary(report) {
     lines.push(`Cells (${report.cells.length}):`);
     for (const cell of report.cells) {
       const s = cell.stats || {};
-      const rate =
-        s.passRate != null ? s.passRate.toFixed(3) : 'n/a';
       lines.push(
-        `  ${cell.arm} / ${cell.taskId} / ${cell.invocationPath} / model=${cell.resolvedModel ?? '?'} / posture=${short(cell.postureFingerprint)}: pass=${s.pass ?? 0}/${s.completed ?? 0} rate=${rate}`,
+        `  ${cell.arm} / ${cell.taskId} / ${cell.invocationPath} / model=${cell.resolvedModel ?? '?'} / posture=${short(cell.postureFingerprint)}: pass=${s.pass ?? 0}/${s.completed ?? 0} ${formatStatsRates(s)}`,
       );
     }
   }

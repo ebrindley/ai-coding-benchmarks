@@ -1,0 +1,156 @@
+# Brownfield Task: Fix Stale Cache Reads in Inventory Pipeline
+#
+# Category: Bug Fix (existing-codebase)
+# Language: Python (multi-module)
+# Complexity: High
+# Estimated Time: 60 minutes
+#
+# Bug: Cached category reports go stale after a mutation
+# Root cause: Write path invalidates cache by RAW category label, but read path
+#             tags cache entries by the CANONICAL category. When they differ the
+#             invalidation misses and stale values survive.
+
+taskId: brownfield-014-python-pipeline-cache-invalidation
+type: brownfield
+codeType: existing-codebase
+category: bugfix
+language: python
+description: |
+  Fix a cross-module cache-invalidation bug in an inventory pipeline.
+
+  The service is split across four modules that must agree on one thing -- the
+  category "key space":
+    - src/normalize.py  canonicalizes raw labels (casing/whitespace/aliases)
+    - src/store.py      keeps product category labels VERBATIM; logs raw dirty labels
+    - src/cache.py      tag-aware TTL cache; drops entries by EXACT tag string
+    - src/service.py    coordinates reads/writes (bug lives here)
+
+  Bug symptoms:
+  - After a restock/sell/add/remove, category_summary() and low_stock_report()
+    keep returning the value computed BEFORE the mutation.
+  - Only happens when the product's raw label differs from its canonical form
+    (e.g. stored "Home & Kitchen" / "home and kitchen" vs canonical "home & kitchen").
+  - Reads keyed by an already-canonical label appear correct on first read but
+    never refresh.
+
+  Root cause hints:
+  - Reads tag cache entries with canonical_category(category).
+  - InventoryService._flush() invalidates using the store's RAW drained labels.
+  - raw_label != canonical_category(raw_label) => invalidate_tag() finds no match.
+
+  Constraints:
+  - Do NOT modify test files.
+  - The store must keep category labels verbatim (do not normalize in the store).
+  - The cache must stay exact-match (do not weaken invalidate_tag()).
+  - Do not change public method signatures.
+complexity: high
+
+expectedOutcome:
+  mustHave:
+    - id: reports-fresh-after-mutation
+      description: Cached summaries/reports reflect mutations across modules
+      substantiation: test
+      artifactRef: tests/test_service_integration.py::TestFreshAfterMutation
+
+    - id: cache-coherent
+      description: Behavioural coherence probe passes (no stale read after a mutation)
+      substantiation: static
+      evidenceGate: cache-coherence
+      artifactRef: scripts/check_cache_coherence.py
+
+    - id: existing-tests-pass
+      description: All tests pass (unit + integration)
+      substantiation: test
+      artifactRef: pytest tests/ exits 0
+
+    - id: no-test-edits
+      description: Fix is proven without modifying test files
+      substantiation: static
+      evidenceGate: no-test-edits
+      artifactRef: scripts/check_no_test_edits.py
+
+  niceToHave:
+    - id: labels-preserved-verbatim
+      description: Store still preserves raw category labels (not normalized away)
+      substantiation: test
+      artifactRef: tests/test_store.py::TestStore::test_category_preserved_verbatim
+
+    - id: cache-exact-match-preserved
+      description: Cache invalidation stays exact-match (not weakened to fuzzy match)
+      substantiation: test
+      artifactRef: tests/test_cache.py::TestTagInvalidation::test_invalidate_tag_is_exact_match
+
+  successCriteria:
+    - All must-have tests pass
+    - No stale reads after restock/sell/add/remove
+    - Fix coordinates store (raw) -> normalize (canonical) -> cache (tag) in service
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: install
+    check: Python tooling installed in .venv
+    command: bash scripts/setup-venv.sh
+    expectedExitCode: 0
+    order: 2
+
+  - gate: lint
+    check: No Python lint errors
+    command: ./.venv/bin/ruff check .
+    expectedExitCode: 0
+    order: 3
+
+  - gate: no-test-edits
+    check: No test files modified
+    command: ./.venv/bin/python scripts/check_no_test_edits.py
+    expectedExitCode: 0
+    order: 4
+
+  - gate: tests
+    check: All tests pass (unit + integration)
+    command: ./.venv/bin/python -m pytest tests/ -v
+    expectedExitCode: 0
+    order: 5
+
+  - gate: cache-coherence
+    check: Cached reports reflect mutations (no stale read)
+    command: ./.venv/bin/python scripts/check_cache_coherence.py
+    expectedExitCode: 0
+    order: 6
+
+  - gate: requirements
+    check: All must_have items substantiated by test results
+    order: 7
+
+networkPolicy:
+  allowed: true
+
+fixturePath: python-pipeline-cache
+
+# Fixture details
+fixture:
+  description: Multi-module inventory pipeline with a stale-cache bug
+  bugLocation: src/service.py::InventoryService._flush()
+  spansModules:
+    - src/service.py
+    - src/store.py
+    - src/normalize.py
+    - src/cache.py
+  testFramework: pytest
+  testCount: 34 tests (22 unit, 12 integration; 8 fail on baseline)
+  deterministicPattern: Injected FakeClock with long TTL so staleness is caused only by the bug
+  checkScripts:
+    cacheCoherence: scripts/check_cache_coherence.py
+    noTestEdits: scripts/check_no_test_edits.py
+
+tags:
+  - python
+  - multi-module
+  - cache-invalidation
+  - stale-read
+  - bug-fix
+  - existing-codebase
+
+estimatedMinutes: 60

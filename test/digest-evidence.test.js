@@ -1440,4 +1440,53 @@ describe('digest leaf swap / no-follow identity', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it('clearTrialDurableState removes result/raw/artifacts for clean re-run', async () => {
+    const {
+      clearTrialDurableState,
+      quarantineRawOutput,
+      readTrialResult,
+    } = await import('../harness/results.js');
+    const { writeCompleteTrial, completeManifestTrial } = await import(
+      './helpers/complete-trial.js'
+    );
+
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-clear-dur-'));
+    try {
+      const trialId = 't-clear-1';
+      await quarantineRawOutput(campaign, trialId, {
+        stdout: 'secret-out\n',
+        stderr: 'e\n',
+      });
+      await mkdir(path.join(campaign, 'artifacts', trialId), { recursive: true });
+      await writeFile(
+        path.join(campaign, 'artifacts', trialId, 'meta.json'),
+        '{}\n',
+        'utf8',
+      );
+      const manifestTrial = completeManifestTrial({ id: trialId, state: 'running' });
+      await writeCompleteTrial(
+        campaign,
+        trialId,
+        {
+          state: 'completed',
+          classification: 'PASS',
+          digests: { rawEvidenceUnavailable: true },
+        },
+        { manifestTrial },
+      );
+
+      const before = await readTrialResult(campaign, trialId);
+      assert.equal(before.id, trialId);
+
+      const cleared = await clearTrialDurableState(campaign, trialId);
+      assert.ok(cleared.cleared.includes('results'));
+      assert.ok(cleared.cleared.includes('raw'));
+      assert.ok(cleared.cleared.includes('artifacts'));
+
+      await assert.rejects(() => readTrialResult(campaign, trialId));
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+    }
+  });
 });

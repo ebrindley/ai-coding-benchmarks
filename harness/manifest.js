@@ -41,7 +41,9 @@ export const CAMPAIGN_STATUSES = Object.freeze([
 /** @type {Record<string, ReadonlySet<string>>} */
 const ALLOWED_TRANSITIONS = {
   pending: new Set(['running', 'skipped']),
-  // running → pending is allowed for crash recovery (interrupted trials)
+  // running → pending: crash recovery when no verified durable result exists
+  // running → completed|failed: adopt verified durable result.json (crash window)
+  // running → skipped: explicit skip paths
   running: new Set(['completed', 'failed', 'skipped', 'pending']),
   completed: new Set(),
   failed: new Set(),

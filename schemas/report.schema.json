@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://ai-coding-benchmarks.local/schemas/report.schema.json",
   "title": "SummaryReport",
-  "description": "Summary report contract emitted by buildReport. Aggregation keys MUST NOT mix distinct invocationPath, resolvedModel, requestedModel, or postureFingerprint values into a single cell. Each stats cell is keyed by a homogeneous (arm, taskId, invocationPath, requestedModel, resolvedModel, postureFingerprint) slice. Global totals may count n/completed but leave passRate null when the set is heterogeneous.",
+  "description": "Summary report contract emitted by buildReport. Aggregation keys MUST NOT mix distinct invocationPath, resolvedModel, requestedModel, or postureFingerprint values into a single cell. Each stats cell is keyed by a homogeneous (arm, taskId, invocationPath, requestedModel, resolvedModel, postureFingerprint) slice. Global totals may count n/completed but leave rates (passRate, capabilityPassRate, infraRate, timeoutRate) null when the set is heterogeneous. passRate is the legacy all-terminal-outcome rate (PASS/completed); capabilityPassRate excludes INFRA_FAIL and TIMEOUT from its denominator.",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -130,21 +130,70 @@
   "definitions": {
     "statsBlock": {
       "type": "object",
-      "required": ["n", "completed", "pass", "fail", "noOp", "infraFail", "timeout", "passRate", "meanDurationMs"],
+      "required": [
+        "n",
+        "completed",
+        "pass",
+        "fail",
+        "noOp",
+        "infraFail",
+        "timeout",
+        "passRate",
+        "capabilityPassRate",
+        "capabilityDenom",
+        "infraRate",
+        "timeoutRate",
+        "meanDurationMs"
+      ],
       "additionalProperties": false,
       "properties": {
         "n": { "type": "integer", "minimum": 0 },
-        "completed": { "type": "integer", "minimum": 0 },
+        "completed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Terminal/classified trial count; denominator for passRate, infraRate, timeoutRate"
+        },
         "pass": { "type": "integer", "minimum": 0 },
         "fail": { "type": "integer", "minimum": 0 },
         "noOp": { "type": "integer", "minimum": 0 },
-        "infraFail": { "type": "integer", "minimum": 0 },
-        "timeout": { "type": "integer", "minimum": 0 },
+        "infraFail": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "INFRA_FAIL count; numerator for infraRate"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "TIMEOUT count; numerator for timeoutRate"
+        },
         "passRate": {
           "type": ["number", "null"],
           "minimum": 0,
           "maximum": 1,
-          "description": "pass / completed when completed > 0 and cell is homogeneous; null when aggregation was refused"
+          "description": "Legacy all-terminal-outcome rate: PASS / completed when completed > 0 and cell is homogeneous; null when aggregation was refused or completed is 0. Prefer capabilityPassRate for capability comparisons."
+        },
+        "capabilityPassRate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Capability rate: PASS / (PASS + FAIL + NO_OP) when capabilityDenom > 0 and cell is homogeneous; INFRA_FAIL and TIMEOUT are excluded from the denominator; null when aggregation was refused or capabilityDenom is 0"
+        },
+        "capabilityDenom": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Denominator for capabilityPassRate: pass + fail + noOp (always counted; rates may still be null when heterogeneous)"
+        },
+        "infraRate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "INFRA_FAIL / completed over terminal/classified trials when completed > 0 and cell is homogeneous; null when refused or completed is 0. Interpret with infraFail and completed counts."
+        },
+        "timeoutRate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "TIMEOUT / completed over terminal/classified trials when completed > 0 and cell is homogeneous; null when refused or completed is 0. Interpret with timeout and completed counts."
         },
         "meanDurationMs": { "type": ["number", "null"] }
       }

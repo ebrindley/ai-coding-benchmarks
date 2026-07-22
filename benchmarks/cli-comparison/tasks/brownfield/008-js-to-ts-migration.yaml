@@ -48,6 +48,20 @@ eligibilityGates:
   - gate: baseline-diff
     check: Only allowed source/config files changed (no test/validator edits)
     order: 1
+    baselineDiffPolicy:
+      allow:
+        - package.json
+        - tsconfig.json
+        - src/array-utils.js
+        - src/array-utils.ts
+        - src/async-utils.js
+        - src/async-utils.ts
+        - src/index.js
+        - src/index.ts
+        - src/object-utils.js
+        - src/object-utils.ts
+        - src/string-utils.js
+        - src/string-utils.ts
 
   - gate: install
     check: Dependencies installed

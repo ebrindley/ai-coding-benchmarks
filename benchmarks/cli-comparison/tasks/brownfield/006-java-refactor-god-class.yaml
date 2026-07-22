@@ -18,30 +18,34 @@ codeType: existing-codebase
 category: refactor
 language: java
 description: |
-  Refactor a 2000-line "god class" into focused, single-responsibility services.
+  Refactor a mixed-responsibility OrderService into focused, single-responsibility
+  services. This is a compact fixture (~90 lines, not a multi-thousand-line monolith):
+  the point is the SRP split and wiring, not bulk mechanical extraction.
 
   Current state:
-  - OrderService.java handles orders, inventory, notifications, payments
-  - 2000+ lines, 45 methods, 12 dependencies
-  - Hard to test, hard to maintain, violates SRP
+  - OrderService.java mixes order lifecycle, inventory reservation, payments, and
+    notifications in one class (~90 lines, 6 public methods, in-memory maps)
+  - Hard to extend without touching unrelated concerns; violates SRP
 
   Target state:
-  - OrderService: Order lifecycle only
-  - InventoryService: Stock management
-  - NotificationService: Email/SMS notifications
-  - PaymentService: Payment processing
+  - OrderService: Order lifecycle orchestration (public API unchanged)
+  - InventoryService: Stock management (real methods, not an empty shell)
+  - NotificationService: Email/SMS notifications (real methods)
+  - PaymentService: Payment processing (real methods)
+  - OrderService must construct/hold and use the extracted services
 
   CRITICAL CONSTRAINTS:
   - All existing tests MUST pass without any modifications
   - Public API of OrderService MUST remain unchanged
   - Other classes may call new services, but OrderService signature stays same
   - Use constructor injection for new service dependencies
+  - Three empty or near-empty *Service.java files do NOT satisfy the refactor
 complexity: medium
 
 expectedOutcome:
   mustHave:
     - id: services-extracted
-      description: At least 3 new service classes created
+      description: At least 3 substantive new service classes created and wired into OrderService
       substantiation: static
       evidenceGate: service-count
       artifactRef: scripts/check-service-count.sh
@@ -116,7 +120,7 @@ eligibilityGates:
     order: 5
 
   - gate: service-count
-    check: At least 3 new service classes extracted
+    check: At least 3 substantive new service classes extracted and wired
     command: bash scripts/check-service-count.sh
     expectedExitCode: 0
     order: 6
@@ -131,32 +135,8 @@ eligibilityGates:
     check: All must_have items substantiated
     order: 8
 
-scoring:
-  delivery:
-    weight: 0.4
-    evidence:
-      - diff
-      - file_changes
-  correctness:
-    weight: 0.4
-    evidence:
-      - test_results
-  quality:
-    weight: 0.2
-    evidence:
-      - complexity_delta
-
-toolEvidencePolicy:
-  requiredWhen: tests are part of success_criteria
-  neutralWhen: never
-
 networkPolicy:
   allowed: true
-  provenanceRequired: true
-  record:
-    - urls
-    - timestamps
-    - content_hash
 
 fixturePath: java-god-class-service
 

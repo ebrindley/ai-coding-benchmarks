@@ -116,6 +116,46 @@ const PROMPT_BEARING_KEYS = new Set([
   'errorMessage',
 ]);
 
+/** sha256 hex digests stored on campaign inputDigests. */
+const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
+
+/**
+ * Known inputDigests fields. Required keys must be valid digests when the
+ * object is present; optional keys are included only when valid.
+ * Unknown keys are never exported (allowlist projection).
+ */
+const INPUT_DIGEST_REQUIRED_KEYS = Object.freeze([
+  'experiment',
+  'suite',
+  'tasks',
+  'harness',
+]);
+const INPUT_DIGEST_OPTIONAL_KEYS = Object.freeze(['fixtures', 'oracles']);
+
+/**
+ * Safe frozen-experiment top-level fields for portable trial-matrix provenance.
+ * Path-bearing, free-form, credential, and env-value fields are never projected.
+ */
+const EXPERIMENT_SAFE_TOP_KEYS = Object.freeze([
+  'id',
+  'schemaVersion',
+  'suiteId',
+  'taskIds',
+  'repetitions',
+  'seed',
+  'timeoutMs',
+]);
+
+/** Safe arm comparison fields (no command/args paths, env values, or free-form posture). */
+const EXPERIMENT_ARM_SAFE_KEYS = Object.freeze([
+  'name',
+  'provider',
+  'model',
+  'invocationPath',
+  'sandboxMode',
+  'promptTransport',
+]);
+
 /**
  * Expected raw quarantine filenames (whitelist). Never enumerate arbitrary names.
  */
@@ -210,6 +250,156 @@ export function isExportSafeReasonCode(value) {
 }
 
 /**
+ * Allowlist-project campaign inputDigests for sanitized export.
+ * Known digest fields are validated and copied unchanged; unknown keys are
+ * dropped. When present, the object must be well-formed (fail closed).
+ *
+ * @param {unknown} digests
+ * @returns {object | undefined}
+ */
+export function projectInputDigestsForExport(digests) {
+  if (digests == null) return undefined;
+  if (typeof digests !== 'object' || Array.isArray(digests)) {
+    throw new Error(
+      'exportSanitizedBundle: inputDigests must be an object (fail closed)',
+    );
+  }
+  const d = /** @type {Record<string, unknown>} */ (digests);
+  if (d.schemaVersion !== 1) {
+    throw new Error(
+      `exportSanitizedBundle: inputDigests.schemaVersion unsupported (fail closed): ${String(d.schemaVersion)}`,
+    );
+  }
+  /** @type {Record<string, unknown>} */
+  const out = { schemaVersion: 1 };
+  for (const key of INPUT_DIGEST_REQUIRED_KEYS) {
+    const value = d[key];
+    if (typeof value !== 'string' || !SHA256_HEX_RE.test(value)) {
+      throw new Error(
+        `exportSanitizedBundle: inputDigests.${key} must be a sha256 hex digest (fail closed)`,
+      );
+    }
+    // Unchanged: portable content digests, not host paths.
+    out[key] = value;
+  }
+  for (const key of INPUT_DIGEST_OPTIONAL_KEYS) {
+    if (d[key] == null) continue;
+    const value = d[key];
+    if (typeof value !== 'string' || !SHA256_HEX_RE.test(value)) {
+      throw new Error(
+        `exportSanitizedBundle: inputDigests.${key} must be a sha256 hex digest when present (fail closed)`,
+      );
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * True when a suite selector string is a safe relative id/path (no abs/home).
+ * @param {unknown} value
+ * @returns {value is string}
+ */
+function isSafeRelativeSuiteSelector(value) {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  if (value.includes('\0')) return false;
+  if (path.isAbsolute(value)) return false;
+  if (value.includes('..')) return false;
+  // Reject Windows drive / UNC and home-looking prefixes without resolving.
+  if (/^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\')) return false;
+  if (value.startsWith('~')) return false;
+  return true;
+}
+
+/**
+ * Allowlist-project frozen experiment for portable trial-matrix provenance.
+ * Excludes absolute paths, env values, prompts, credentials, free-form metadata,
+ * arbitrary unknown fields, and raw provider content.
+ *
+ * @param {unknown} experiment
+ * @returns {object | undefined}
+ */
+export function projectFrozenExperimentForExport(experiment) {
+  if (experiment == null) return undefined;
+  if (typeof experiment !== 'object' || Array.isArray(experiment)) {
+    throw new Error(
+      'exportSanitizedBundle: frozen experiment must be an object (fail closed)',
+    );
+  }
+  const exp = /** @type {Record<string, unknown>} */ (experiment);
+  /** @type {Record<string, unknown>} */
+  const out = {};
+
+  for (const key of EXPERIMENT_SAFE_TOP_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(exp, key)) continue;
+    const value = exp[key];
+    if (key === 'taskIds') {
+      if (!Array.isArray(value)) continue;
+      const ids = value.filter(
+        (id) => typeof id === 'string' && id.trim() !== '' && !id.includes('\0'),
+      );
+      out.taskIds = ids;
+      continue;
+    }
+    if (key === 'id' || key === 'suiteId') {
+      if (typeof value !== 'string' || value.trim() === '') continue;
+      // suiteId is a corpus-relative selector; reject absolute paths.
+      if (key === 'suiteId' && !isSafeRelativeSuiteSelector(value)) continue;
+      out[key] = value;
+      continue;
+    }
+    if (key === 'schemaVersion' || key === 'repetitions' || key === 'timeoutMs') {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        out[key] = value;
+      }
+      continue;
+    }
+    if (key === 'seed') {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        out.seed = value;
+      } else if (typeof value === 'string' && value.trim() !== '') {
+        out.seed = value;
+      }
+    }
+  }
+
+  // suitePath only when a safe relative suite selector (never absolute paths).
+  if (
+    Object.prototype.hasOwnProperty.call(exp, 'suitePath') &&
+    isSafeRelativeSuiteSelector(exp.suitePath)
+  ) {
+    out.suitePath = exp.suitePath;
+  }
+
+  if (Array.isArray(exp.arms)) {
+    out.arms = exp.arms.map((arm) => {
+      if (!arm || typeof arm !== 'object' || Array.isArray(arm)) return {};
+      const a = /** @type {Record<string, unknown>} */ (arm);
+      /** @type {Record<string, unknown>} */
+      const clean = {};
+      for (const key of EXPERIMENT_ARM_SAFE_KEYS) {
+        if (!Object.prototype.hasOwnProperty.call(a, key)) continue;
+        const value = a[key];
+        if (key === 'sandboxMode') {
+          if (value === null || typeof value === 'string') {
+            clean.sandboxMode = value;
+          }
+          continue;
+        }
+        if (typeof value === 'string' && value.trim() !== '' && !value.includes('\0')) {
+          clean[key] = value;
+        }
+      }
+      // Explicitly never: command, args, envAllowlist, posture, env, credentials.
+      return clean;
+    });
+  }
+
+  // Never project: corpusRoot, metadata, env, prompts, credentials, unknown keys.
+  return out;
+}
+
+/**
  * Whitelist-sanitize a trial result for export.
  * @param {object} result
  * @param {string} [campaignDir]
@@ -295,6 +485,10 @@ function sanitizeResult(result, campaignDir) {
  * When verifiedIds is provided, manifest.trials is filtered to exactly those
  * verified exported trial IDs (pending/skipped/unverified excluded).
  *
+ * Portable provenance (when present on the campaign):
+ * - inputDigests: allowlisted sha256 digests, values unchanged after validation
+ * - experiment: safe allowlist projection of the frozen trial matrix
+ *
  * @param {object} manifest
  * @param {string} srcRoot
  * @param {Set<string>} [verifiedIds]
@@ -362,6 +556,17 @@ function sanitizeManifestForExport(manifest, srcRoot, verifiedIds) {
     updatedAt: manifest.updatedAt,
     completedAt: manifest.completedAt ?? null,
   };
+
+  // Portable provenance: validated input digests (unchanged) + safe experiment.
+  const inputDigests = projectInputDigestsForExport(manifest.inputDigests);
+  if (inputDigests != null) {
+    sanitizedManifest.inputDigests = inputDigests;
+  }
+  const experiment = projectFrozenExperimentForExport(manifest.experiment);
+  if (experiment != null) {
+    sanitizedManifest.experiment = experiment;
+  }
+
   return /** @type {object} */ (
     redactHostIdentifying(stripPromptBearing(sanitizedManifest), srcRoot)
   );
@@ -815,6 +1020,10 @@ export async function exportSanitizedBundle({
         'Only validated manifest, verified result digests, and rebuilt report/summary are exported.',
         'Source report.json/summary.txt are never copied; they are regenerated from verified evidence.',
         'Unmanifested results and unverified trials are never exported.',
+        'Portable provenance (when present): inputDigests (allowlisted sha256) and a safe',
+        'allowlist projection of the frozen experiment (suite selector, taskIds, repetitions,',
+        'seed, timeout, arm model/provider/invocation/posture fields). Absolute paths, env',
+        'values, prompts, credentials, free-form metadata, and raw provider content are omitted.',
         'Prompt-bearing request/output content is never exported.',
         'Local usernames and absolute paths are redacted.',
         'Upload/publish is not performed by the harness.',

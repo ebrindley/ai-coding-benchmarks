@@ -33,16 +33,27 @@
  */
 
 import { spawn } from 'node:child_process';
-import { access, constants, mkdtemp, writeFile, rm, stat } from 'node:fs/promises';
+import {
+  access,
+  constants,
+  mkdtemp,
+  writeFile,
+  rm,
+  stat,
+  lstat,
+  realpath,
+} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { sha256Buffer } from './digest.js';
+import { applyProviderTempEnv } from './invokers/provider-confine.js';
 import {
   DEFAULT_CAPTURE_LIMIT,
   spawnControlled,
 } from './invokers/spawn-controlled.js';
-import { PathEscapeError, resolveUnder } from './paths.js';
+import { isPathInside, PathEscapeError, resolveUnder } from './paths.js';
+import { runHarnessGit } from './workspace.js';
 
 /** Gates that are structural / non-command-executable without a command field. */
 const STRUCTURAL_GATES = new Set(['baseline-diff', 'requirements']);
@@ -52,11 +63,87 @@ const PROTECTED_PATH_PREFIXES = Object.freeze([
   'test/',
   'tests/',
   'src/test/',
+  'src/tests/',
   '__tests__/',
   'scripts/',
   'oracle/',
   'oracles/',
   'baseline/',
+  'spec/',
+  'specs/',
+]);
+
+/**
+ * Package/build manifests that can redirect install/test tooling.
+ * Basename match (any depth) — tampering is a protected edit.
+ */
+const PROTECTED_MANIFEST_BASENAMES = Object.freeze(
+  new Set([
+    'package.json',
+    'package-lock.json',
+    'npm-shrinkwrap.json',
+    'yarn.lock',
+    'pnpm-lock.yaml',
+    'pom.xml',
+    'build.gradle',
+    'build.gradle.kts',
+    'settings.gradle',
+    'settings.gradle.kts',
+    'go.mod',
+    'go.sum',
+    'cargo.toml',
+    'cargo.lock',
+    'pyproject.toml',
+    'setup.py',
+    'setup.cfg',
+    'requirements.txt',
+    'requirements-dev.txt',
+    'pipfile',
+    'pipfile.lock',
+    'poetry.lock',
+    'composer.json',
+    'composer.lock',
+    'gemfile',
+    'gemfile.lock',
+    'makefile',
+    'cmakelists.txt',
+    'tsconfig.json',
+    'jsconfig.json',
+    'jest.config.js',
+    'jest.config.cjs',
+    'jest.config.mjs',
+    'jest.config.ts',
+    'vitest.config.js',
+    'vitest.config.ts',
+    'vitest.config.mjs',
+    'phpunit.xml',
+    'phpunit.xml.dist',
+  ]),
+);
+
+/** Build-selection manifests whose names are project-specific. */
+const PROTECTED_MANIFEST_SUFFIXES = Object.freeze([
+  '.sln',
+  '.csproj',
+  '.fsproj',
+  '.vbproj',
+]);
+
+/**
+ * Root / co-located test filename patterns (basename).
+ * Covers Go `*_test.go`, Node/TS `*.test.*` / `*.spec.*`, Python `test_*.py` / `*_test.py`.
+ */
+const PROTECTED_TEST_BASENAME_RES = Object.freeze([
+  /_test\.go$/i,
+  /\.test\.[^.]+$/i,
+  /\.spec\.[^.]+$/i,
+  /^test_.*\.py$/i,
+  /_test\.py$/i,
+  /_test\.rb$/i,
+  /_spec\.rb$/i,
+  /Tests?\.cs$/i,
+  /Test\.java$/i,
+  /Tests\.java$/i,
 ]);
 
 const EVIDENCE_TRUNCATE = 8192;
@@ -92,6 +179,28 @@ export const GATE_RESTRICTIVE_ENV_KEYS = Object.freeze([
   'TMPDIR',
   'TMP',
   'TEMP',
+]);
+
+/**
+ * Fixed, harness-owned tool-cache environment variable names.
+ *
+ * These are set to constant paths under a per-trial harness-created cache dir
+ * (see {@link buildGateCacheEnv}) so toolchains that default to a `$HOME` cache
+ * (NuGet/Maven/npm/pip/Cargo/Go) populate caches *inside* confinement — where
+ * `$HOME` is neither readable nor writable. Their VALUES are never inherited
+ * from the parent env; the overlay is applied AFTER the fail-closed filter in
+ * {@link buildGateEnv}, so it neither widens the allowlist nor admits host
+ * values for these names.
+ */
+export const GATE_CACHE_ENV_KEYS = Object.freeze([
+  'HOME',
+  'NUGET_PACKAGES',
+  'npm_config_cache',
+  'PIP_CACHE_DIR',
+  'CARGO_HOME',
+  'GOPATH',
+  'GOMODCACHE',
+  'MAVEN_OPTS',
 ]);
 
 /** Explicit system/toolchain roots candidates (missing paths skipped). */
@@ -415,6 +524,12 @@ export function normalizeEnvAllowlist(envAllowlist) {
  * @param {string[] | Record<string, unknown> | null | undefined} [opts.envAllowlist]
  * @param {string | null | undefined} [opts.sandboxMode]
  * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | null} [opts.parentEnv]
+ * @param {string | null | undefined} [opts.cacheDir] harness-created writable
+ *   tool-cache dir. When set, fixed cache env vars (HOME + NUGET/npm/pip/Cargo/Go/
+ *   Maven) are overlaid onto FIXED harness-owned paths under it, AFTER the
+ *   fail-closed filter (never host-inherited, never allowlist-widening). Callers
+ *   must pass a dir validated by {@link assertHarnessCacheDir}; buildGateEnv only
+ *   does lightweight shape checks (absolute, non-`/`, not real `$HOME`).
  * @returns {NodeJS.ProcessEnv}
  */
 export function buildGateEnv(opts = {}) {
@@ -489,7 +604,174 @@ export function buildGateEnv(opts = {}) {
     }
   }
 
+  // Harness-owned tool-cache overlay: applied AFTER the fail-closed filter so it
+  // is not subject to the allowlist and never carries host values. Values are
+  // FIXED paths derived from the harness-created cacheDir only. HOME is
+  // redirected here (not left as host $HOME) so package managers write their
+  // caches inside confinement, where the real $HOME is invisible.
+  if (opts.cacheDir != null && String(opts.cacheDir).trim() !== '') {
+    const cacheEnv = buildGateCacheEnv(opts.cacheDir);
+    for (const [k, v] of Object.entries(cacheEnv)) {
+      out[k] = v;
+    }
+  }
+
   return out;
+}
+
+/**
+ * Lightweight shape validation for a cacheDir before it is used to derive
+ * fixed cache env paths / confinement binds. Full realpath/lstat boundary
+ * validation lives in {@link assertHarnessCacheDir} (async); this synchronous
+ * guard is the last line of defense inside env/argv/profile builders so a
+ * caller passing `/` or the real `$HOME` can never produce a widened bind or
+ * a HOME pointed at a sensitive tree.
+ *
+ * @param {string} cacheDir
+ * @param {string} context - caller label for error messages
+ * @returns {string} resolved absolute cacheDir
+ */
+export function assertSafeCacheDirShape(cacheDir, context = 'cacheDir') {
+  if (cacheDir == null || String(cacheDir).trim() === '') {
+    throw new Error(`${context}: cacheDir is required`);
+  }
+  // Validate the ORIGINAL input: path.resolve() always returns an absolute
+  // path, so checking the resolved value would make this unreachable and let a
+  // relative cacheDir (e.g. "." or "relative-cache") bind CWD writable.
+  if (!path.isAbsolute(String(cacheDir))) {
+    throw new Error(`${context}: cacheDir must be an absolute path`);
+  }
+  const abs = path.resolve(String(cacheDir));
+  if (abs === '/' || abs === '') {
+    throw new Error(`${context}: refusing filesystem root as cacheDir`);
+  }
+  const home = path.resolve(os.homedir());
+  if (abs === home) {
+    throw new Error(`${context}: refusing real $HOME as cacheDir`);
+  }
+  return abs;
+}
+
+/**
+ * Derive the FIXED harness-owned cache environment for a validated cacheDir.
+ * Never inherits host values; every value is a constant path under cacheDir.
+ *
+ * @param {string} cacheDir absolute harness-created tool-cache dir
+ * @returns {Record<string, string>}
+ */
+export function buildGateCacheEnv(cacheDir) {
+  const abs = assertSafeCacheDirShape(cacheDir, 'buildGateCacheEnv');
+  const j = (...seg) => path.join(abs, ...seg);
+  return {
+    HOME: abs,
+    NUGET_PACKAGES: j('nuget'),
+    npm_config_cache: j('npm'),
+    PIP_CACHE_DIR: j('pip'),
+    CARGO_HOME: j('cargo'),
+    GOPATH: j('go'),
+    GOMODCACHE: j('go', 'pkg', 'mod'),
+    // Fixed harness value — host MAVEN_OPTS is never inherited (it is dropped by
+    // the fail-closed filter above; this overwrites with the local repo path).
+    MAVEN_OPTS: `-Dmaven.repo.local=${j('m2')}`,
+  };
+}
+
+/**
+ * Validate a cacheDir as a security boundary for a writable confinement bind.
+ *
+ * Fail closed unless cacheDir is an absolute, real (lstat, not a symlink)
+ * directory that is NOT: `/`, the real `$HOME` (os.homedir()), equal to or an
+ * ancestor/descendant of the workspace, or the execution root itself. This is
+ * the async, filesystem-backed companion to {@link assertSafeCacheDirShape}
+ * and must be called by the harness before passing a cacheDir into runGates.
+ *
+ * @param {object} opts
+ * @param {string} opts.cacheDir candidate cache dir (harness-created)
+ * @param {string} opts.workspaceDir trial workspace (must be disjoint)
+ * @param {string} [opts.executionRoot] execution root (must not equal cacheDir)
+ * @returns {Promise<string>} realpath-resolved absolute cacheDir
+ */
+export async function assertHarnessCacheDir({
+  cacheDir,
+  workspaceDir,
+  executionRoot,
+}) {
+  const abs = assertSafeCacheDirShape(cacheDir, 'assertHarnessCacheDir');
+
+  // Must be a real directory, not a symlink (symlink could retarget the bind).
+  let st;
+  try {
+    st = await lstat(abs);
+  } catch (err) {
+    throw new Error(
+      `assertHarnessCacheDir: cacheDir does not exist or is unreadable: ${abs} (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+  if (st.isSymbolicLink()) {
+    throw new Error(
+      `assertHarnessCacheDir: cacheDir must not be a symlink: ${abs}`,
+    );
+  }
+  if (!st.isDirectory()) {
+    throw new Error(`assertHarnessCacheDir: cacheDir must be a directory: ${abs}`);
+  }
+
+  // Canonicalize for boundary comparisons (macOS /var vs /private/var, etc.).
+  let real = abs;
+  try {
+    real = await realpath(abs);
+  } catch {
+    real = abs;
+  }
+  const home = path.resolve(os.homedir());
+  let realHome = home;
+  try {
+    realHome = await realpath(home);
+  } catch {
+    realHome = home;
+  }
+  if (real === '/' || real === realHome || real === home) {
+    throw new Error(
+      `assertHarnessCacheDir: cacheDir must not be / or real $HOME: ${real}`,
+    );
+  }
+
+  if (workspaceDir == null || String(workspaceDir).trim() === '') {
+    throw new Error('assertHarnessCacheDir: workspaceDir is required');
+  }
+  let realWs = path.resolve(String(workspaceDir));
+  try {
+    realWs = await realpath(realWs);
+  } catch {
+    /* workspace may not exist yet; lexical compare */
+  }
+  // Disjoint from workspace in both directions (no shared/overlapping tree).
+  if (isPathInside(real, realWs) || isPathInside(realWs, real)) {
+    throw new Error(
+      `assertHarnessCacheDir: cacheDir must be disjoint from workspace (cache="${real}" workspace="${realWs}")`,
+    );
+  }
+
+  if (executionRoot != null && String(executionRoot).trim() !== '') {
+    let realRoot = path.resolve(String(executionRoot));
+    try {
+      realRoot = await realpath(realRoot);
+    } catch {
+      /* lexical compare */
+    }
+    // Require a STRICT descendant of the execution root. Equality-only rejection
+    // would let an outside dir pass here and become a writable bind outside the
+    // root, which cleanupExecutionWorkspace then refuses to remove (leaking a
+    // populated cache). isPathInside(root, real) is true when real === root, so
+    // exclude equality explicitly.
+    if (!isPathInside(realRoot, real) || real === realRoot) {
+      throw new Error(
+        `assertHarnessCacheDir: cacheDir must be a strict descendant of the execution root (cache="${real}" executionRoot="${realRoot}")`,
+      );
+    }
+  }
+
+  return real;
 }
 
 /**
@@ -690,6 +972,9 @@ export async function resolveExistingToolchainRoots(
  * @param {string} privateTmp absolute
  * @param {boolean} networkAllowed
  * @param {string[]} [readRoots] existing toolchain roots
+ * @param {string | null} [cacheDir] harness-created writable tool-cache dir
+ *   (absolute). When set it becomes an additional read/write root. Refused if
+ *   it is `/` or the real `$HOME` — the same guard the workspace bind enforces.
  * @returns {string}
  */
 export function buildSeatbeltProfile(
@@ -697,6 +982,7 @@ export function buildSeatbeltProfile(
   privateTmp,
   networkAllowed,
   readRoots = [],
+  cacheDir = null,
 ) {
   const ws = escapeSeatbeltPath(path.resolve(workspaceDir));
   const tmp = escapeSeatbeltPath(path.resolve(privateTmp));
@@ -713,10 +999,25 @@ export function buildSeatbeltProfile(
     `(allow file-read* (subpath "${tmp}"))`,
     `(allow file-write* (subpath "${ws}"))`,
     `(allow file-write* (subpath "${tmp}"))`,
+  ];
+  // Harness tool-cache dir: additional read/write root (never / or real $HOME).
+  if (cacheDir != null && String(cacheDir).trim() !== '') {
+    const cacheAbs = path.resolve(String(cacheDir));
+    const home = path.resolve(os.homedir());
+    if (cacheAbs === '/' || cacheAbs === home || cacheAbs === '') {
+      throw new Error(
+        'buildSeatbeltProfile: refusing tool-cache bind of / or real $HOME',
+      );
+    }
+    const cache = escapeSeatbeltPath(cacheAbs);
+    lines.push(`(allow file-read* (subpath "${cache}"))`);
+    lines.push(`(allow file-write* (subpath "${cache}"))`);
+  }
+  lines.push(
     // Device nodes
     '(allow file-read* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/dtracehelper"))',
     '(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/dtracehelper"))',
-  ];
+  );
   for (const root of readRoots) {
     const abs = path.resolve(root);
     if (abs === '/' || abs === '') continue;
@@ -755,13 +1056,25 @@ export function isBookkeepingPath(relPath) {
 }
 
 /**
- * Whether a relative path is protected (tests/validators/oracles/etc.).
+ * Normalize a workspace-relative path for policy comparison.
+ * @param {string} relPath
+ * @returns {string}
+ */
+export function normalizeRelPath(relPath) {
+  return String(relPath || '')
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/^\/+/, '');
+}
+
+/**
+ * Whether a relative path is protected (tests/validators/oracles/manifests/etc.).
  * @param {string} relPath
  * @returns {boolean}
  */
 export function isProtectedPath(relPath) {
-  const norm = relPath.replace(/\\/g, '/').replace(/^\.\//, '');
-  if (isBookkeepingPath(norm)) return false;
+  const norm = normalizeRelPath(relPath);
+  if (!norm || isBookkeepingPath(norm)) return false;
   for (const prefix of PROTECTED_PATH_PREFIXES) {
     if (norm === prefix.slice(0, -1) || norm.startsWith(prefix)) {
       return true;
@@ -773,11 +1086,75 @@ export function isProtectedPath(relPath) {
   if (/(^|\/)oracles?\//i.test(norm)) {
     return true;
   }
+  const base = norm.includes('/') ? norm.slice(norm.lastIndexOf('/') + 1) : norm;
+  const baseLower = base.toLowerCase();
+  if (PROTECTED_MANIFEST_BASENAMES.has(baseLower)) {
+    return true;
+  }
+  if (PROTECTED_MANIFEST_SUFFIXES.some((suffix) => baseLower.endsWith(suffix))) {
+    return true;
+  }
+  for (const re of PROTECTED_TEST_BASENAME_RES) {
+    if (re.test(base)) return true;
+  }
   return false;
 }
 
 /**
+ * Parse allow-list entries from a gate's baselineDiffPolicy.allow.
+ * @param {unknown} gate
+ * @returns {string[] | null} normalized allow paths, or null when policy absent
+ */
+export function resolveBaselineDiffAllow(gate) {
+  if (!gate || typeof gate !== 'object') return null;
+  const policy = /** @type {Record<string, unknown>} */ (gate).baselineDiffPolicy;
+  if (policy === undefined) return null;
+  if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
+    throw new TypeError('baselineDiffPolicy must be an object');
+  }
+  const allow = /** @type {Record<string, unknown>} */ (policy).allow;
+  if (!Array.isArray(allow) || allow.length < 1) {
+    throw new TypeError('baselineDiffPolicy.allow must be a non-empty array');
+  }
+  /** @type {string[]} */
+  const out = [];
+  for (const entry of allow) {
+    if (typeof entry !== 'string') {
+      throw new TypeError('baselineDiffPolicy.allow entries must be strings');
+    }
+    const raw = entry.trim().replace(/\\/g, '/');
+    const n = normalizeRelPath(entry);
+    if (
+      !n ||
+      path.posix.isAbsolute(raw) ||
+      raw.split('/').includes('..')
+    ) {
+      throw new TypeError(
+        'baselineDiffPolicy.allow entries must be safe workspace-relative paths',
+      );
+    }
+    out.push(n);
+  }
+  return out;
+}
+
+/**
+ * True when a changed path is permitted by an allow list (exact path match).
+ * @param {string} relPath
+ * @param {string[]} allow
+ * @returns {boolean}
+ */
+export function isPathAllowedByPolicy(relPath, allow) {
+  const norm = normalizeRelPath(relPath);
+  if (!norm) return false;
+  return allow.some((a) => a === norm);
+}
+
+/**
  * Parse git status --porcelain / diff --name-only lines into relative paths.
+ * Line-oriented fallback (non-NUL). For renames with ` -> `, returns destination only;
+ * prefer {@link parseGitNameStatusZ} / {@link collectChangedPathsFromGitOutputs}
+ * for rename source+destination inspection.
  * @param {string} text
  * @returns {string[]}
  */
@@ -790,13 +1167,127 @@ export function parseChangedPaths(text) {
       if (/^[ MADRCU?!]{1,2}\s+/.test(line)) {
         const rest = line.slice(2).trim();
         if (rest.includes(' -> ')) {
+          // Legacy single-path parse keeps destination; callers needing both
+          // paths should use parseGitNameStatusZ.
           return rest.split(' -> ').pop().trim();
         }
         return rest.replace(/^"+|"+$/g, '');
       }
+      // name-status without porcelain prefix: "M\tpath" or "R100\told\tnew"
+      if (/^[A-Z][0-9]{0,3}\t/.test(line) || /^[A-Z]\t/.test(line)) {
+        const parts = line.split('\t');
+        if (parts.length >= 3) {
+          // rename/copy: return dest; source handled in z-parser
+          return parts[parts.length - 1].trim();
+        }
+        if (parts.length === 2) return parts[1].trim();
+      }
       return line;
     })
+    .filter(Boolean)
+    .map(normalizeRelPath)
     .filter(Boolean);
+}
+
+/**
+ * Parse `git diff --name-status -z` output (NUL-safe).
+ * Returns every path involved: for renames/copies, both source and destination.
+ * @param {string | Buffer} data
+ * @returns {string[]}
+ */
+export function parseGitNameStatusZ(data) {
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data ?? ''), 'utf8');
+  if (buf.length === 0) return [];
+  const parts = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i += 1) {
+    if (buf[i] === 0) {
+      parts.push(buf.subarray(start, i).toString('utf8'));
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) {
+    parts.push(buf.subarray(start).toString('utf8'));
+  }
+  /** @type {string[]} */
+  const paths = [];
+  let i = 0;
+  while (i < parts.length) {
+    const status = parts[i];
+    if (!status) {
+      i += 1;
+      continue;
+    }
+    // Status tokens: M, A, D, T, U, X, or R100 / C50, etc.
+    const code = status.charAt(0);
+    if (!/[A-Z]/.test(code)) {
+      // Not a status token — treat as a bare path (defensive).
+      const p = normalizeRelPath(status);
+      if (p) paths.push(p);
+      i += 1;
+      continue;
+    }
+    if (code === 'R' || code === 'C') {
+      const src = parts[i + 1] ?? '';
+      const dst = parts[i + 2] ?? '';
+      const ns = normalizeRelPath(src);
+      const nd = normalizeRelPath(dst);
+      if (ns) paths.push(ns);
+      if (nd) paths.push(nd);
+      i += 3;
+      continue;
+    }
+    const p = normalizeRelPath(parts[i + 1] ?? '');
+    if (p) paths.push(p);
+    i += 2;
+  }
+  return paths;
+}
+
+/**
+ * Parse `git ls-files -z` / porcelain -z path lists (NUL-separated).
+ * @param {string | Buffer} data
+ * @returns {string[]}
+ */
+export function parseGitPathListZ(data) {
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data ?? ''), 'utf8');
+  if (buf.length === 0) return [];
+  /** @type {string[]} */
+  const paths = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i += 1) {
+    if (buf[i] === 0) {
+      const p = normalizeRelPath(buf.subarray(start, i).toString('utf8'));
+      if (p) paths.push(p);
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) {
+    const p = normalizeRelPath(buf.subarray(start).toString('utf8'));
+    if (p) paths.push(p);
+  }
+  return paths;
+}
+
+/**
+ * Merge changed paths from baseline name-status + untracked lists.
+ * @param {string | Buffer} nameStatusZ
+ * @param {string | Buffer} untrackedZ
+ * @returns {string[]}
+ */
+export function collectChangedPathsFromGitOutputs(nameStatusZ, untrackedZ) {
+  const seen = new Set();
+  /** @type {string[]} */
+  const out = [];
+  for (const p of [
+    ...parseGitNameStatusZ(nameStatusZ),
+    ...parseGitPathListZ(untrackedZ),
+  ]) {
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    out.push(p);
+  }
+  return out;
 }
 
 /**
@@ -819,26 +1310,241 @@ export function countMeaningfulChangedFiles(porcelainText) {
 }
 
 /**
- * Evaluate baseline-diff: controlled git argv only; reject protected path edits.
+ * Collect workspace paths that differ from the immutable fixture baseline.
+ * Detects committed, staged, unstaged, deleted, untracked, and renamed content
+ * (rename source + destination). Fail closed on git/helper errors.
+ *
+ * @param {string} workspaceDir
+ * @param {{
+ *   baselineCommit: string,
+ *   gitSpawn?: (args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }>,
+ * }} [opts]
+ * @returns {Promise<
+ *   { ok: true, paths: string[], baselineCommit: string } |
+ *   { ok: false, error: string, paths?: string[], workspaceViolation?: boolean }
+ * >}
+ */
+export async function collectBaselineChangedPaths(workspaceDir, opts = {}) {
+  const cwd = path.resolve(workspaceDir);
+  const baselineCommit =
+    typeof opts.baselineCommit === 'string' ? opts.baselineCommit.trim() : '';
+  if (!/^[0-9a-f]{40,64}$/i.test(baselineCommit)) {
+    return {
+      ok: false,
+      error: 'sealed fixture baseline commit is missing or invalid',
+    };
+  }
+  const gitOpts = opts.gitSpawn ? { gitSpawn: opts.gitSpawn } : {};
+
+  // Refuse repository-local config that can re-enable arbitrary clean filters
+  // or import additional provider-controlled config during harness Git calls.
+  const localConfig = await runHarnessGit(
+    cwd,
+    ['config', '--local', '--no-includes', '--name-only', '--get-regexp', '.*'],
+    gitOpts,
+  );
+  if (localConfig.exitCode !== 0 && localConfig.exitCode !== 1) {
+    return {
+      ok: false,
+      error:
+        localConfig.stderr ||
+        localConfig.stdout ||
+        'failed to inspect repository-local git config',
+    };
+  }
+  const unsafeConfigKeys = String(localConfig.stdout || '')
+    .split(/\r?\n/)
+    .map((key) => key.trim().toLowerCase())
+    .filter(
+      (key) =>
+        key.startsWith('filter.') ||
+        key === 'include.path' ||
+        (key.startsWith('includeif.') && key.endsWith('.path')) ||
+        key === 'extensions.worktreeconfig',
+    );
+  if (unsafeConfigKeys.length > 0) {
+    return {
+      ok: false,
+      error: `unsafe repository-local git config: ${unsafeConfigKeys.join(', ')}`,
+      workspaceViolation: true,
+    };
+  }
+
+  // assume-unchanged and skip-worktree can hide modified protected files from
+  // a normal tree-to-worktree diff. Reject either flag before comparison.
+  const indexFlags = await runHarnessGit(
+    cwd,
+    ['ls-files', '-v', '-z'],
+    gitOpts,
+  );
+  if (indexFlags.exitCode !== 0) {
+    return {
+      ok: false,
+      error:
+        indexFlags.stderr ||
+        indexFlags.stdout ||
+        'failed to inspect git index flags',
+    };
+  }
+  const concealedPaths = String(indexFlags.stdout || '')
+    .split('\0')
+    .filter(Boolean)
+    .filter((record) => {
+      const tag = record[0] || '';
+      return tag === 'S' || (/[a-z]/.test(tag) && tag === tag.toLowerCase());
+    })
+    .map((record) => normalizeRelPath(record.slice(2)));
+  if (concealedPaths.length > 0) {
+    return {
+      ok: false,
+      error: `git index concealment flags present: ${concealedPaths.join(', ')}`,
+      paths: concealedPaths,
+      workspaceViolation: true,
+    };
+  }
+
+  // Confirm the harness-sealed object id still resolves. The provider may
+  // rewrite refs in workspace .git, but GIT_NO_REPLACE_OBJECTS keeps this
+  // object id from being redirected through refs/replace.
+  const rev = await runHarnessGit(
+    cwd,
+    ['rev-parse', '--verify', `${baselineCommit}^{commit}`],
+    gitOpts,
+  );
+  if (rev.exitCode !== 0) {
+    return {
+      ok: false,
+      error:
+        rev.stderr ||
+        rev.stdout ||
+        `fixture baseline commit unavailable: ${baselineCommit}`,
+    };
+  }
+
+  // Tree vs working tree (covers committed+dirty+staged relative to baseline).
+  // -M: detect renames so source and dest are both reported.
+  const diff = await runHarnessGit(
+    cwd,
+    [
+      'diff',
+      '--name-status',
+      '-z',
+      '-M',
+      '--find-renames',
+      baselineCommit,
+      '--',
+    ],
+    gitOpts,
+  );
+  if (diff.exitCode !== 0) {
+    return {
+      ok: false,
+      error: diff.stderr || diff.stdout || 'git diff against fixture baseline failed',
+    };
+  }
+
+  // Untracked (not in index): still gaming surface if tests/oracles appear.
+  const untracked = await runHarnessGit(
+    cwd,
+    ['ls-files', '-z', '--others', '--exclude-standard'],
+    gitOpts,
+  );
+  if (untracked.exitCode !== 0) {
+    return {
+      ok: false,
+      error:
+        untracked.stderr ||
+        untracked.stdout ||
+        'git ls-files untracked failed',
+    };
+  }
+
+  const paths = collectChangedPathsFromGitOutputs(diff.stdout, untracked.stdout);
+  return { ok: true, paths, baselineCommit };
+}
+
+/**
+ * Count meaningful baseline-relative changes in a workspace (harness-owned git).
+ * @param {string} workspaceDir
+ * @param {{ baselineCommit: string, gitSpawn?: Function }} [opts]
+ * @returns {Promise<number | null>} null on helper failure (caller may fail closed)
+ */
+export async function countMeaningfulBaselineChangedFiles(workspaceDir, opts = {}) {
+  const collected = await collectBaselineChangedPaths(workspaceDir, opts);
+  if (!collected.ok) return null;
+  return filterMeaningfulChangedPaths(collected.paths).length;
+}
+
+/**
+ * Classify baseline-diff policy hits for a set of changed paths.
+ * - When baselineDiffPolicy.allow is present: only allow-listed paths may change.
+ * - Otherwise: reject protected path edits (tests/oracles/manifests/…).
+ *
+ * @param {string[]} changedPaths meaningful paths
+ * @param {Record<string, unknown>} gate
+ * @returns {{ ok: true } | { ok: false, reason: string, hits: string[] }}
+ */
+export function evaluateBaselineDiffPolicy(changedPaths, gate) {
+  let allow;
+  try {
+    allow = resolveBaselineDiffAllow(gate);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `invalid baselineDiffPolicy: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      hits: [],
+    };
+  }
+  if (allow != null) {
+    const hits = changedPaths.filter((p) => !isPathAllowedByPolicy(p, allow));
+    if (hits.length > 0) {
+      return {
+        ok: false,
+        reason: `paths outside baselineDiffPolicy.allow modified: ${hits.join(', ')}`,
+        hits,
+      };
+    }
+    return { ok: true };
+  }
+  const protectedHits = changedPaths.filter((p) => isProtectedPath(p));
+  if (protectedHits.length > 0) {
+    return {
+      ok: false,
+      reason: `protected paths modified: ${protectedHits.join(', ')}`,
+      hits: protectedHits,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Evaluate baseline-diff against immutable fixture-baseline authority.
+ * Uses harness-owned git (neutral config/env); honors gate.baselineDiffPolicy.allow.
  * @param {object} opts
  * @param {string} opts.workspaceDir
  * @param {Record<string, unknown>} opts.gate
+ * @param {string} opts.baselineCommit harness-sealed pristine fixture commit
  * @returns {Promise<GateResult>}
  */
-export async function evaluateBaselineDiff({ workspaceDir, gate }) {
+export async function evaluateBaselineDiff({
+  workspaceDir,
+  gate,
+  baselineCommit,
+}) {
   const name = typeof gate.gate === 'string' ? gate.gate : 'baseline-diff';
   const order = typeof gate.order === 'number' ? gate.order : 1;
   const required = gate.required === undefined ? true : Boolean(gate.required);
   const check = typeof gate.check === 'string' ? gate.check : undefined;
 
-  const status = await spawnControlled({
-    command: 'git',
-    args: ['-C', path.resolve(workspaceDir), 'status', '--porcelain'],
-    timeoutMs: 15_000,
-    captureLimit: DEFAULT_CAPTURE_LIMIT,
-  });
-
-  if (status.infraFailure || status.timedOut || status.exitCode !== 0) {
+  let collected;
+  try {
+    collected = await collectBaselineChangedPaths(workspaceDir, {
+      baselineCommit,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     return {
       gate: name,
       order,
@@ -846,19 +1552,51 @@ export async function evaluateBaselineDiff({ workspaceDir, gate }) {
       command: null,
       expectedExitCode: 0,
       status: 'execution_unavailable',
-      exitCode: status.exitCode,
-      timedOut: Boolean(status.timedOut),
-      evidence: status.infraFailure || status.stderr || 'git status failed',
-      infraFailure: status.infraFailure || 'git status unavailable',
+      exitCode: null,
+      timedOut: false,
+      evidence: msg,
+      infraFailure: msg,
       classificationSignal: 'INFRA_FAIL',
       check,
     };
   }
 
-  const changed = filterMeaningfulChangedPaths(parseChangedPaths(status.stdout));
-  const protectedHits = changed.filter((p) => isProtectedPath(p));
+  if (!collected.ok) {
+    if (collected.workspaceViolation) {
+      return {
+        gate: name,
+        order,
+        required,
+        command: null,
+        expectedExitCode: 0,
+        status: 'failed',
+        exitCode: 1,
+        timedOut: false,
+        evidence: collected.error,
+        classificationSignal: 'FAIL',
+        check,
+      };
+    }
+    return {
+      gate: name,
+      order,
+      required,
+      command: null,
+      expectedExitCode: 0,
+      status: 'execution_unavailable',
+      exitCode: 1,
+      timedOut: false,
+      evidence: collected.error,
+      infraFailure: collected.error,
+      classificationSignal: 'INFRA_FAIL',
+      check,
+    };
+  }
 
-  if (protectedHits.length > 0) {
+  const changed = filterMeaningfulChangedPaths(collected.paths);
+  const policy = evaluateBaselineDiffPolicy(changed, gate || {});
+
+  if (!policy.ok) {
     return {
       gate: name,
       order,
@@ -868,7 +1606,7 @@ export async function evaluateBaselineDiff({ workspaceDir, gate }) {
       status: 'failed',
       exitCode: 1,
       timedOut: false,
-      evidence: `protected paths modified: ${protectedHits.join(', ')}`,
+      evidence: policy.reason,
       classificationSignal: 'FAIL',
       check,
     };
@@ -883,7 +1621,7 @@ export async function evaluateBaselineDiff({ workspaceDir, gate }) {
     status: 'passed',
     exitCode: 0,
     timedOut: false,
-    evidence: `baseline-diff ok; ${changed.length} meaningful changed path(s), none protected`,
+    evidence: `baseline-diff ok vs sealed fixture commit; ${changed.length} meaningful changed path(s)`,
     classificationSignal: 'PASS',
     check,
   };
@@ -1258,12 +1996,14 @@ export async function resolveCommandlessOraclePath(oracleRoot, oraclePathRel) {
  *
  * @param {object} opts
  * @param {string} opts.workspaceDir
+ * @param {string} [opts.baselineCommit] harness-sealed pristine fixture commit
  * @param {Record<string, unknown>} opts.gate
  * @param {string} [opts.oracleRoot]
  * @param {ConfinementInfo} opts.confinement
  * @param {number} [opts.timeoutMs]
  * @param {NodeJS.ProcessEnv} opts.env - minimal env from buildGateEnv (never full process.env)
  * @param {boolean} [opts.networkAllowed]
+ * @param {string | null} [opts.cacheDir] harness-created writable tool-cache dir
  * @returns {Promise<GateResult & { oraclePath?: string, oracleExecuted?: boolean }>}
  */
 export async function evaluateOracleGate({
@@ -1274,6 +2014,7 @@ export async function evaluateOracleGate({
   timeoutMs,
   env,
   networkAllowed = false,
+  cacheDir = null,
 }) {
   const name = typeof gate.gate === 'string' ? gate.gate : 'oracle';
   const order = typeof gate.order === 'number' ? gate.order : 1;
@@ -1443,6 +2184,7 @@ export async function evaluateOracleGate({
     env: runEnv,
     networkAllowed,
     extraReadRoots,
+    cacheDir,
   });
 
   const out = digestAndPreview(run.stdout);
@@ -1539,6 +2281,8 @@ export async function evaluateOracleGate({
  * @param {string} [opts.privateTmp]
  * @param {boolean} [opts.networkAllowed=false]
  * @param {string[]} [opts.readRoots]
+ * @param {string | null} [opts.cacheDir] harness-created writable tool-cache dir
+ *   (absolute). Bound writable under bwrap. Refused if `/` or real `$HOME`.
  * @returns {{ command: string, args: string[] }}
  */
 export function buildConfinedArgv(
@@ -1555,6 +2299,18 @@ export function buildConfinedArgv(
   const shellArgs = ['-c', command];
   const networkAllowed = opts.networkAllowed === true;
   const readRoots = Array.isArray(opts.readRoots) ? opts.readRoots : [];
+  const home = path.resolve(os.homedir());
+  /** @type {string | null} */
+  let cacheAbs = null;
+  if (opts.cacheDir != null && String(opts.cacheDir).trim() !== '') {
+    cacheAbs = path.resolve(String(opts.cacheDir));
+    // Same guard as the workspace bind: never bind / or real $HOME writable.
+    if (cacheAbs === '/' || cacheAbs === home || cacheAbs === '') {
+      throw new Error(
+        'buildConfinedArgv: refusing tool-cache bind of / or real $HOME',
+      );
+    }
+  }
 
   if (confinement.kind === 'sandbox-exec') {
     if (!opts.profilePath) {
@@ -1574,7 +2330,6 @@ export function buildConfinedArgv(
     }
     /** @type {string[]} */
     const args = ['--die-with-parent', '--unshare-pid'];
-    const home = path.resolve(os.homedir());
     for (const root of readRoots) {
       const abs = path.resolve(root);
       // Never bind exact / or exact $HOME. Contained paths (oracle dirs under a
@@ -1586,6 +2341,10 @@ export function buildConfinedArgv(
     }
     // Writable workspace only
     args.push('--bind', ws, ws);
+    // Harness tool-cache dir writable (never / or real $HOME; guarded above).
+    if (cacheAbs) {
+      args.push('--bind', cacheAbs, cacheAbs);
+    }
     // Private tmp — never bind host home
     args.push('--tmpfs', '/tmp');
     args.push('--dev', '/dev');
@@ -1627,6 +2386,9 @@ export function buildConfinedArgv(
  * @param {NodeJS.ProcessEnv} opts.env - must already be a minimal built env (never full process.env)
  * @param {boolean} [opts.networkAllowed]
  * @param {string[]} [opts.extraReadRoots] additional read-only roots (e.g. oracle dir)
+ * @param {string | null} [opts.cacheDir] harness-created writable tool-cache dir
+ *   (absolute). When set it is bound writable and HOME/cache env already point
+ *   here (via buildGateEnv). Refused if `/` or real `$HOME`.
  * @returns {Promise<{ exitCode: number | null, timedOut: boolean, stdout: string, stderr: string, infraFailure?: string, signal?: string, profile?: string }>}
  */
 async function runConfinedCommand({
@@ -1637,6 +2399,7 @@ async function runConfinedCommand({
   env,
   networkAllowed = false,
   extraReadRoots = [],
+  cacheDir = null,
 }) {
   if (env == null || typeof env !== 'object') {
     return {
@@ -1647,12 +2410,38 @@ async function runConfinedCommand({
       infraFailure: 'runConfinedCommand: env is required (use buildGateEnv; never process.env)',
     };
   }
+  /** @type {string | null} */
+  let cacheAbs = null;
+  if (cacheDir != null && String(cacheDir).trim() !== '') {
+    try {
+      cacheAbs = assertSafeCacheDirShape(cacheDir, 'runConfinedCommand');
+    } catch (err) {
+      return {
+        exitCode: null,
+        timedOut: false,
+        stdout: '',
+        stderr: '',
+        infraFailure: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
   let profileDir = null;
   let privateTmp = null;
   let profileText = '';
 
   try {
     privateTmp = await mkdtemp(path.join(os.tmpdir(), 'aicb-gate-tmp-'));
+    // Overlay TMPDIR/TMP/TEMP so package managers (which stage downloads under
+    // $TMPDIR) point at a directory that is writable *inside* the sandbox. The
+    // accessible target differs by confinement kind:
+    //  - bwrap: `--tmpfs /tmp` mounts a fresh in-sandbox tmpfs that SHADOWS the
+    //    host `privateTmp` (created under the host /tmp), so the host path is
+    //    invisible in the sandbox; use the in-sandbox `/tmp` tmpfs instead.
+    //  - sandbox-exec: `privateTmp` is a real host path explicitly granted
+    //    read+write in the seatbelt profile, so use it directly.
+    // Harness overlay only — never merges parent env (mirrors provider-confine).
+    const tmpTarget = confinement.kind === 'bwrap' ? '/tmp' : privateTmp;
+    const runEnv = applyProviderTempEnv(env, tmpTarget);
     let profilePath;
 
     const toolchainRoots = await resolveExistingToolchainRoots();
@@ -1699,6 +2488,7 @@ async function runConfinedCommand({
           privateTmp,
           networkAllowed,
           readRoots,
+          cacheAbs,
         );
       } catch (err) {
         return {
@@ -1738,6 +2528,7 @@ async function runConfinedCommand({
         privateTmp,
         networkAllowed,
         readRoots,
+        cacheDir: cacheAbs,
       });
     } catch (err) {
       return {
@@ -1773,8 +2564,9 @@ async function runConfinedCommand({
       try {
         child = spawn(built.command, built.args, {
           cwd: path.resolve(workspaceDir),
-          // Fail closed: only the caller-supplied minimal env (buildGateEnv).
-          env,
+          // Fail closed: caller-supplied minimal env (buildGateEnv) with the
+          // harness TMPDIR/TMP/TEMP overlay pointing at the private tmp.
+          env: runEnv,
           shell: false,
           detached: process.platform !== 'win32',
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -1964,11 +2756,18 @@ export function resolveNetworkAllowed(task) {
  * @param {string | null} [opts.sandboxMode] arm sandbox posture
  * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | null} [opts.parentEnv] testable parent env
  * @param {object} [opts.task] full task including expectedOutcome + networkPolicy (never env)
+ * @param {string | null} [opts.cacheDir] harness-created per-trial writable
+ *   tool-cache dir. When set: HOME + per-tool cache env vars point here (fixed
+ *   harness values), and it is bound writable into confinement so toolchains
+ *   populate caches inside the sandbox (host $HOME is invisible). Backward
+ *   compatible: when absent, no bind and HOME stays as today. Must be a dir
+ *   validated by {@link assertHarnessCacheDir} (the caller's responsibility).
  * @returns {Promise<GateResult[]>}
  */
 export async function runGates({
   gates,
   workspaceDir,
+  baselineCommit,
   oracleRoot,
   confinement: confinementOpt,
   timeoutMs,
@@ -1976,6 +2775,7 @@ export async function runGates({
   sandboxMode = null,
   parentEnv = null,
   task = null,
+  cacheDir = null,
 }) {
   if (!Array.isArray(gates)) {
     throw new Error('runGates: gates must be an array');
@@ -1999,10 +2799,16 @@ export async function runGates({
 
   const confinement = confinementOpt ?? (await detectConfinement());
   const networkAllowed = resolveNetworkAllowed(task);
+  // Normalize cacheDir once; a bad shape fails closed here rather than per-gate.
+  const gateCacheDir =
+    cacheDir != null && String(cacheDir).trim() !== ''
+      ? assertSafeCacheDirShape(cacheDir, 'runGates')
+      : null;
   const gateEnv = buildGateEnv({
     envAllowlist,
     sandboxMode,
     parentEnv: parentEnv ?? process.env,
+    cacheDir: gateCacheDir,
   });
   const ordered = [...gates].sort((a, b) => {
     const ao = typeof a.order === 'number' ? a.order : 0;
@@ -2031,6 +2837,7 @@ export async function runGates({
         await evaluateBaselineDiff({
           workspaceDir: path.resolve(workspaceDir),
           gate,
+          baselineCommit,
         }),
       );
       continue;
@@ -2057,6 +2864,7 @@ export async function runGates({
           timeoutMs,
           env: gateEnv,
           networkAllowed,
+          cacheDir: gateCacheDir,
         }),
       );
       continue;
@@ -2106,6 +2914,7 @@ export async function runGates({
       timeoutMs,
       env: gateEnv,
       networkAllowed,
+      cacheDir: gateCacheDir,
     });
 
     // Digests only on ordinary results — never secret-bearing previews.

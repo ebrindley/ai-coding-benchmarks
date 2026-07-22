@@ -342,7 +342,9 @@ describe('schema artifacts (trial + report)', () => {
 
   it('buildReport payload validates against report.schema.json', async () => {
     const schema = await loadSchema('report.schema.json');
-    const { buildReport } = await import('../harness/summary.js');
+    const { buildReport, formatHumanSummary } = await import(
+      '../harness/summary.js'
+    );
 
     const fpA = '1'.repeat(64);
     const fpB = '2'.repeat(64);
@@ -357,7 +359,7 @@ describe('schema artifacts (trial + report)', () => {
       lock: { held: false, owner: null },
     };
 
-    // Mixed paths/models → multiple cells, global passRate refused
+    // Mixed paths/models → multiple cells, global rates refused
     const trialResults = [
       {
         id: 't1',
@@ -416,7 +418,12 @@ describe('schema artifacts (trial + report)', () => {
     assert.ok(artifact.cells.length >= 2);
     assert.ok(Array.isArray(artifact.refusals));
     assert.ok(artifact.refusals.length >= 1);
+    // Heterogeneous global totals: all rates withheld; counts still present
     assert.equal(artifact.totals.passRate, null);
+    assert.equal(artifact.totals.capabilityPassRate, null);
+    assert.equal(artifact.totals.infraRate, null);
+    assert.equal(artifact.totals.timeoutRate, null);
+    assert.equal(artifact.totals.capabilityDenom, 3); // PASS+FAIL+NO_OP counts always
     assert.ok(artifact.classifications);
     assert.equal(artifact.classifications.PASS, 1);
     assert.equal(artifact.classifications.FAIL, 1);
@@ -431,14 +438,192 @@ describe('schema artifacts (trial + report)', () => {
       }
     }
 
+    // Homogeneous cells/arms expose rates; INFRA/TIMEOUT not in capability denom
+    for (const cell of artifact.cells) {
+      const s = cell.stats;
+      assert.equal(typeof s.passRate, 'number');
+      assert.equal(typeof s.capabilityPassRate, 'number');
+      assert.equal(s.capabilityDenom, s.pass + s.fail + s.noOp);
+      assert.equal(typeof s.infraRate, 'number');
+      assert.equal(typeof s.timeoutRate, 'number');
+    }
+    for (const row of artifact.byArm) {
+      const s = row.stats;
+      assert.equal(typeof s.capabilityPassRate, 'number');
+      assert.equal(s.capabilityDenom, s.pass + s.fail + s.noOp);
+    }
+
     assertValid(artifact, schema);
 
-    // Homogeneous single-cell campaign also validates with passRate set
+    // Homogeneous single-cell campaign also validates with rates set
     const homo = asJsonArtifact(
       buildReport(manifest, [trialResults[0]]),
     );
     assert.equal(typeof homo.totals.passRate, 'number');
+    assert.equal(homo.totals.passRate, 1);
+    assert.equal(homo.totals.capabilityPassRate, 1);
+    assert.equal(homo.totals.capabilityDenom, 1);
+    assert.equal(homo.totals.infraRate, 0);
+    assert.equal(homo.totals.timeoutRate, 0);
     assertValid(homo, schema);
+
+    // Capability denom excludes INFRA_FAIL and TIMEOUT; legacy passRate includes them
+    const mixedClass = asJsonArtifact(
+      buildReport(manifest, [
+        {
+          id: 'c1',
+          arm: 'cap',
+          provider: 'p',
+          taskId: 'task-cap',
+          invocationPath: 'native-cli',
+          requestedModel: 'm',
+          resolvedModel: 'm',
+          postureFingerprint: fpA,
+          classification: 'PASS',
+          state: 'completed',
+        },
+        {
+          id: 'c2',
+          arm: 'cap',
+          provider: 'p',
+          taskId: 'task-cap',
+          invocationPath: 'native-cli',
+          requestedModel: 'm',
+          resolvedModel: 'm',
+          postureFingerprint: fpA,
+          classification: 'FAIL',
+          state: 'completed',
+        },
+        {
+          id: 'c3',
+          arm: 'cap',
+          provider: 'p',
+          taskId: 'task-cap',
+          invocationPath: 'native-cli',
+          requestedModel: 'm',
+          resolvedModel: 'm',
+          postureFingerprint: fpA,
+          classification: 'NO_OP',
+          state: 'completed',
+        },
+        {
+          id: 'c4',
+          arm: 'cap',
+          provider: 'p',
+          taskId: 'task-cap',
+          invocationPath: 'native-cli',
+          requestedModel: 'm',
+          resolvedModel: 'm',
+          postureFingerprint: fpA,
+          classification: 'INFRA_FAIL',
+          state: 'failed',
+        },
+        {
+          id: 'c5',
+          arm: 'cap',
+          provider: 'p',
+          taskId: 'task-cap',
+          invocationPath: 'native-cli',
+          requestedModel: 'm',
+          resolvedModel: 'm',
+          postureFingerprint: fpA,
+          classification: 'TIMEOUT',
+          state: 'failed',
+        },
+      ]),
+    );
+    const ts = mixedClass.totals;
+    assert.equal(ts.pass, 1);
+    assert.equal(ts.fail, 1);
+    assert.equal(ts.noOp, 1);
+    assert.equal(ts.infraFail, 1);
+    assert.equal(ts.timeout, 1);
+    assert.equal(ts.completed, 5);
+    assert.equal(ts.capabilityDenom, 3); // PASS+FAIL+NO_OP only
+    assert.equal(ts.capabilityPassRate, 1 / 3);
+    assert.equal(ts.passRate, 1 / 5); // legacy all-terminal
+    assert.equal(ts.infraRate, 1 / 5);
+    assert.equal(ts.timeoutRate, 1 / 5);
+    assertValid(mixedClass, schema);
+
+    // Zero capability denom (infra-only): capabilityPassRate null; infraRate set
+    const infraOnly = asJsonArtifact(
+      buildReport(manifest, [
+        {
+          id: 'i1',
+          arm: 'infra',
+          provider: 'p',
+          taskId: 'task-i',
+          invocationPath: 'native-cli',
+          requestedModel: 'm',
+          resolvedModel: 'm',
+          postureFingerprint: fpA,
+          classification: 'INFRA_FAIL',
+          state: 'failed',
+        },
+        {
+          id: 'i2',
+          arm: 'infra',
+          provider: 'p',
+          taskId: 'task-i',
+          invocationPath: 'native-cli',
+          requestedModel: 'm',
+          resolvedModel: 'm',
+          postureFingerprint: fpA,
+          classification: 'TIMEOUT',
+          state: 'failed',
+        },
+      ]),
+    );
+    assert.equal(infraOnly.totals.capabilityDenom, 0);
+    assert.equal(infraOnly.totals.capabilityPassRate, null);
+    assert.equal(infraOnly.totals.passRate, 0);
+    assert.equal(infraOnly.totals.infraRate, 0.5);
+    assert.equal(infraOnly.totals.timeoutRate, 0.5);
+    assertValid(infraOnly, schema);
+
+    // Human summary uses unambiguous labels and safe n/a for null rates
+    const humanMixed = formatHumanSummary(report);
+    assert.ok(
+      humanMixed.includes('passRate(legacy all-terminal)=n/a'),
+      'heterogeneous totals: legacy passRate n/a',
+    );
+    assert.ok(
+      humanMixed.includes('capabilityPassRate=PASS/(PASS+FAIL+NO_OP)=n/a'),
+      'heterogeneous totals: capability n/a',
+    );
+    assert.ok(humanMixed.includes('capabilityDenom=3'));
+    const humanHomo = formatHumanSummary(
+      buildReport(manifest, [trialResults[0]]),
+    );
+    assert.ok(humanHomo.includes('passRate(legacy all-terminal)=1.000'));
+    assert.ok(
+      humanHomo.includes('capabilityPassRate=PASS/(PASS+FAIL+NO_OP)=1.000'),
+    );
+    assert.ok(humanHomo.includes('infraRate=0.000'));
+    assert.ok(humanHomo.includes('timeoutRate=0.000'));
+    const humanInfra = formatHumanSummary(
+      buildReport(manifest, [
+        {
+          id: 'i1',
+          arm: 'infra',
+          provider: 'p',
+          taskId: 'task-i',
+          invocationPath: 'native-cli',
+          requestedModel: 'm',
+          resolvedModel: 'm',
+          postureFingerprint: fpA,
+          classification: 'INFRA_FAIL',
+          state: 'failed',
+        },
+      ]),
+    );
+    assert.ok(
+      humanInfra.includes('capabilityPassRate=PASS/(PASS+FAIL+NO_OP)=n/a'),
+      'zero capability denom → n/a',
+    );
+    assert.ok(humanInfra.includes('capabilityDenom=0'));
+    assert.ok(humanInfra.includes('infraRate=1.000'));
   });
 
   it('minimal validator rejects wrong types and missing required fields', async () => {

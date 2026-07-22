@@ -1,0 +1,169 @@
+# Brownfield Task: Fix Lost-Update Race in Order/Inventory Flow
+#
+# Category: Bug Fix (existing-codebase)
+# Language: Java (Spring Boot)
+# Complexity: High
+# Estimated Time: 45 minutes
+#
+# Bug: Concurrent orders oversell inventory (lost-update / check-then-act race)
+# Root cause: placeOrder() reads stock, validates, then writes a decrement
+#             derived from the stale read - without synchronization or a CAS,
+#             so interleaved requests corrupt the stock level.
+#
+# BUG-FIX CONSTRAINTS:
+# - All shipped tests must pass WITHOUT modification (fix the bug, not the tests)
+# - Public API of the controller/service stays the same
+# - Fix must make the stock read-check-write atomic
+
+taskId: brownfield-013-java-order-concurrency-bug
+type: brownfield
+codeType: existing-codebase
+category: bugfix
+language: java
+description: |
+  Fix a lost-update / check-then-act race in an order-placement flow that spans
+  the controller, service, and repository layers.
+
+  Bug symptoms:
+  - Under concurrent POST /orders requests for the same product, more units are
+    confirmed than the product ever had in stock (oversell).
+  - The persisted stock level and the number of confirmed orders no longer add
+    up to the initial stock: the conservation invariant
+    initialStock == finalStock + confirmedUnits is violated.
+  - Single-request behavior looks correct, so the bug hides until load.
+
+  Where to look:
+  - OrderController.placeOrder -> OrderService.placeOrder -> ProductRepository
+  - OrderService.placeOrder reads product.stock(), validates the request against
+    that value, then writes product.withStock(available - quantity) back. The
+    write is derived from the earlier read, so two threads can both read the same
+    stock, both pass the check, and both write a decrement - losing one update.
+  - The repositories back onto ConcurrentHashMap, but individual get/put calls
+    being thread-safe does NOT make the read-check-write sequence atomic.
+
+  Root cause hints:
+  - This is a classic non-atomic read-modify-write on shared state.
+  - A correct fix makes the reserve-stock step atomic. Acceptable approaches:
+    synchronizing the critical section, an explicit Lock, an atomic map
+    operation (computeIfPresent/compute/merge), or a compare-and-set retry loop
+    (optimistic locking). The order record must only be persisted when the
+    reservation actually succeeds.
+
+  Constraints:
+  - Do NOT modify any test file (fix the bug, not the tests).
+  - Do NOT change the public controller/service method signatures.
+  - The conservation invariant must hold under high contention.
+complexity: high
+
+expectedOutcome:
+  mustHave:
+    - id: stock-conserved-under-concurrency
+      description: Stock is conserved under concurrent reservation (no lost updates)
+      substantiation: test
+      artifactRef: OrderConcurrencyTest#stockIsConservedUnderConcurrentReservation
+
+    - id: inventory-not-oversold
+      description: Inventory is never oversold under contention
+      substantiation: test
+      artifactRef: OrderConcurrencyTest#inventoryIsNotOversoldUnderContention
+
+    - id: functional-behavior-intact
+      description: Single-request order/product behavior unchanged
+      substantiation: test
+      artifactRef: OrderControllerTest
+
+    - id: uses-synchronization
+      description: Fix introduces a concurrency-control mechanism (lock/atomic/CAS)
+      substantiation: static
+      evidenceGate: synchronization
+      artifactRef: scripts/check-synchronization.sh
+
+    - id: no-test-modifications
+      description: No test files were modified
+      substantiation: static
+      evidenceGate: no-test-edits
+      artifactRef: scripts/check-no-test-edits.sh
+
+  niceToHave:
+    - id: minimal-critical-section
+      description: Only the reserve-stock step is serialized (throughput preserved)
+      substantiation: static
+      artifactRef: Review of critical-section scope
+
+    - id: documented-fix
+      description: Comment explaining the race and the chosen fix
+      substantiation: static
+      artifactRef: Review of OrderService.placeOrder
+
+  successCriteria:
+    - All shipped tests pass without modification
+    - No oversell or lost updates under concurrent load
+    - Stock read-check-write made atomic via lock/atomic/CAS
+    - No public API changes to the controller or service
+
+eligibilityGates:
+  - gate: baseline-diff
+    check: Only implementation files changed (no test/validator edits)
+    order: 1
+
+  - gate: no-test-edits
+    check: No test files modified (fix the bug, not the tests)
+    command: bash scripts/check-no-test-edits.sh
+    expectedExitCode: 0
+    order: 2
+
+  - gate: build
+    check: Maven build succeeds
+    command: mvn clean compile -q
+    expectedExitCode: 0
+    order: 3
+
+  - gate: synchronization
+    check: Fix introduces a concurrency-control mechanism
+    command: bash scripts/check-synchronization.sh
+    expectedExitCode: 0
+    order: 4
+
+  - gate: tests
+    check: All tests pass (including the concurrency tests)
+    command: mvn test -q
+    expectedExitCode: 0
+    order: 5
+
+  - gate: requirements
+    check: All must_have items substantiated
+    order: 6
+
+networkPolicy:
+  allowed: true
+
+fixturePath: java-order-concurrency
+
+# Fixture details
+fixture:
+  description: Spring Boot order/inventory service with a lost-update concurrency bug
+  bugLocation: src/main/java/com/example/OrderService.java::placeOrder
+  spansLayers: OrderController -> OrderService -> ProductRepository/OrderRepository
+  testFramework: JUnit 5 + Spring Boot Test (MockMvc)
+  concurrencyTest: OrderConcurrencyTest spawns 64 threads x 25 rounds; a CyclicBarrier on the product read forces read-check-write overlap
+  testCount: 7 tests (2 concurrency, 5 functional MockMvc)
+  deterministicPattern: CyclicBarrier gathers all readers before any write, deterministically surfacing the lost-update race; each concurrency test also asserts persisted-order count equals confirmed reservations
+  checkScripts:
+    noTestEdits: scripts/check-no-test-edits.sh
+    synchronization: scripts/check-synchronization.sh
+
+# Bug-fix-specific configuration
+bugFixConstraints:
+  noTestEdits: true
+  noApiChange: true
+
+tags:
+  - java
+  - spring-boot
+  - concurrency
+  - race-condition
+  - lost-update
+  - bug-fix
+  - existing-codebase
+
+estimatedMinutes: 45

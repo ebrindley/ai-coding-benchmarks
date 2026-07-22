@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://ai-coding-benchmarks.local/schemas/task.schema.json",
   "title": "BenchmarkTask",
-  "description": "Task YAML contract reflecting benchmarks/cli-comparison/tasks/**/*.yaml",
+  "description": "Task YAML contract reflecting benchmarks/cli-comparison/tasks/**/*.yaml. Automated scoring is binary eligibility-gate classification (PASS/FAIL/NO_OP/INFRA_FAIL/TIMEOUT): a trial passes only when every required eligibility gate passes. Task-level scoring weight maps and toolEvidencePolicy are non-operational (not consumed). Of networkPolicy, only allowed is consumed.",
   "type": "object",
   "required": [
     "taskId",
@@ -79,15 +79,24 @@
     },
     "scoring": {
       "type": "object",
-      "additionalProperties": true
+      "additionalProperties": true,
+      "description": "NON-OPERATIONAL. Not consumed by the harness. Historical/documentation-only weight maps must not be treated as automated scoring. Automated scoring is binary eligibility-gate classification only. Prefer omitting this block from new tasks."
     },
     "toolEvidencePolicy": {
       "type": "object",
-      "additionalProperties": true
+      "additionalProperties": true,
+      "description": "NON-OPERATIONAL. Not consumed by the harness. Prefer omitting this block from new tasks."
     },
     "networkPolicy": {
       "type": "object",
-      "additionalProperties": true
+      "additionalProperties": true,
+      "description": "Network confinement hint. Only networkPolicy.allowed is consumed by the harness; other nested fields (provenanceRequired, record, etc.) are ignored.",
+      "properties": {
+        "allowed": {
+          "type": "boolean",
+          "description": "Only field consumed by the harness. When true, eligibility gates may use network under OS confinement."
+        }
+      }
     },
     "tags": {
       "type": "array",
@@ -160,6 +169,22 @@
         "oraclePath": {
           "type": "string",
           "description": "Commandless oracle: path relative to suite oracles/ only. Harness builds node|bash <absPath> under confinement; declared command is never rewritten."
+        },
+        "baselineDiffPolicy": {
+          "type": "object",
+          "required": ["allow"],
+          "additionalProperties": false,
+          "properties": {
+            "allow": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?![/\\\\])(?!(?:.*[/\\\\])?\\.\\.(?:[/\\\\]|$)).+$"
+              }
+            }
+          }
         }
       }
     }
