@@ -27,6 +27,8 @@ campaigns/
 raw-provider-output/
 .harness-work/
 .harness-artifacts/
+canary/logs/
+canary/workspaces/
 
 # OS/editor noise
 .DS_Store

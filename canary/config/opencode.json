@@ -1,0 +1,37 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "lmstudio": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LM Studio Qwen3.6 canary",
+      "options": {
+        "baseURL": "http://127.0.0.1:1234/v1",
+        "timeout": 5400000,
+        "chunkTimeout": 900000
+      },
+      "models": {
+        "qwen36-27b-6bit": {
+          "name": "Qwen3.6 27B MLX 6-bit",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "qwen36-27b-4bit": {
+          "name": "Qwen3.6 27B UD Q4_K_XL GGUF",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "qwen36-35b-a3b-6bit": {
+          "name": "Qwen3.6 35B-A3B MLX 6-bit",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    }
+  }
+}

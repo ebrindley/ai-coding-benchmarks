@@ -1,0 +1,24 @@
+{
+  "tasks": [
+    {
+      "taskId": "brownfield-008-js-to-ts-migration",
+      "taskFile": "benchmarks/cli-comparison/tasks/brownfield/008-js-to-ts-migration.yaml",
+      "fixture": "benchmarks/cli-comparison/fixtures/js-utils-commonjs"
+    },
+    {
+      "taskId": "brownfield-015-ts-event-store-snapshot-bug",
+      "taskFile": "benchmarks/cli-comparison/tasks/brownfield/015-ts-event-store-snapshot-bug.yaml",
+      "fixture": "benchmarks/cli-comparison/fixtures/ts-event-store"
+    },
+    {
+      "taskId": "brownfield-013-java-order-concurrency-bug",
+      "taskFile": "benchmarks/cli-comparison/tasks/brownfield/013-java-order-concurrency-bug.yaml",
+      "fixture": "benchmarks/cli-comparison/fixtures/java-order-concurrency"
+    },
+    {
+      "taskId": "greenfield-007-go-kv-http-service",
+      "taskFile": "benchmarks/cli-comparison/tasks/greenfield/007-go-kv-http-service.yaml",
+      "fixture": "benchmarks/cli-comparison/fixtures/go-kv-service"
+    }
+  ]
+}
