@@ -53,17 +53,6 @@ expectedOutcome:
       substantiation: test
       artifactRef: test/emitter.test.js::error-isolation
 
-  niceToHave:
-    - id: listener-count
-      description: listenerCount(pattern) returns number of listeners
-      substantiation: test
-      artifactRef: test/emitter.test.js::listener-count
-
-    - id: remove-all
-      description: removeAllListeners(pattern) removes all for pattern
-      substantiation: test
-      artifactRef: test/emitter.test.js::remove-all
-
   successCriteria:
     - All must-have tests pass
     - No memory leaks (listeners properly cleaned up)

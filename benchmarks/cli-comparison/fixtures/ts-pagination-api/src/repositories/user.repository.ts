@@ -24,16 +24,14 @@ export class UserRepository {
   findAll({ page, pageSize }: FindAllParams): User[] {
     const start = (page - 1) * pageSize;
 
-    // Seeded bug: missing secondary sort key. In real DBs, ties can be returned
-    // in arbitrary order between requests, causing duplicates across pages.
-    // We simulate this by flipping the tie breaker each call.
+    // Simulates real DB behavior: ties may come back in a different order
+    // between requests.
     flipTieBreaker = !flipTieBreaker;
 
     const sorted = [...users].sort((a, b) => {
       if (a.createdAt < b.createdAt) return -1;
       if (a.createdAt > b.createdAt) return 1;
 
-      // BUG: unstable ordering for ties.
       return flipTieBreaker ? b.id - a.id : a.id - b.id;
     });
 

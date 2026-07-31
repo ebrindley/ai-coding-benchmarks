@@ -1,8 +1,4 @@
 // A fixed-capacity LRU (least-recently-used) cache.
-//
-// There is a bug: accessing a key with get() should mark it as the most
-// recently used, so it survives eviction longer than untouched keys. Find and
-// fix the bug so the cache evicts the genuinely least-recently-used entry.
 
 export class LRUCache<K, V> {
   private readonly capacity: number;

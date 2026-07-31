@@ -988,6 +988,11 @@ export function buildSeatbeltProfile(
   const tmp = escapeSeatbeltPath(path.resolve(privateTmp));
   const lines = [
     '(version 1)',
+    // Import Apple's baseline BSD process rules so dyld can bootstrap on
+    // Darwin 25+. A bare deny-default profile aborts before the command runs.
+    // The explicit deny-default and scoped filesystem/network rules below
+    // remain the policy boundary for gate execution.
+    '(import "bsd.sb")',
     '(deny default)',
     '(allow process-exec)',
     '(allow process-fork)',
@@ -2410,6 +2415,15 @@ async function runConfinedCommand({
       infraFailure: 'runConfinedCommand: env is required (use buildGateEnv; never process.env)',
     };
   }
+  // Keep the granted workspace path and the spawned cwd identical. macOS temp
+  // roots commonly use /var aliases whose physical path is under /private/var;
+  // granting only the alias causes sandboxed getcwd() to fail with EPERM.
+  let resolvedWorkspaceDir = path.resolve(workspaceDir);
+  try {
+    resolvedWorkspaceDir = await realpath(resolvedWorkspaceDir);
+  } catch {
+    /* keep the resolved lexical path if the workspace disappeared */
+  }
   /** @type {string | null} */
   let cacheAbs = null;
   if (cacheDir != null && String(cacheDir).trim() !== '') {
@@ -2484,7 +2498,7 @@ async function runConfinedCommand({
       profilePath = path.join(profileDir, 'profile.sb');
       try {
         profileText = buildSeatbeltProfile(
-          path.resolve(workspaceDir),
+          resolvedWorkspaceDir,
           privateTmp,
           networkAllowed,
           readRoots,
@@ -2523,7 +2537,7 @@ async function runConfinedCommand({
 
     let built;
     try {
-      built = buildConfinedArgv(confinement, workspaceDir, command, {
+      built = buildConfinedArgv(confinement, resolvedWorkspaceDir, command, {
         profilePath,
         privateTmp,
         networkAllowed,
@@ -2563,7 +2577,7 @@ async function runConfinedCommand({
       let child;
       try {
         child = spawn(built.command, built.args, {
-          cwd: path.resolve(workspaceDir),
+          cwd: resolvedWorkspaceDir,
           // Fail closed: caller-supplied minimal env (buildGateEnv) with the
           // harness TMPDIR/TMP/TEMP overlay pointing at the private tmp.
           env: runEnv,

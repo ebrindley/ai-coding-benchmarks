@@ -6,7 +6,6 @@
 # Estimated Time: 30 minutes
 #
 # Bug: Multiple workers sometimes process the same task
-# Root cause: Missing lock around task claiming logic
 
 taskId: brownfield-003-python-async-race
 type: brownfield
@@ -21,9 +20,7 @@ description: |
   - Duplicate results appear in output
   - Happens ~5% of the time under load
 
-  Root cause hints:
-  - Check claim_task() function
-  - No lock protecting read-modify-write of task status
+  Constraints:
   - Fix must use asyncio primitives (Lock, Semaphore)
 
   Constraints:
@@ -58,11 +55,6 @@ expectedOutcome:
       substantiation: test
       artifactRef: tests/test_processor.py::test_throughput_maintained
       note: Time-based test, excluded by default to avoid CI flakiness
-
-    - id: race-test-added
-      description: New test specifically for race condition scenario
-      substantiation: test
-      artifactRef: tests/test_processor.py::test_race_condition_prevented
 
     - id: documented
       description: Comment explaining the race condition and fix

@@ -2,9 +2,6 @@ const sanitizeHtml = require('sanitize-html');
 
 /**
  * Render a user-submitted comment with limited formatting.
- *
- * Seeded bug: sanitizer is misconfigured to allow all attributes on all tags,
- * enabling event-handler injection (e.g., <img onerror="...">).
  */
 function renderComment(rawHtml) {
   return sanitizeHtml(rawHtml, {
@@ -12,7 +9,6 @@ function renderComment(rawHtml) {
     allowedAttributes: {
       a: ['href', 'title', 'target', 'rel'],
       img: ['src', 'alt'],
-      // BUG: allows everything (including onerror, style, etc.)
       '*': ['*'],
     },
     allowedSchemes: ['http', 'https', 'mailto'],

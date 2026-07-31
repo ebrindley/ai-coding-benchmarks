@@ -1,11 +1,4 @@
-"""Async task processor with race condition bug.
-
-This module implements an async task processor that has a race condition
-in the claim_task() method. Multiple workers can claim the same task
-because the read-modify-write of task status is not atomic.
-
-BUG LOCATION: claim_task() method - missing asyncio.Lock protection
-"""
+"""Async task processor."""
 
 from __future__ import annotations
 
@@ -40,12 +33,7 @@ class Task:
 
 
 class TaskProcessor:
-    """Async task processor with multiple workers.
-
-    WARNING: This implementation has a race condition bug in claim_task().
-    Multiple workers can claim the same task because there's no lock
-    protecting the read-modify-write sequence.
-    """
+    """Async task processor with multiple workers."""
 
     def __init__(self, num_workers: int = 4):
         """Initialize the processor.
@@ -59,8 +47,6 @@ class TaskProcessor:
         self._results: Dict[str, Any] = {}
         self._processed_count = 0
         self._duplicate_count = 0
-        # BUG: No lock for protecting shared state
-        # self._lock = asyncio.Lock()  # This should be added
 
     def add_task(self, task_id: str, payload: Any) -> Task:
         """Add a task to the queue.
@@ -80,33 +66,12 @@ class TaskProcessor:
     async def claim_task(self, worker_id: str) -> Optional[Task]:
         """Claim the next available task for processing.
 
-        BUG: This method has a race condition. The check-then-act pattern
-        (checking if task is PENDING, then setting to CLAIMED) is not atomic.
-        Multiple workers can read the same task as PENDING before any of them
-        updates the status, causing duplicate claims.
-
-        Race scenario:
-        1. Worker A: reads task status (PENDING), passes check
-        2. Worker A: yields at asyncio.sleep(0)
-        3. Worker B: reads task status (PENDING), passes check  <-- A hasn't written yet!
-        4. Worker B: yields at asyncio.sleep(0)
-        5. Worker A: sets status=CLAIMED, returns task
-        6. Worker B: sets status=CLAIMED (overwrites!), returns same task
-        7. Both workers now process the same task = duplicate!
-
-        The fix requires wrapping this in an asyncio.Lock:
-            async with self._lock:
-                # ... existing code ...
-
         Args:
             worker_id: Identifier of the worker claiming the task
 
         Returns:
             The claimed Task, or None if no tasks available
         """
-        # BUG: No lock here - race condition!
-        # async with self._lock:  # This should wrap the whole block
-
         if not self._pending_queue:
             return None
 
@@ -118,19 +83,13 @@ class TaskProcessor:
             self._pending_queue.pop(0)
             return None
 
-        # BUG: Race condition window - another worker can read same task
-        # before we update the status
         if task.status != TaskStatus.PENDING:
             # Task was already claimed by another worker
             return None
 
-        # Simulate a small delay that increases race condition probability
-        # In real code this might be a database check or network call
-        await asyncio.sleep(0)  # Yield to event loop - race window!
-
-        # BUG: No second check here! Another worker can claim this task
-        # during the yield above, and we'll overwrite their claim.
-        # The fix requires wrapping the entire read-modify-write in asyncio.Lock
+        # Simulate a small delay; in real code this might be a database
+        # check or network call.
+        await asyncio.sleep(0)
 
         # Update task status
         task.status = TaskStatus.CLAIMED

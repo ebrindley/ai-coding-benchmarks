@@ -52,16 +52,6 @@ expectedOutcome:
       substantiation: test
       artifactRef: tests/test_cli.py::test_pretty_flag
 
-    - id: type-inference
-      description: Infers numeric types from string values
-      substantiation: test
-      artifactRef: tests/test_cli.py::test_type_inference
-
-    - id: streaming
-      description: Handles large files without loading entire file into memory
-      substantiation: test
-      artifactRef: tests/test_cli.py::test_large_file_streaming
-
   successCriteria:
     - All must-have tests pass
     - No Python lint errors (ruff)

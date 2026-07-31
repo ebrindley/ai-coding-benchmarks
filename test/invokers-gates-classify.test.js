@@ -14,6 +14,7 @@ import {
   rm,
   readFile,
   mkdir,
+  realpath,
 } from 'node:fs/promises';
 
 describe('invokers + gates + classify', () => {
@@ -1189,6 +1190,50 @@ process.exit(1);
     }
     const cIdx = bwrap.args.indexOf('-c');
     assert.equal(bwrap.args[cIdx + 1], 'npm test');
+  });
+
+  it('macOS gate confinement boots dyld from a realpath-canonical temp workspace', async (t) => {
+    if (process.platform !== 'darwin') {
+      t.skip('macOS sandbox-exec regression');
+      return;
+    }
+
+    const { runGates } = await import('../harness/gates.js');
+    const executionRoot = await mkdtemp(path.join(os.tmpdir(), 'aicb-seatbelt-regression-'));
+    const workspace = path.join(executionRoot, 'workspace');
+    await mkdir(workspace);
+
+    try {
+      const physicalWorkspace = await realpath(workspace);
+      const results = await runGates({
+        gates: [
+          {
+            gate: 'probe',
+            command: 'exit 0',
+            expectedExitCode: 0,
+            order: 1,
+            required: true,
+          },
+        ],
+        workspaceDir: workspace,
+        confinement: {
+          available: true,
+          kind: 'sandbox-exec',
+          binary: '/usr/bin/sandbox-exec',
+        },
+        parentEnv: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+        timeoutMs: 30_000,
+      });
+
+      assert.equal(
+        results[0].exitCode,
+        0,
+        `sandbox-exec failed for ${workspace} (${physicalWorkspace}): ${results[0].evidence}`,
+      );
+      assert.equal(results[0].status, 'passed');
+    } finally {
+      await rm(executionRoot, { recursive: true, force: true });
+    }
   });
 
   it('requirements uses prior gate results: pass with tests, unavailable without', async () => {

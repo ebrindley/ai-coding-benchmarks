@@ -6,7 +6,6 @@
 # Estimated Time: 20 minutes
 #
 # Bug: Report query missing orders that have no items
-# Root cause: INNER JOIN should be LEFT JOIN
 
 taskId: brownfield-005-sqlite-join-bug
 type: brownfield
@@ -21,10 +20,6 @@ description: |
   - Orders with no items are missing
   - Total revenue is correct, but order count is wrong
 
-  Root cause hints:
-  - Check the JOIN between orders and order_items
-  - INNER JOIN excludes orders with no matching items
-  - Should be LEFT JOIN to include all orders
 
   Constraints:
   - Fix the query in reports/monthly_sales.sql

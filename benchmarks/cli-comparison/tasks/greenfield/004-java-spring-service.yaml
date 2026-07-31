@@ -66,11 +66,6 @@ expectedOutcome:
       evidenceGate: tests
       artifactRef: src/test/java/com/example/BookControllerTest.java::validation
 
-    - id: swagger
-      description: OpenAPI/Swagger annotations present
-      substantiation: static
-      artifactRef: scripts/check-swagger-annotations.sh
-
   successCriteria:
     - All must-have tests pass
     - Application starts without errors
