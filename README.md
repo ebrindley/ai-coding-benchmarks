@@ -1,118 +1,124 @@
 # AI Coding Benchmarks
 
-A public reference set of benchmark scenarios for evaluating AI coding models
-and agentic coding tools on small but realistic software engineering tasks.
+A public reference set of software engineering tasks, starting fixtures and
+validators for comparing AI coding models and agentic coding tools.
 
-This is **not** a leaderboard, an endorsement of any tool, or a
-community-maintained benchmark suite. It is a fixed, reusable set of tasks,
-starting fixtures, and validators that you can run against any coding agent to
-compare results yourself.
+The corpus is runner-neutral and usable without the optional local harness.
+It is not a leaderboard or an endorsement of any tool. Compare results across
+the whole suite; a single task is useful for exploration, not a model ranking.
 
-## What's Included
+## Choose a starting point
 
-- `benchmarks/cli-comparison/tasks/` — greenfield and brownfield task specs.
-- `benchmarks/cli-comparison/fixtures/` — starting codebases for the tasks.
-- `benchmarks/cli-comparison/oracles/` — validators for checks beyond ordinary
-  build/test commands.
-- `benchmarks/cli-comparison/suite.yaml` — the default task list.
-- `schemas/` — versioned contracts for suite/task YAML and optional harness
-  experiment, trial, campaign-manifest, and report documents.
-- `harness/` — **optional** local Node.js harness (`aicb`) for experiment
-  expansion, confined gate execution, resume, and sanitized export.
+- **Explore a task manually:** use the [manual workflow](#run-a-task-manually)
+  with your own coding agent.
+- **Check the harness setup:** follow the [setup check](#check-the-harness-setup).
+  It validates the corpus and expands a sample without running a provider.
+- **Compare models or tools:** configure a [comparison experiment](#configure-a-comparison)
+  and read the methodology before interpreting results.
 
-The portable corpus under `benchmarks/` remains runner-neutral. The harness is
-optional tooling in the same repository; it does not change pull-request or
-governance posture.
+## Requirements
 
-## Optional harness
+The optional harness needs Node.js 20 or later and npm. Executing trials needs
+macOS with `/usr/bin/sandbox-exec` or Linux with `bwrap`; execution is unavailable
+without supported confinement. Planning with `--no-execute` does not run trials.
 
-Install dependencies (only runtime dependency: `yaml`):
+Tasks require the toolchains named in their gate commands. The suite includes
+JavaScript/TypeScript, Python, Java, SQL, Go, Rust and C# tasks; install the
+tooling for every task you intend to execute. Gates run code from the task
+workspace; read [execution boundaries](SECURITY.md) before running them.
+
+Real experiments also need an installed, configured coding-agent CLI.
+The shipped comparison templates include Poetic invocation paths and require
+a separately available Poetic installation; this repository does not install
+or distribute it. A `native-cli` arm uses your own command and arguments.
+
+## Check the harness setup
+
+Clone the repository, enter it, and install its dependencies:
 
 ```bash
+git clone https://github.com/ebrindley/ai-coding-benchmarks.git
+cd ai-coding-benchmarks
 npm install
+node harness/cli.js self-validate
+node harness/cli.js run --experiment examples/experiment.sample.json --corpus benchmarks --no-execute
 ```
 
-Quiet CLI:
+A successful validation prints `self-validate: ok`. The planning command prints
+JSON with `ok: true`, a `campaignDir` and `status: "pending"`. No trials
+execute. Keep the returned campaign path for later commands.
+Without `--campaign`, output goes under the system temporary directory.
+
+The sample contains one task and a fake command (`true`). Removing
+`--no-execute` exercises the execution path with that fake command; it does not
+measure a coding model or demonstrate a passing solution.
+
+## Configure a comparison
+
+The [examples](examples/) contain model, provider and harness comparison
+templates. They require editing before use:
+
+1. Choose a template and replace provider/model placeholders with identifiers
+   available in your installation.
+2. Set each arm's `invocationPath`: `poetic-adapter`, `poetic-system`, or
+   `native-cli`. Native CLI arms need a real `command` and `args`; see the
+   [experiment schema](schemas/experiment.schema.json).
+3. Configure credentials outside the repository and the arm's environment
+   allowlist as needed. Omit `taskIds` to compare the whole suite.
+4. Hold other settings constant when comparing one variable. See the
+   [comparison methodology](benchmarks/cli-comparison/COMPARISON.md).
+
+After configuring the selected experiment, run it:
 
 ```bash
-npx aicb self-validate
-npx aicb run --experiment ./path/to/experiment.json --corpus ./benchmarks
-npx aicb summary --campaign /path/to/campaign
-npx aicb export --campaign /path/to/campaign --out /path/to/bundle
+node harness/cli.js run --experiment examples/compare-models.experiment.json --corpus benchmarks
 ```
 
-Experiment arms must name an explicit `invocationPath`:
+Use the `campaignDir` returned by that command in place of `/path/to/campaign`:
 
-- `poetic-adapter` — argv-safe `poetic provider invoke --request … --output …`
-- `native-cli` — harness-driven command/args from the arm (not task YAML)
-- `poetic-system` — harness-driven Poetic system path
+```bash
+node harness/cli.js summary --campaign /path/to/campaign
+node harness/cli.js export --campaign /path/to/campaign --out /path/to/bundle
+```
 
-The harness never silently aggregates results across different invocation
-paths, resolved model ids, or posture fingerprints. Raw provider output is
-treated as secret-bearing, quarantined under the campaign directory, excluded
-from default sanitized export, and should not be committed. Upload/publish of
-results remains external to this repository.
+Summary reports per-arm, per-task and per-cell pass counts and pass rates.
+It does not yet calculate composite or language/category/type sub-scores;
+calculate those from the per-task results using the methodology. Separate
+infrastructure failures and timeouts from model failures when interpreting rates.
 
-### Running the suite as a comparison (composite + sub-scores)
+Results retain distinct invocation paths and resolved-model evidence.
+Raw provider output may contain secrets and is excluded from default sanitized
+exports. Do not commit it. Uploading or publishing results is a separate action.
 
-The suite is meant to be run **as a whole**, not task by task: clone/pin the
-repo, run the entire suite against each model, provider, or harness you are
-comparing, and read the **composite score and per-language/per-category
-sub-scores** — the profile, not any single task. See
-[`benchmarks/cli-comparison/COMPARISON.md`](benchmarks/cli-comparison/COMPARISON.md)
-for the methodology, and the ready-to-edit multi-arm experiments in
-[`examples/`](examples/) (`compare-providers`, `compare-models`,
-`compare-harnesses`).
+## Run a task manually
 
-### Neutral protocol evidence (poetic-adapter)
-
-For `poetic-adapter` trials the harness persists versioned, neutral invocation
-outcome fields on each trial result — separate from transport `exitCode`:
-
-- `outcomeKind` — bounded kind (`success`, `timeout`, `provider_error`,
-  `refusal`, `aborted`, `internal_error`, …)
-- `reasonCode` — bounded code (`SUCCESS`, `MODEL_UNRESOLVED`,
-  `PROVIDER_TIMEOUT`, `PROVIDER_ERROR`, …)
-- `protocolEvidenceVersion` — currently `1`
-- `protocolSchema` — `poetic.provider.invoke.result.v1`
-
-These fields are export-safe bounded identifiers only (no raw provider text).
-New reportable poetic-adapter records without them fail closed at evidence
-verify. Subprocess capture joins raw byte chunks before UTF-8 decode so
-multi-byte sequences split across chunk boundaries are not corrupted; invalid
-UTF-8 bytes may still be replaced when a string view is required.
-
-Tests and self-validation use fake executables only; they do not call live
-providers or download fixture dependencies.
-
-## Running a Task (manual, harness-independent)
-
-Each task YAML lists the fixture to start from, the constraints, the expected
-outcome, and the gates that must pass. A typical manual run:
+Each [task YAML](benchmarks/cli-comparison/tasks/) names its fixture, constraints,
+expected outcome and required gates:
 
 1. Copy the referenced fixture into a temporary working directory.
 2. Have an agent complete the task from its description.
-3. Run the task's eligibility gate commands.
-4. Run any task-specific oracle in `oracles/`.
-5. Inspect the diff to confirm the constraints were respected.
+3. Run the task's eligibility gate commands and any task-specific oracle.
+4. Inspect the diff to confirm the constraints were respected.
 
-## Toolchain
+This workflow does not require the harness or Poetic. Use the full suite and
+consistent conditions for comparative claims.
 
-Some fixtures require local tooling: Node.js + npm (JS/TS), Python 3.9+,
-Java 17 + Maven, and SQLite. Generated artifacts (`node_modules/`, `.venv/`,
-`dist/`, Maven `target/`, SQLite database files) should not be committed.
+## Repository contents and documentation
 
-## Contributing & Governance
+- [Tasks](benchmarks/cli-comparison/tasks/), [fixtures](benchmarks/cli-comparison/fixtures/)
+  and [oracles](benchmarks/cli-comparison/oracles/): the portable corpus.
+- [Suite](benchmarks/cli-comparison/suite.yaml): the default task list.
+- [Comparison guide](benchmarks/cli-comparison/COMPARISON.md): methodology,
+  current scoring limits and invocation evidence.
+- [Schemas](schemas/) and [harness](harness/): experiment contracts and optional runner.
+- [Security](SECURITY.md): execution and evidence boundaries.
 
-This repository is owned and maintained solely by its author.
+Keep generated dependencies, build output and campaign artifacts out of commits.
 
-- Forking, copying, and adapting are allowed under the [MIT License](LICENSE).
-- **Pull requests are not accepted.** (Unchanged by the optional harness.)
-- Feedback, suggestions, corrections, and bug reports are welcome via
-  [Issues](../../issues).
-- Submitted suggestions may be used, adapted, or declined at the author's
-  discretion.
+## Support and license
 
-## License
+Maintained by Ed Brindley. Feedback and bug reports are welcome through
+[Issues](https://github.com/ebrindley/ai-coding-benchmarks/issues).
+Pull requests are not accepted; see [contribution guidance](CONTRIBUTING.md).
 
-[MIT](LICENSE) © 2026 Ed Brindley
+[MIT](LICENSE) © 2026 Ed Brindley.

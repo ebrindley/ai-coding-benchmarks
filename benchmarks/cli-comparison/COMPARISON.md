@@ -85,15 +85,18 @@ their own and are easy to read, which matters more than trying to encode
 ## How to run a comparison
 
 Each comparison is one **experiment** (see `../../examples/*.experiment.json`)
-that lists **arms** — one arm per thing being compared. Omit `taskIds` so the
-**whole suite** runs for every arm.
+that lists **arms** — one arm per thing being compared. These are templates:
+replace their provider/model placeholders and configure the required invoker
+before running them. The Poetic arms require a separate Poetic installation.
+See the [README](../../README.md#configure-a-comparison) for setup and the
+`native-cli` alternative. Omit `taskIds` so the **whole suite** runs for every arm.
 
 ```bash
 npm install
-npx aicb self-validate
-npx aicb run --experiment ./examples/compare-providers.experiment.json --corpus ./benchmarks
-npx aicb summary --campaign /path/to/campaign
-npx aicb export  --campaign /path/to/campaign --out /path/to/bundle
+node harness/cli.js self-validate
+node harness/cli.js run --experiment ./examples/compare-providers.experiment.json --corpus ./benchmarks
+node harness/cli.js summary --campaign /path/to/campaign
+node harness/cli.js export  --campaign /path/to/campaign --out /path/to/bundle
 ```
 
 The harness **never pools results across different invocation paths, resolved
@@ -179,3 +182,24 @@ These are known gaps, not properties of a finished instrument. The suite today
 is strong for **profiling models** and **detecting large, consistent
 divergences**; the caveats above bound how fine a claim the current tooling
 supports.
+
+## Neutral protocol evidence (poetic-adapter)
+
+For `poetic-adapter` trials the harness persists versioned, neutral invocation
+outcome fields on each trial result — separate from transport `exitCode`:
+
+- `outcomeKind` — bounded kind (`success`, `timeout`, `provider_error`,
+  `refusal`, `aborted`, `internal_error`, …)
+- `reasonCode` — bounded code (`SUCCESS`, `MODEL_UNRESOLVED`,
+  `PROVIDER_TIMEOUT`, `PROVIDER_ERROR`, …)
+- `protocolEvidenceVersion` — currently `1`
+- `protocolSchema` — `poetic.provider.invoke.result.v1`
+
+These fields are export-safe bounded identifiers only (no raw provider text).
+New reportable poetic-adapter records without them fail closed at evidence
+verify. Subprocess capture joins raw byte chunks before UTF-8 decode so
+multi-byte sequences split across chunk boundaries are not corrupted; invalid
+UTF-8 bytes may still be replaced when a string view is required.
+
+Tests and self-validation use fake executables only; they do not call live
+providers or download fixture dependencies.
