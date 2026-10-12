@@ -27,4 +27,15 @@ describe('stored XSS fixture', () => {
     expect(out).not.toContain('javascript:');
     expect(out).not.toContain('alert(1)');
   });
+
+  test('strips-other-event-handlers', () => {
+    const out = renderComment('<img src="x" onload="alert(2)">');
+    expect(out.toLowerCase()).not.toMatch(/\bon[a-z]+\s*=/);
+    expect(out).not.toContain('alert(2)');
+  });
+
+  test('blocks-mixed-case-javascript-urls', () => {
+    const out = renderComment('<a href="JaVaScRiPt:alert(2)">x</a>');
+    expect(out.toLowerCase()).not.toContain('javascript:');
+  });
 });
