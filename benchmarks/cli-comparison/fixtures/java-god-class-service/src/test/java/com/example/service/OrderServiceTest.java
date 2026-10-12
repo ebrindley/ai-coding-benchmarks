@@ -19,6 +19,13 @@ public final class OrderServiceTest {
   }
 
   @Test
+  void reservedStockIsVisibleToTheNextOrder() {
+    var svc = new OrderService();
+    svc.createOrder("o-a", "SKU-1", 8);
+    assertThrows(IllegalStateException.class, () -> svc.createOrder("o-b", "SKU-1", 3));
+  }
+
+  @Test
   void cancelOrderRequiresExisting() {
     var svc = new OrderService();
     assertThrows(IllegalArgumentException.class, () -> svc.cancelOrder("missing"));
