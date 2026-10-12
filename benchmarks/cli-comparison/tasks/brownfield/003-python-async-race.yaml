@@ -21,11 +21,8 @@ description: |
   - Happens ~5% of the time under load
 
   Constraints:
-  - Fix must use asyncio primitives (Lock, Semaphore)
-
-  Constraints:
+  - Use asyncio synchronization primitives (Lock, Semaphore, or equivalent)
   - Must not significantly impact throughput (<10% degradation)
-  - Use asyncio.Lock or equivalent
   - Do not change the public TaskProcessor API
 complexity: medium
 

@@ -9,14 +9,12 @@ Exit codes:
     70: FAIL_NO_LOCK - No asyncio synchronization primitive found
     71: FAIL_WRONG_PRIMITIVE - Wrong primitive used (e.g., threading.Lock)
     72: FAIL_FILE_NOT_FOUND - processor.py not found
-    73: FAIL_AWAIT_IN_LOCK - Await detected inside lock-protected section
 
 Error IDs (grep-able):
     PASS_ASYNCIO_PRIMITIVES
     FAIL_NO_LOCK
     FAIL_WRONG_PRIMITIVE
     FAIL_FILE_NOT_FOUND
-    FAIL_AWAIT_IN_LOCK
 
 Output: JSON on stdout with machine-readable results + human message.
 """
@@ -108,7 +106,6 @@ def find_primitives_in_file(filepath: Path) -> dict:
     bindings = collect_imports(tree)
     found_valid, found_invalid = collect_primitives(tree, bindings)
     lock_in_claim_task = False
-    await_in_lock_in_claim_task = False
 
     # Check if lock is used in claim_task method
     for node in ast.walk(tree):
@@ -117,12 +114,6 @@ def find_primitives_in_file(filepath: Path) -> dict:
             for child in ast.walk(node):
                 if isinstance(child, ast.AsyncWith):
                     lock_in_claim_task = True
-                    # Detect any await inside the async-with body. Awaiting while holding
-                    # the lock can lead to deadlocks in deterministic race tests.
-                    for stmt in child.body:
-                        for inner in ast.walk(stmt):
-                            if isinstance(inner, ast.Await):
-                                await_in_lock_in_claim_task = True
                     break
 
     return {
@@ -131,7 +122,6 @@ def find_primitives_in_file(filepath: Path) -> dict:
         "found_valid_primitives": found_valid,
         "found_invalid_primitives": found_invalid,
         "lock_in_claim_task": lock_in_claim_task,
-        "await_in_lock_in_claim_task": await_in_lock_in_claim_task,
     }
 
 
@@ -159,20 +149,13 @@ def main() -> int:
     elif not result_data["found_valid_primitives"]:
         error_id = "FAIL_NO_LOCK"
         exit_code = 70
-        message = "✗ No asyncio synchronization primitive found. Add asyncio.Lock to claim_task()."
+        message = "✗ No asyncio synchronization primitive found."
     elif not result_data["lock_in_claim_task"]:
         error_id = "FAIL_NO_LOCK"
         exit_code = 70
         message = (
             f"✗ asyncio primitive found but not used in claim_task(). "
             f"Found: {', '.join(result_data['found_valid_primitives'])}"
-        )
-    elif result_data.get("await_in_lock_in_claim_task"):
-        error_id = "FAIL_AWAIT_IN_LOCK"
-        exit_code = 73
-        message = (
-            "✗ Detected `await` inside the lock-protected section of claim_task(). "
-            "Avoid awaiting while holding the lock; make the claim atomic and remove/move yields."
         )
     else:
         error_id = "PASS_ASYNCIO_PRIMITIVES"

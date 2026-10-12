@@ -7,10 +7,10 @@ Benchmark fixture for testing async concurrency bug fixes.
 > This fixture's tests are designed to **FAIL on the buggy baseline** and **PASS after the fix**.
 > Do not "fix" the failing tests - they expose the race condition that candidates must solve.
 >
-> | State | Tests Run | Results | Fix Applied |
-> |-------|-----------|---------|-------------|
-> | Baseline (current) | 8 (excl. perf) | 4 PASS, 4 FAIL | No `asyncio.Lock` |
-> | After fix | 8 (excl. perf) | 8 PASS | `asyncio.Lock` in `claim_task()` |
+> | State | Tests Run | Results |
+> |-------|-----------|---------|
+> | Baseline (current) | 8 (excl. perf) | 4 PASS, 4 FAIL |
+> | After fix | 8 (excl. perf) | 8 PASS |
 >
 > Performance tests are excluded by default (`-m 'not performance'`) to avoid CI flakiness.
 > The deterministic test (`test_deterministic_interleaving_exposes_race`) forces the exact
@@ -20,34 +20,9 @@ Benchmark fixture for testing async concurrency bug fixes.
 
 **Task ID**: `brownfield-003-python-async-race`
 
-### The Bug
+### Symptoms
 
-The `claim_task()` method in `src/processor.py` has a race condition:
-
-```python
-async def claim_task(self, worker_id: str) -> Optional[Task]:
-    # BUG: No lock protecting this read-modify-write sequence!
-
-    if task.status != TaskStatus.PENDING:  # Read
-        return None
-
-    await asyncio.sleep(0)  # Yield - race window!
-
-    task.status = TaskStatus.CLAIMED  # Write - another worker may have claimed!
-```
-
-### Expected Fix
-
-Add an `asyncio.Lock` to protect the critical section:
-
-```python
-def __init__(self, ...):
-    self._lock = asyncio.Lock()  # Add this
-
-async def claim_task(self, worker_id: str) -> Optional[Task]:
-    async with self._lock:  # Wrap the critical section
-        # ... existing code ...
-```
+When multiple workers run concurrently, the same task can be processed twice and duplicate results appear.
 
 ### Constraints
 
@@ -55,6 +30,8 @@ async def claim_task(self, worker_id: str) -> Optional[Task]:
 2. **No threading.Lock** - Wrong primitive for async code
 3. **Throughput maintained** - Fix should not degrade performance by >10%
 4. **All tests must pass** - Including race condition detection tests
+
+An async synchronization primitive may be held across an await; the behavioral tests check that claims remain unique and complete without deadlock.
 
 ## Quick Start
 
@@ -111,7 +88,7 @@ python-async-processor/
 ### check_asyncio_primitives.py
 | Exit | Error ID | Meaning |
 |------|----------|---------|
-| 0 | `PASS_ASYNCIO_PRIMITIVES` | asyncio.Lock properly used |
+| 0 | `PASS_ASYNCIO_PRIMITIVES` | asyncio synchronization primitive used in the claim |
 | 70 | `FAIL_NO_LOCK` | No asyncio primitive found |
 | 71 | `FAIL_WRONG_PRIMITIVE` | Used threading.Lock instead |
 | 72 | `FAIL_FILE_NOT_FOUND` | processor.py not found |

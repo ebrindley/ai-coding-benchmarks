@@ -207,24 +207,7 @@ class TestRaceCondition:
         assert result["duplicate_count"] == 0
 
     async def test_deterministic_interleaving_exposes_race(self):
-        """MUST FAIL ON BASELINE: Forces deterministic race via coordinated yield.
-
-        This test monkey-patches asyncio.sleep to synchronize workers at the
-        yield point, guaranteeing they both pass the status check before either
-        writes. This makes the race 100% reproducible.
-
-        Race scenario forced by this test:
-        1. Worker A: enters claim_task, passes status check (PENDING)
-        2. Worker A: reaches asyncio.sleep(0), waits at barrier
-        3. Worker B: enters claim_task, passes status check (PENDING) <-- A hasn't written!
-        4. Worker B: reaches asyncio.sleep(0), releases barrier
-        5. Both workers continue past yield simultaneously
-        6. Worker A: sets status=CLAIMED, returns task
-        7. Worker B: sets status=CLAIMED (overwrites!), returns same task
-        8. BOTH workers have the task = duplicate processing!
-
-        After adding asyncio.Lock to claim_task, only one worker will claim.
-        """
+        """Forces a deterministic interleaving so duplicate claims fail the run."""
         processor = TaskProcessor(num_workers=2)
         processor.add_task("task-1", 1)
 
@@ -244,7 +227,10 @@ class TestRaceCondition:
                 if workers_at_yield >= 2:
                     release_barrier.set()
 
-            await release_barrier.wait()
+            try:
+                await asyncio.wait_for(release_barrier.wait(), timeout=0.05)
+            except asyncio.TimeoutError:
+                pass
             await original_sleep(0)
 
         # Monkey-patch asyncio.sleep
@@ -266,23 +252,13 @@ class TestRaceCondition:
                     timeout=1.0,
                 )
             except asyncio.TimeoutError:
-                pytest.fail(
-                    "DEADLOCK DETECTED: workers blocked at coordinated yield.\n"
-                    "This commonly happens if claim_task() holds a lock while awaiting.\n"
-                    "Fix by making the claim operation atomic with a lock, but do not await\n"
-                    "inside the locked section (remove/move the asyncio.sleep(0) yield)."
-                )
+                pytest.fail("DEADLOCK DETECTED: workers blocked during claim.")
         finally:
             asyncio.sleep = original_sleep
 
-        # CRITICAL ASSERTION:
-        # BASELINE (buggy): Both workers claim task-1 → len(claims) == 2
-        # FIXED (with lock): Only one worker claims task-1 → len(claims) == 1
         assert len(claims) == 1, (
-            f"RACE CONDITION DETECTED: {len(claims)} workers claimed task-1!\n"
-            f"Claims: {claims}\n"
-            f"This happens because claim_task() lacks atomicity.\n"
-            f"FIX: Add asyncio.Lock to protect the read-modify-write sequence."
+            f"RACE CONDITION DETECTED: {len(claims)} workers claimed task-1.\n"
+            f"Claims: {claims}"
         )
 
 
