@@ -19,7 +19,8 @@ The codebase has duplicate validation logic across three service files:
 ### Target State (After Refactoring)
 
 - Create `src/shared/validators.py` with canonical implementations
-- Services import from shared module instead of defining their own
+- Services import shared implementations; existing methods may forward without
+  duplicating validation logic
 - All 32 existing tests pass WITHOUT modification
 - Public API unchanged
 

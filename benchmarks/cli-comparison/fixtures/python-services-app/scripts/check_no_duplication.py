@@ -4,6 +4,8 @@
 This script verifies that after refactoring, the validation functions
 (validate_email, validate_phone, validate_address) exist ONLY in the
 shared/validators.py module and are imported elsewhere, not re-implemented.
+Single-return service wrappers that forward to an imported shared validator
+without local computation are permitted.
 
 Exit codes:
     0: PASS - No duplication detected
@@ -42,6 +44,47 @@ SERVICE_FILES = [
 ]
 
 
+def is_shared_delegate(node: ast.FunctionDef, imports: dict[str, str]) -> bool:
+    """A pure forward to the shared implementation preserves the service API."""
+    body = list(node.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return False
+    call = body[0].value
+    if not isinstance(call, ast.Call):
+        return False
+    target = call.func
+    parts = []
+    while isinstance(target, ast.Attribute):
+        parts.insert(0, target.attr)
+        target = target.value
+    if not isinstance(target, ast.Name) or target.id not in imports:
+        return False
+    arguments = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+    if node.args.vararg:
+        arguments.append(node.args.vararg)
+    if node.args.kwarg:
+        arguments.append(node.args.kwarg)
+    if target.id in {argument.arg for argument in arguments}:
+        return False
+    qualified = ".".join([imports[target.id], *parts])
+    if qualified not in {
+        f"shared.validators.{node.name}",
+        f"src.shared.validators.{node.name}",
+    }:
+        return False
+    # No normalization, branching, or other local validation is excused.
+    return all(isinstance(arg, ast.Name) for arg in call.args) and all(
+        isinstance(keyword.value, ast.Name) for keyword in call.keywords
+    )
+
+
 def find_function_definitions(filepath: Path) -> list[str]:
     """Find all function definitions in a file."""
     if not filepath.exists():
@@ -53,15 +96,24 @@ def find_function_definitions(filepath: Path) -> list[str]:
         except SyntaxError:
             return []
 
+    imports = {}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.ImportFrom) and stmt.module:
+            for alias in stmt.names:
+                if alias.name != "*":
+                    imports[alias.asname or alias.name] = f"{stmt.module}.{alias.name}"
+        elif isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                imports[alias.asname or alias.name.split(".")[0]] = (
+                    alias.name if alias.asname else alias.name.split(".")[0]
+                )
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.ClassDef)):
+            imports.pop(stmt.name, None)
     functions = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
+        if isinstance(node, ast.FunctionDef) and not is_shared_delegate(node, imports):
             functions.append(node.name)
-        # Also check for methods inside classes
-        if isinstance(node, ast.ClassDef):
-            for item in node.body:
-                if isinstance(item, ast.FunctionDef):
-                    functions.append(item.name)
 
     return functions
 
