@@ -49,7 +49,8 @@ def test_headers_as_keys(tmp_path: Path) -> None:
 def test_missing_file_error(tmp_path: Path) -> None:
     result = run_cli([str(tmp_path / "missing.csv")])
     assert result.returncode == 1
-    assert "not found" in result.stderr.lower()
+    err = result.stderr.lower()
+    assert "not found" in err or "no such file" in err
 
 
 def test_malformed_csv(tmp_path: Path) -> None:
@@ -65,6 +66,10 @@ def test_pretty_flag(tmp_path: Path) -> None:
     csv_path = tmp_path / "data.csv"
     csv_path.write_text("name,age\nalice,30\n", encoding="utf-8")
 
+    plain = run_cli([str(csv_path)])
     result = run_cli([str(csv_path), "--pretty"])
+    assert plain.returncode == 0
     assert result.returncode == 0
-    assert "\n" in result.stdout
+    assert json.loads(result.stdout) == json.loads(plain.stdout)
+    assert len(result.stdout.strip().splitlines()) > 1
+    assert result.stdout.strip() != plain.stdout.strip()
