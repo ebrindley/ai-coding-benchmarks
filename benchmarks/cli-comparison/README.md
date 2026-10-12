@@ -49,3 +49,10 @@ For qualitative comparison, inspect:
 - API compatibility,
 - security behavior where relevant.
 
+
+## Corpus identity
+
+Identify a comparison by its repository commit and recorded task, fixture, and
+oracle digests. Stable task IDs do not imply identical tests or prompts. Compare
+runs using the same recorded inputs: changes to checks or repair hints can change
+measured difficulty even when the stated task remains the same.
