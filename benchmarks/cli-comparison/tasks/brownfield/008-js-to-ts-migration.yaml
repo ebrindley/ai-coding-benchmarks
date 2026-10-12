@@ -90,6 +90,9 @@ eligibilityGates:
     check: All must_have items substantiated
     order: 6
 
+networkPolicy:
+  allowed: true
+
 fixturePath: js-utils-commonjs
 
 tags:

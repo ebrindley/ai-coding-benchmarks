@@ -68,6 +68,9 @@ eligibilityGates:
     check: All must_have items substantiated by test results
     order: 5
 
+networkPolicy:
+  allowed: true
+
 fixturePath: ts-lru-cache
 
 tags:
