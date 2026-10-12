@@ -73,6 +73,9 @@ eligibilityGates:
     check: All must_have items substantiated by test results
     order: 4
 
+networkPolicy:
+  allowed: true
+
 fixturePath: go-kv-service
 
 tags:
