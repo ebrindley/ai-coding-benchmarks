@@ -93,25 +93,35 @@ class TestSchema(unittest.TestCase):
     def test_foreign_keys_enforced(self):
         conn = db()
         try:
-            # orders.customer_id -> customers
+            conn.execute("INSERT INTO customers(id, name) VALUES (9100, 'fk-parent')")
+            conn.execute(
+                "INSERT INTO orders(id, customer_id, order_date) "
+                "VALUES (9100, 9100, '2024-03-01T00:00:00Z')"
+            )
             with self.assertRaises(sqlite3.IntegrityError):
                 conn.execute(
                     "INSERT INTO orders(id, customer_id, order_date) "
-                    "VALUES (999, 999, '2024-01-01T00:00:00Z')"
+                    "VALUES (9101, 9199, '2024-03-01T00:00:00Z')"
                 )
-            # order_items.order_id -> orders
             with self.assertRaises(sqlite3.IntegrityError):
                 conn.execute(
                     "INSERT INTO order_items(id, order_id, product_id, quantity) "
-                    "VALUES (999, 999, 1, 1)"
+                    "VALUES (9101, 9199, 1, 1)"
                 )
-            # order_items.product_id -> products
             with self.assertRaises(sqlite3.IntegrityError):
                 conn.execute(
                     "INSERT INTO order_items(id, order_id, product_id, quantity) "
-                    "VALUES (998, 1, 999, 1)"
+                    "VALUES (9102, 9100, 9199, 1)"
                 )
+            referenced = set()
+            for table in ("orders", "order_items"):
+                for row in conn.execute(f"PRAGMA foreign_key_list({table})"):
+                    referenced.add(row["table"])
+            self.assertIn("customers", referenced)
+            self.assertIn("orders", referenced)
+            self.assertIn("products", referenced)
         finally:
+            conn.rollback()
             conn.close()
 
     def test_indexes_exist(self):
@@ -140,17 +150,53 @@ class TestSchema(unittest.TestCase):
                 f"daily_sales_summary missing columns: {sorted(required - cols)}",
             )
 
-            rows = conn.execute(
-                "SELECT sale_date, total_orders, total_revenue, avg_order_value "
-                "FROM daily_sales_summary ORDER BY sale_date"
-            ).fetchall()
-            self.assertGreaterEqual(len(rows), 2)
-            r0 = rows[0]
-            self.assertEqual(r0["sale_date"], "2024-01-01")
-            self.assertEqual(r0["total_orders"], 2)
-            self.assertEqual(r0["total_revenue"], 7400)
-            self.assertEqual(r0["avg_order_value"], 3700)
+            rows = {
+                r["sale_date"]: r
+                for r in conn.execute(
+                    "SELECT sale_date, total_orders, total_revenue, avg_order_value "
+                    "FROM daily_sales_summary ORDER BY sale_date"
+                ).fetchall()
+            }
+            self.assertEqual(rows["2024-01-01"]["total_orders"], 2)
+            self.assertEqual(rows["2024-01-01"]["total_revenue"], 7400)
+            self.assertEqual(rows["2024-01-01"]["avg_order_value"], 3700)
+            self.assertEqual(rows["2024-01-02"]["total_orders"], 1)
+            self.assertEqual(rows["2024-01-02"]["total_revenue"], 1200)
+            self.assertEqual(rows["2024-01-02"]["avg_order_value"], 1200)
+            conn.execute(
+                "INSERT INTO orders(id, customer_id, order_date) "
+                "VALUES (9102, 1, '2024-01-02T18:00:00Z')"
+            )
+            conn.execute(
+                "INSERT INTO order_items(id, order_id, product_id, quantity) "
+                "VALUES (9102, 9102, 1, 1)"
+            )
+            second = conn.execute(
+                "SELECT total_orders, total_revenue, avg_order_value "
+                "FROM daily_sales_summary WHERE sale_date = '2024-01-02'"
+            ).fetchone()
+            self.assertEqual(second["total_orders"], 2)
+            self.assertEqual(second["total_revenue"], 2400)
+            self.assertEqual(second["avg_order_value"], 1200)
+            conn.execute(
+                "INSERT INTO orders(id, customer_id, order_date) "
+                "VALUES (9100, 1, '2024-01-03T00:00:00Z')"
+            )
+            conn.execute(
+                "INSERT INTO order_items(id, order_id, product_id, quantity) "
+                "VALUES (9100, 9100, 1, 1)"
+            )
+            moved = {
+                r["sale_date"]: r
+                for r in conn.execute(
+                    "SELECT sale_date, total_orders, total_revenue "
+                    "FROM daily_sales_summary"
+                ).fetchall()
+            }
+            self.assertEqual(moved["2024-01-03"]["total_orders"], 1)
+            self.assertEqual(moved["2024-01-03"]["total_revenue"], 1200)
         finally:
+            conn.rollback()
             conn.close()
 
     def test_schema_idempotent(self):
