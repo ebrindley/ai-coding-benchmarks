@@ -7,7 +7,7 @@ const { WildcardEventEmitter } = require('../src/emitter.js');
 test('basic-emit', () => {
   const emitter = new WildcardEventEmitter();
   const calls = [];
-  emitter.on('user.created', (data) => calls.push(data));
+  emitter.on('user.created', (_event, data) => calls.push(data));
   emitter.emit('user.created', { id: 1 });
   assert.deepEqual(calls, [{ id: 1 }]);
 });

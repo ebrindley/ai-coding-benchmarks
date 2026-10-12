@@ -15,7 +15,7 @@ description: |
   - on(pattern, handler) subscribes to events matching pattern
   - Wildcard '*' matches single segment: 'user.*' matches 'user.created', 'user.deleted'
   - Wildcard '**' matches multiple segments: 'user.**' matches 'user.profile.updated'
-  - emit(event, data) triggers all matching handlers
+  - emit(event, data) calls every matching handler as handler(event, data)
   - off(pattern, handler) unsubscribes specific handler
   - once(pattern, handler) fires once then auto-removes
   - Errors in handlers don't crash other handlers
