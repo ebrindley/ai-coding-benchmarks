@@ -3,10 +3,6 @@
 // checkpoint (the last version it has processed) and, when asked to catch up,
 // reads only the events after that checkpoint and folds them into the existing
 // read model.
-//
-// This is the second place that depends on the store's exclusive read
-// boundary: if the tail read includes the checkpoint event itself, that event
-// is applied a second time and the projected balance drifts.
 
 import type { AccountEvent } from './events';
 import { EventStore } from './event-store';

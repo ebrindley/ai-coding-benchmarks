@@ -67,8 +67,7 @@ export class EventStore {
    *
    * The parameter is EXCLUSIVE: passing 0 replays the whole stream, and passing
    * the version of an already-seen event returns only the events recorded after
-   * it. Snapshot rehydration and projection checkpoints both rely on this
-   * exclusivity to avoid re-applying an event they have already folded in.
+   * it.
    */
   readStream(streamId: string, fromVersionExclusive = 0): StoredEvent[] {
     const stream = this.streams.get(streamId);

@@ -17,10 +17,7 @@ The module spans several files that share one contract — the event store's
   replay.
 - `src/balance-projection.ts` — a read model that catches up from a checkpoint.
 
-The bug is a boundary error: events applied on the incremental path are
-double-counted, so balances loaded via a snapshot or projected via a checkpoint
-drift from the ground truth produced by a full replay. Full replay from version
-0 looks correct, which masks the defect.
+Balances loaded through a snapshot or a checkpoint drift from a full replay.
 
 ## Working with the fixture
 

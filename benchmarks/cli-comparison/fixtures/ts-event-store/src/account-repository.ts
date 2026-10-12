@@ -6,10 +6,6 @@
 //     events recorded *after* the snapshot's version.
 //   - Otherwise replay the whole stream from the beginning.
 //
-// Because the reducer accumulates deposits/withdrawals (see account.ts), the
-// tail read after a snapshot must be strictly exclusive of the snapshot
-// version, or the snapshot's boundary event is counted twice.
-
 import { apply, emptyState, type AccountState } from './account';
 import type { AccountEvent } from './events';
 import { EventStore } from './event-store';

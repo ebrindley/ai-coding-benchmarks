@@ -7,9 +7,7 @@
 #
 # Bug: Balances loaded via a snapshot or projected via a checkpoint are too
 #      high, because the boundary event is applied twice.
-# Root cause: The event store's "read events after a version" boundary is
-#      inclusive instead of exclusive, so incremental readers re-apply the last
-#      event they already folded in. Full replay from version 0 hides it.
+# Incremental snapshot and checkpoint reads disagree with a full replay.
 
 taskId: brownfield-015-ts-event-store-snapshot-bug
 type: brownfield
@@ -29,15 +27,10 @@ description: |
   - A full replay from version 0 (no snapshot, empty checkpoint) is correct,
     which masks the defect on the common path.
 
-  Root cause hints:
+  API contract:
   - The store exposes readStream(streamId, fromVersionExclusive) whose parameter
     is documented as EXCLUSIVE: it must return only events whose version is
     strictly greater than the argument.
-  - Both incremental readers (AccountRepository.load after a snapshot, and
-    BalanceProjection.catchUp after a checkpoint) depend on that exclusivity to
-    avoid re-applying the boundary event.
-  - The reducer accumulates deposits/withdrawals and is not idempotent, so a
-    re-applied event corrupts the running balance.
 
   Constraints:
   - Fix the shared read-boundary contract; do not special-case individual

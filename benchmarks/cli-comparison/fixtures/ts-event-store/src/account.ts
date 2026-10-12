@@ -1,8 +1,5 @@
 // The account aggregate: its state shape and the pure reducer that folds a
-// stream of events into that state. The reducer is deliberately NOT idempotent
-// on re-applied events — deposits and withdrawals accumulate — so applying the
-// same event twice corrupts the balance. That property is what turns an
-// off-by-one in the store's read boundary into a visible balance error.
+// stream of events into that state.
 
 import type { AccountEvent } from './events';
 
