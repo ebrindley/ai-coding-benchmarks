@@ -6,9 +6,6 @@
 # Estimated Time: 60 minutes
 #
 # Bug: Cached category reports go stale after a mutation
-# Root cause: Write path invalidates cache by RAW category label, but read path
-#             tags cache entries by the CANONICAL category. When they differ the
-#             invalidation misses and stale values survive.
 
 taskId: brownfield-014-python-pipeline-cache-invalidation
 type: brownfield
@@ -23,7 +20,7 @@ description: |
     - src/normalize.py  canonicalizes raw labels (casing/whitespace/aliases)
     - src/store.py      keeps product category labels VERBATIM; logs raw dirty labels
     - src/cache.py      tag-aware TTL cache; drops entries by EXACT tag string
-    - src/service.py    coordinates reads/writes (bug lives here)
+    - src/service.py    coordinates reads/writes
 
   Bug symptoms:
   - After a restock/sell/add/remove, category_summary() and low_stock_report()
@@ -32,11 +29,6 @@ description: |
     (e.g. stored "Home & Kitchen" / "home and kitchen" vs canonical "home & kitchen").
   - Reads keyed by an already-canonical label appear correct on first read but
     never refresh.
-
-  Root cause hints:
-  - Reads tag cache entries with canonical_category(category).
-  - InventoryService._flush() invalidates using the store's RAW drained labels.
-  - raw_label != canonical_category(raw_label) => invalidate_tag() finds no match.
 
   Constraints:
   - Do NOT modify test files.

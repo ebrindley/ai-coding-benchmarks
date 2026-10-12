@@ -6,11 +6,6 @@ reports). Reports are expensive to compute, so results are cached and tagged by
 the *canonical* category they cover. After every batch of mutations the service
 flushes: it asks the store which categories are dirty and invalidates the
 matching cache tags so the next read recomputes.
-
-BUG LOCATION: InventoryService._flush() -- the dirty labels drained from the
-store are raw/verbatim, but cache tags were written using the *canonical*
-category. Invalidating by the raw label misses the canonical tag whenever the
-two differ, leaving stale report values in the cache.
 """
 
 from __future__ import annotations
@@ -161,16 +156,8 @@ class InventoryService:
         return sorted(skus)
 
     def _flush(self) -> None:
-        """Invalidate cache entries for every category touched since last flush.
-
-        BUG: ``drain_dirty_categories`` returns the store's *raw* labels, but the
-        report caches were tagged with the *canonical* category. Passing the raw
-        label straight to ``invalidate_tag`` misses the canonical tag whenever
-        the raw and canonical forms differ, so stale summaries survive the flush.
-        """
+        """Invalidate cache entries touched since the last flush."""
         for raw_label in self._store.drain_dirty_categories():
-            # BUG: should invalidate by canonical_category(raw_label), not the
-            # raw label. When they differ, the matching tag is never found.
             self._cache.invalidate_tag(raw_label)
 
     @property

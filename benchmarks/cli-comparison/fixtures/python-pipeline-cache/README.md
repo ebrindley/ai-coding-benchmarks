@@ -7,10 +7,10 @@ Benchmark fixture for testing cross-module bug fixes.
 > This fixture's tests are designed to **FAIL on the buggy baseline** and **PASS after the fix**.
 > Do not "fix" the failing tests - they expose a stale-read bug that candidates must solve.
 >
-> | State | Tests Run | Results | Fix Applied |
-> |-------|-----------|---------|-------------|
-> | Baseline (current) | 34 | 26 PASS, 8 FAIL | Flush invalidates by raw label |
-> | After fix | 34 | 34 PASS | Flush invalidates by canonical category |
+> | State | Tests Run | Results |
+> |-------|-----------|---------|
+> | Baseline (current) | 34 | 26 PASS, 8 FAIL |
+> | After fix | 34 | 34 PASS |
 >
 > Time is injected via a `FakeClock` (see `tests/conftest.py`) and the cache TTL is set far
 > larger than any test advances, so the staleness the failing tests observe is caused **only**
@@ -20,7 +20,7 @@ Benchmark fixture for testing cross-module bug fixes.
 
 **Task ID**: `brownfield-014-python-pipeline-cache-invalidation`
 
-### The Bug
+### Symptoms
 
 The system is an inventory service split across four modules:
 
@@ -29,45 +29,9 @@ The system is an inventory service split across four modules:
 | `src/normalize.py` | Canonicalizes raw category labels (casing, whitespace, aliases) |
 | `src/store.py` | Holds products; keeps category labels **verbatim**; logs raw dirty labels |
 | `src/cache.py` | Tag-aware TTL cache; drops entries by **exact** tag string |
-| `src/service.py` | Coordinates reads/writes; **bug lives here** |
+| `src/service.py` | Coordinates reads/writes |
 
-Reads cache report results and **tag them by the canonical category**:
-
-```python
-canonical = canonical_category(category)      # e.g. "home & kitchen"
-self._cache.set(key, summary, tags=[canonical])
-```
-
-Writes flush by draining the store's dirty labels and invalidating tags:
-
-```python
-def _flush(self):
-    for raw_label in self._store.drain_dirty_categories():
-        # BUG: raw_label is verbatim ("Home & Kitchen"), but the cache entry
-        # was tagged with the canonical form ("home & kitchen"). The tag never
-        # matches, so the stale summary survives the flush.
-        self._cache.invalidate_tag(raw_label)
-```
-
-Because the store preserves labels verbatim while the cache is tagged by canonical category,
-`invalidate_tag(raw_label)` misses whenever `raw_label != canonical_category(raw_label)`.
-The read then returns a **stale** summary/low-stock report.
-
-### Expected Fix
-
-Route the drained label through the normalizer before invalidating, so the write path and the
-read path agree on the tag namespace:
-
-```python
-def _flush(self):
-    for raw_label in self._store.drain_dirty_categories():
-        self._cache.invalidate_tag(canonical_category(raw_label))
-```
-
-The fix spans the seam between `store.py` (raw labels), `normalize.py` (canonical form), and
-`cache.py` (exact-match tags), coordinated in `service.py`. Do **not** fix it by making the
-store normalize labels (it must preserve them verbatim - `test_store.py` pins that) or by
-weakening the cache's exact-match invalidation.
+After a restock, sell, add, or remove, `category_summary()` and `low_stock_report()` sometimes still return the values from before the mutation.
 
 ### Constraints
 
@@ -98,7 +62,7 @@ python-pipeline-cache/
 │   ├── normalize.py       # Canonical category form (correct)
 │   ├── cache.py           # Tag-aware TTL cache, injected clock (correct)
 │   ├── store.py           # Verbatim product store + raw dirty log (correct)
-│   └── service.py         # Coordinator - BUG in _flush()
+│   └── service.py         # Coordinator
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py               # FakeClock + seeded service fixtures

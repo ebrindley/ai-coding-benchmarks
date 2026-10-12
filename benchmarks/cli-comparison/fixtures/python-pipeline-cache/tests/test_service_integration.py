@@ -112,11 +112,7 @@ class TestFreshAfterMutation:
     def test_mutation_only_invalidates_touched_category(
         self, seeded_service: InventoryService
     ):
-        # The fix must invalidate by the *canonical category* touched, not clear
-        # the whole cache. Warm two unrelated categories, mutate only one, and
-        # confirm the untouched category's entry survives as a cache hit while the
-        # mutated category is refreshed. A blunt cache.clear() in _flush() would
-        # evict the untouched entry too and fail this test.
+        # Warm two categories, mutate only one, and confirm the other stays cached.
         seeded_service.category_summary("home & kitchen")
         seeded_service.category_summary("electronics")
 
