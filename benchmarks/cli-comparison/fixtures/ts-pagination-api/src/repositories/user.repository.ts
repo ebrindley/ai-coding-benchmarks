@@ -14,7 +14,7 @@ const users: User[] = Array.from({ length: 100 }, (_, idx) => {
   // Intentionally create a big tie group so OFFSET+unstable ordering is harmful.
   // IDs 1-25 share the same timestamp; after that it's unique.
   const createdAt =
-    id <= 25 ? '2024-01-01T00:00:00.000Z' : new Date(2024, 0, 1, 0, 0, id).toISOString();
+    id <= 25 ? '2024-01-01T00:00:00.000Z' : new Date(Date.UTC(2024, 0, 1, 0, 0, id)).toISOString();
   return { id, createdAt, name: `user-${id}` };
 });
 
