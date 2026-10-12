@@ -5,10 +5,7 @@
 # Complexity: High
 # Estimated Time: 45 minutes
 #
-# Bug: A singleton OrderProcessor captures scoped services (captive dependency)
-# and ITenantContext is registered as a singleton, so per-request tenant state
-# bleeds across calls and per-tenant pricing is wrong.
-# Root cause spans two files: OrderProcessor.cs and ServiceCollectionExtensions.cs
+# Bug: Per-tenant pricing breaks once more than one tenant is served.
 
 taskId: brownfield-012-csharp-di-lifetime-bug
 type: brownfield
@@ -25,20 +22,12 @@ description: |
   - Per-tenant discounts are wrong once more than one tenant is served.
   - Under concurrent tenants the results are unreliable.
 
-  Root cause (spans two files):
-  - src/OrderService/OrderProcessor.cs: OrderProcessor is a singleton but injects
-    the scoped PricingService and ITenantContext directly, capturing one scoped
-    instance for the whole process lifetime (a "captive dependency").
-  - src/OrderService/ServiceCollectionExtensions.cs: ITenantContext holds
-    per-request state but is registered as AddSingleton; it must be AddScoped.
-
   Constraints:
   - Keep OrderProcessor registered as a singleton and keep its public
     ProcessOrder(string, int) signature unchanged.
   - Preserve the parallel-safe, per-request scoping model; do not make the
     services process-global mutable state.
-  - Resolve scoped services through a fresh scope per order
-    (IServiceScopeFactory), not by capturing them in the singleton constructor.
+  - Use fresh scoped tenant state per order.
   - Do not edit anything under tests/. Use only the pinned packages.
 complexity: high
 

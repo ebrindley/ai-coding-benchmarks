@@ -1,25 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Static check for the seeded dependency-injection lifetime bug.
-#
-# Two registration invariants are load-bearing for this task's DI-scoping model:
-#   1. The per-request ITenantContext must be Scoped, not Singleton — a singleton
-#      tenant context leaks state across requests.
-#   2. OrderProcessor must remain a Singleton. The intended fix keeps it a
-#      singleton and opens a fresh scope per order via IServiceScopeFactory;
-#      demoting OrderProcessor to Scoped/Transient is a way to sidestep the
-#      captive-dependency problem without adopting the required scope-per-order
-#      model, so it is rejected here.
-# The captive-dependency half of the fix (no scoped service captured in a
-# singleton constructor) is covered by the ValidateOnBuild test in the suite, and
-# the per-call scope behavior is pinned by ProcessOrder_DoesNotBleedTenantState.
-#
-# Registrations are evaluated on the source with BOTH // line comments and
-# /* ... */ block comments stripped (so a commented-out registration never
-# counts), and each service is matched in both the generic (`AddX<Service>`) and
-# the reflection (`AddX(typeof(Service))`) registration forms. For OrderProcessor
-# the LAST active registration wins (.NET resolves the last Add* registration).
+# Static check of service registrations. Comments are stripped before matching.
 #
 # Exit codes:
 #   0  PASS  - ITenantContext Scoped and OrderProcessor Singleton
@@ -94,7 +76,7 @@ if [[ -z "$effective_processor_reg" ]]; then
 fi
 
 if [[ "$effective_processor_reg" != "AddSingleton" ]]; then
-  echo "[FAIL_ORDER_PROCESSOR_NOT_SINGLETON] OrderProcessor must stay Singleton (fix opens a scope per order via IServiceScopeFactory, not by demoting the processor); effective registration was: ${effective_processor_reg}" >&2
+  echo "[FAIL_ORDER_PROCESSOR_NOT_SINGLETON] OrderProcessor must stay Singleton; effective registration was: ${effective_processor_reg}" >&2
   exit 42
 fi
 

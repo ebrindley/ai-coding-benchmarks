@@ -9,33 +9,15 @@ The service prices an order for a tenant by applying that tenant's discount:
 `PricingService` reads that context and the shared `ITenantDiscountStore` to
 compute the net total.
 
-## The bug (captive dependency + wrong lifetime)
+## Symptoms
 
-Two coordinated defects break per-tenant pricing under any realistic use:
+Pricing a second tenant on the same `OrderProcessor` throws `tenant already assigned`; per-tenant discounts do not remain isolated across calls.
 
-1. **`src/OrderService/OrderProcessor.cs`** — `OrderProcessor` is a singleton
-   but injects the *scoped* `PricingService` and `ITenantContext` directly into
-   its constructor. A singleton that captures scoped services holds one instance
-   for the whole process lifetime (a "captive dependency"): the tenant assigned
-   by one call is never reset, so state bleeds into later calls.
-2. **`src/OrderService/ServiceCollectionExtensions.cs`** — `ITenantContext`
-   carries per-request state but is registered as `AddSingleton`. It must be
-   `AddScoped` so each request/scope gets its own tenant context.
+## Constraints
 
-`TenantContext` enforces single-assignment per scope, so the reused instance
-throws `tenant already assigned` on the second tenant — the bug is deterministic,
-not a rare race.
-
-### Fix outline
-
-- Register `ITenantContext` as `AddScoped` (fixes file 2).
-- Make `OrderProcessor` depend on `IServiceScopeFactory` and open a fresh scope
-  per `ProcessOrder` call, resolving `PricingService`/`ITenantContext` from that
-  scope (fixes file 1). Keep `OrderProcessor` a singleton and keep its public
-  `ProcessOrder(string, int)` signature unchanged.
-
-The correct-lifetime table lives in the header comment of
-`ServiceCollectionExtensions.cs`.
+- Keep `OrderProcessor` registered as a singleton and its public `ProcessOrder(string, int)` signature unchanged.
+- `ITenantContext` and `PricingService` must be scoped, with isolated tenant state for each order.
+- Preserve the parallel-safe per-request scoping model.
 
 ## Layout
 
