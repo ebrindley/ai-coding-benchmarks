@@ -374,13 +374,14 @@ describe('corpus task-oracle contracts', () => {
       .slice(createIdx)
       .match(/^void createBook[\s\S]*?^  }/m)?.[0];
     assert.ok(slice, 'createBook test body must be readable');
+    const postAssertions = slice.split(/mvc\.perform\(get\(/)[0];
     assert.match(
-      slice,
+      postAssertions,
       /status\(\)\.is\(201\)|status\(\)\.isCreated\s*\(/,
       'createBook must assert exact 201/Created',
     );
     assert.doesNotMatch(
-      slice,
+      postAssertions,
       /is2xxSuccessful|status\(\)\.isOk\s*\(/,
       'createBook must not accept generic 2xx/200',
     );
@@ -396,7 +397,7 @@ describe('corpus task-oracle contracts', () => {
     );
     const postOracle = oracle.slice(
       oracle.indexOf('# Test 2: POST /books'),
-      oracle.indexOf('# Test 3: GET /books/{id}'),
+      oracle.indexOf('echo "Test 2b:'),
     );
     assert.match(
       postOracle,

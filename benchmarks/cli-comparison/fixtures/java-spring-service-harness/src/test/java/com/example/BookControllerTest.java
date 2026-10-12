@@ -1,5 +1,6 @@
 package com.example;
 
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
@@ -35,7 +36,13 @@ public class BookControllerTest {
                 .content("{\"id\":1,\"title\":\"Test Book\",\"author\":\"Test Author\"}"))
         .andExpect(status().isCreated())
         .andExpect(jsonPath("$.id", is(1)))
-        .andExpect(jsonPath("$.title", is("Test Book")));
+        .andExpect(jsonPath("$.title", is("Test Book")))
+        .andExpect(jsonPath("$.author", is("Test Author")));
+
+    mvc.perform(get("/books"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$[?(@.id == 1)].title", hasItem("Test Book")))
+        .andExpect(jsonPath("$[?(@.id == 1)].author", hasItem("Test Author")));
   }
 
   @Test
@@ -43,13 +50,14 @@ public class BookControllerTest {
     mvc.perform(
             post("/books")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"id\":1,\"title\":\"Test Book\",\"author\":\"Test Author\"}"))
+                .content("{\"id\":11,\"title\":\"Fetched Book\",\"author\":\"Test Author\"}"))
         .andExpect(status().isCreated());
 
-    mvc.perform(get("/books/1"))
+    mvc.perform(get("/books/11"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$.id", is(1)))
-        .andExpect(jsonPath("$.title", is("Test Book")));
+        .andExpect(jsonPath("$.id", is(11)))
+        .andExpect(jsonPath("$.title", is("Fetched Book")))
+        .andExpect(jsonPath("$.author", is("Test Author")));
   }
 
   @Test
@@ -57,11 +65,11 @@ public class BookControllerTest {
     mvc.perform(
             post("/books")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"id\":1,\"title\":\"Test Book\",\"author\":\"Test Author\"}"))
+                .content("{\"id\":13,\"title\":\"Deleted Book\",\"author\":\"Test Author\"}"))
         .andExpect(status().isCreated());
 
-    mvc.perform(delete("/books/1")).andExpect(status().isNoContent());
-    mvc.perform(get("/books/1")).andExpect(status().isNotFound());
+    mvc.perform(delete("/books/13")).andExpect(status().isNoContent());
+    mvc.perform(get("/books/13")).andExpect(status().isNotFound());
   }
 
   @Test

@@ -144,7 +144,41 @@ if [[ "$HTTP_CODE" != "201" ]]; then
   exit 1
 fi
 
+# Compare decoded fields, independently of JSON whitespace and field order.
+book_matches() {
+  python3 -c '
+import json
+import sys
+payload = json.load(sys.stdin)
+books = payload if sys.argv[1] == "list" else [payload]
+expected = {"id": 1, "title": "Test Book", "author": "Test Author"}
+matches = isinstance(books, list) and any(
+    isinstance(book, dict) and all(book.get(key) == value for key, value in expected.items())
+    for book in books
+)
+sys.exit(0 if matches else 1)
+' "$1"
+}
+
+if ! echo "$BODY" | book_matches object; then
+  echo "ERROR: POST /books response did not preserve the created book"
+  echo "Response body: $BODY"
+  exit 1
+fi
+
 echo "✓ POST /books creates book (HTTP 201)"
+
+echo ""
+echo "Test 2b: GET /books includes the created book"
+RESPONSE=$(curl -s -w "\n%{http_code}" "http://localhost:${PORT}/books")
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+if [[ "$HTTP_CODE" != "200" ]] || ! echo "$BODY" | book_matches list; then
+  echo "ERROR: GET /books did not include the created book"
+  echo "Response: $BODY"
+  exit 1
+fi
+echo "✓ GET /books lists the created book"
 
 # Test 3: GET /books/{id} (retrieve created book)
 echo ""
@@ -160,7 +194,7 @@ if [[ "$HTTP_CODE" != "200" ]]; then
 fi
 
 # Check if response contains the book data
-if ! echo "$BODY" | grep -q "Test Book"; then
+if ! echo "$BODY" | book_matches object; then
   echo "ERROR: GET /books/1 response doesn't contain expected book"
   echo "Response: $BODY"
   exit 1
