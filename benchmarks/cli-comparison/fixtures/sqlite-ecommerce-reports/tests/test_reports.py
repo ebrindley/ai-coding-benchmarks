@@ -35,9 +35,19 @@ class TestReports(unittest.TestCase):
         conn = db()
         try:
             rows = conn.execute(read_report_sql()).fetchall()
-            ids = {r["order_id"] for r in rows}
-            for wanted in [101, 105, 112]:
-                self.assertIn(wanted, ids)
+            zeros = {
+                r["order_id"]
+                for r in rows
+                if r["item_count"] == 0 or r["revenue_cents"] == 0
+            }
+            self.assertEqual(zeros, {101, 105, 112, 130, 145})
+            for row in rows:
+                if row["order_id"] in zeros:
+                    self.assertEqual(row["item_count"], 0)
+                    self.assertEqual(row["revenue_cents"], 0)
+                else:
+                    self.assertEqual(row["item_count"], 1)
+                    self.assertEqual(row["revenue_cents"], 2500)
         finally:
             conn.close()
 
