@@ -584,6 +584,7 @@ export async function initWorkspaceGit(workspaceDir, opts = {}) {
  * @param {string} [opts.campaignId] - used when defaulting workspaceRoot via resolveExecutionRoot
  * @param {string} [opts.campaignDir] - when set, assert workspace is outside campaign tree
  * @param {string} opts.trialId - unique trial identifier
+ * @param {string} [opts.expectedFixtureDigest] - frozen manifest baseline
  * @param {(args: string[], cwd: string) => Promise<{ exitCode: number | null, stdout: string, stderr: string }>} [opts.gitSpawn]
  * @returns {Promise<{ workspaceDir: string, fixtureHash: string, branch: string, baselineCommit: string, executionRoot: string }>}
  */
@@ -593,6 +594,7 @@ export async function createIsolatedWorkspace({
   campaignId,
   campaignDir,
   trialId,
+  expectedFixtureDigest,
   gitSpawn,
 }) {
   if (fixtureDir == null || String(fixtureDir).trim() === '') {
@@ -635,6 +637,9 @@ export async function createIsolatedWorkspace({
   // (post-copy content: same exclusions as digests, before marker/git).
   await copyFixtureTree(fixtureAbs, workspaceDir);
   const fixtureHash = await digestArtifactDir(workspaceDir);
+  if (expectedFixtureDigest != null && fixtureHash !== expectedFixtureDigest) {
+    throw new Error('copied fixture does not match the frozen fixture digest');
+  }
 
   const branch = trialBranchName(trialId);
   await writeFile(

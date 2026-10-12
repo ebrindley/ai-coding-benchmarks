@@ -162,6 +162,65 @@ describe('protocol evidence extract + persist shape', () => {
 });
 
 describe('protocol evidence verify fail-closed', () => {
+  it('rejects hidden capability misses while respecting refusal and gate precedence', async () => {
+    const { verifyTrialEvidenceDigests } = await import('../harness/results.js');
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-proto-classification-'));
+    try {
+      const cases = [
+        { id: 'hidden-gate-fail', classification: 'PASS', resultExtras: { changedFileCount: 1, gateResults: [{ gate: 'tests', status: 'failed', required: true, exitCode: 1 }] }, ok: false },
+        { id: 'hidden-no-op', classification: 'PASS', resultExtras: { changedFileCount: 0 }, ok: false },
+        { id: 'unknown-change-count', classification: 'PASS', resultExtras: { changedFileCount: null }, ok: false },
+        { id: 'model-unresolved', outcomeKind: 'refusal', reasonCode: 'MODEL_UNRESOLVED', classification: 'INFRA_FAIL', resultExtras: { changedFileCount: 0 }, ok: true },
+        { id: 'provider-not-ready', outcomeKind: 'refusal', reasonCode: 'NOT_READY', classification: 'INFRA_FAIL', resultExtras: { changedFileCount: 1 }, ok: true },
+        { id: 'refusal-timeout', outcomeKind: 'refusal', reasonCode: 'NOT_READY', classification: 'TIMEOUT', resultExtras: { changedFileCount: 1, gateResults: [{ gate: 'tests', required: true, timedOut: true }] }, ok: true },
+        { id: 'accepted-cli-exit', classification: 'PASS', exitCode: 1, resultExtras: { changedFileCount: 1, gateResults: [{ gate: 'tests', required: true, status: 'passed', exitCode: 0 }] }, ok: true },
+        // Unstored invoker failures cannot be reconstructed from a clean exit.
+        { id: 'unstored-infra', classification: 'INFRA_FAIL', resultExtras: { changedFileCount: 1 }, ok: true },
+      ];
+      for (const c of cases) {
+        const { frozen, result } = await seedReportablePoeticTrial(campaign, c);
+        const verified = await verifyTrialEvidenceDigests(campaign, c.id, result, { manifestTrial: frozen });
+        assert.equal(verified.ok, c.ok, `${c.id}: ${verified.error}`);
+        if (!c.ok) assert.ok(verified.mismatches.includes('classification:established-outcome'), c.id);
+      }
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+    }
+  });
+
+  it('adopts a clean unavailable terminal record without scoring it or ignoring tampering', async () => {
+    const { tryAdoptDurableTrialResult, verifyCampaignEvidenceDigests, buildTrialDigests } = await import('../harness/results.js');
+    const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-proto-terminal-unavailable-'));
+    try {
+      const frozen = completeManifestTrial({ id: 'unavailable', invocationPath: 'poetic-adapter', state: 'failed' });
+      const { result } = await writeCompleteTrial(campaign, frozen.id, {
+        invocationPath: 'poetic-adapter', state: 'failed', classification: 'INFRA_FAIL',
+        digests: buildTrialDigests({ rawEvidenceUnavailable: true }),
+      }, { manifestTrial: frozen });
+      const adopted = await tryAdoptDurableTrialResult(campaign, { ...frozen, state: 'running' });
+      assert.equal(adopted.ok, true, adopted.reason);
+      assert.equal(adopted.state, 'failed');
+      const check = await verifyCampaignEvidenceDigests(campaign, [frozen], [result], { failOnUnavailable: false });
+      assert.equal(check.ok, true, check.error);
+      assert.equal(check.unavailable, 1);
+      assert.deepEqual(check.reportableResults, []);
+      const allUnavailable = await verifyCampaignEvidenceDigests(campaign, [frozen], [result]);
+      assert.equal(allUnavailable.ok, false);
+      const sibling = await seedReportablePoeticTrial(campaign, { id: 'reportable' });
+      const partial = await verifyCampaignEvidenceDigests(campaign, [frozen, sibling.frozen], [result, sibling.result]);
+      assert.equal(partial.ok, true, partial.error);
+      assert.equal(partial.unavailable, 1);
+      assert.equal(partial.verified, 1);
+      assert.deepEqual(partial.reportableResults.map((r) => r.id), ['reportable']);
+      const damaged = { ...result, classificationReason: 'changed after write' };
+      const rejected = await verifyCampaignEvidenceDigests(campaign, [frozen, sibling.frozen], [damaged, sibling.result]);
+      assert.equal(rejected.ok, false);
+      assert.ok(rejected.failures[0].mismatches.includes('resultDigest'));
+    } finally {
+      await rm(campaign, { recursive: true, force: true });
+    }
+  });
+
   it('reportable poetic-adapter success/timeout/provider_error/MODEL_UNRESOLVED verify', async () => {
     const { verifyTrialEvidenceDigests } = await import(
       '../harness/results.js'

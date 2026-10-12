@@ -45,6 +45,46 @@ describe('posture + digest', () => {
     assert.equal(sha256Json({ b: 1, a: 2 }), sha256Json({ a: 2, b: 1 }));
   });
 
+  it('distinguishes supported effective invocation settings without splitting defaults', async () => {
+    const { computePostureFingerprint, resolveTrialTimeoutMs, resolvePoeticBin } =
+      await import('../harness/posture.js');
+    const base = {
+      invocationPath: 'native-cli', provider: 'provider-a', command: 'cli',
+      args: ['--model', 'model-a'], timeoutMs: 1000,
+    };
+    const fingerprint = computePostureFingerprint(base);
+    assert.equal(fingerprint, computePostureFingerprint({ ...base, promptTransport: 'stdin' }));
+    for (const delta of [
+      { provider: 'provider-b' }, { command: 'other-cli' },
+      { args: ['--model', 'model-b'] }, { promptTransport: 'prompt-file' },
+      { timeoutMs: 2000 },
+    ]) assert.notEqual(fingerprint, computePostureFingerprint({ ...base, ...delta }));
+    const poetic = { invocationPath: 'poetic-adapter', provider: 'provider-a', poeticBin: 'poetic-a' };
+    assert.notEqual(computePostureFingerprint(poetic), computePostureFingerprint({ ...poetic, poeticBin: 'poetic-b' }));
+    assert.equal(resolvePoeticBin(undefined, ''), 'poetic');
+    assert.equal(resolvePoeticBin(undefined, 'env-poetic'), 'env-poetic');
+    assert.equal(resolvePoeticBin('injected-poetic', 'env-poetic'), 'injected-poetic');
+    assert.equal(resolveTrialTimeoutMs(undefined), 600_000);
+  });
+
+  it('schedule and request use the same timeout and effective native settings', async () => {
+    const { computePostureFingerprint } = await import('../harness/posture.js');
+    const { expandExperiment } = await import('../harness/schedule.js');
+    const { buildInvocationRequest } = await import('../harness/invokers/index.js');
+    const arm = {
+      name: 'native', invocationPath: 'native-cli', provider: 'provider-a',
+      model: 'requested', command: 'cli', args: ['run'],
+    };
+    for (const timeoutMs of [undefined, 1234]) {
+      const [trial] = expandExperiment({ seed: 1, repetitions: 1, taskIds: ['task'], arms: [arm], timeoutMs });
+      const request = buildInvocationRequest({ arm, task: { prompt: 'task prompt' }, workspaceDir: '/tmp/workspace', requestId: trial.id, timeoutMs });
+      assert.equal(request.timeoutMs, timeoutMs ?? 600_000);
+      assert.equal(trial.postureFingerprint, computePostureFingerprint({
+        ...arm, timeoutMs: request.timeoutMs,
+      }));
+    }
+  });
+
   it('harness content digest changes when source changes even if package.json is fixed', async () => {
     const {
       digestHarnessContent,

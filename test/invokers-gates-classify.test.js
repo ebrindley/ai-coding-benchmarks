@@ -26,6 +26,7 @@ describe('invokers + gates + classify', () => {
     const available = parseResolvedModelEvidence({
       model: {
         resolved: { availability: 'available', value: 'claude-sonnet-4' },
+        resolutionSource: 'provider-result',
       },
     });
     assert.equal(available.available, true);
@@ -257,7 +258,7 @@ const avail = (v) => ({ availability: 'available', value: v });
 const unavail = (r) => ({ availability: 'unavailable', reason: r });
 const now = new Date().toISOString();
 const kind = ${JSON.stringify(kind)};
-const reasonCode = kind === 'success' ? 'SUCCESS' : kind === 'timeout' ? 'PROVIDER_TIMEOUT' : kind === 'aborted' ? 'PROVIDER_ABORTED' : kind === 'internal_error' ? 'INTERNAL_ERROR' : 'PROVIDER_ERROR';
+const reasonCode = kind === 'success' ? 'SUCCESS' : kind === 'timeout' ? 'PROVIDER_TIMEOUT' : kind === 'aborted' ? 'PROVIDER_ABORTED' : kind === 'internal_error' ? 'INTERNAL_ERROR' : kind === 'refusal' ? 'NOT_READY' : 'PROVIDER_ERROR';
 const exitCode = kind === 'success' ? 0 : 1;
 fs.writeFileSync(out, JSON.stringify({
   schema: ${JSON.stringify(POETIC_INVOKE_RESULT_SCHEMA)},
@@ -1754,6 +1755,42 @@ process.exit(1);
       }).classification,
       'INFRA_FAIL',
     );
+  });
+
+  it('uses required repair gates without confusing refusal or optional diagnostics', async () => {
+    const { classifyTrial } = await import('../harness/classify.js');
+    const passed = { gate: 'tests', required: true, status: 'passed', exitCode: 0 };
+    const input = { invokerResult: { exitCode: 1 }, changedFileCount: 1, gateResults: [passed] };
+    assert.equal(classifyTrial(input).classification, 'PASS');
+    assert.equal(classifyTrial({ ...input, gateResults: [] }).classification, 'FAIL');
+    assert.equal(classifyTrial({ ...input, gateResults: [passed, { gate: 'other-test', required: true, status: 'pending' }] }).classification, 'FAIL');
+    assert.equal(classifyTrial({ ...input, gateResults: [passed, { gate: 'structural', required: true, status: 'structural' }] }).classification, 'PASS');
+    assert.equal(classifyTrial({ ...input, gateResults: [{ ...passed, exitCode: 1 }] }).classification, 'FAIL');
+    assert.equal(classifyTrial({ ...input, gateResults: [{ ...passed, exitCode: '0' }] }).classification, 'FAIL');
+    assert.equal(classifyTrial({ ...input, invokerResult: { exitCode: 0 }, gateResults: [{ ...passed, exitCode: null }] }).classification, 'FAIL');
+    assert.equal(classifyTrial({ ...input, changedFileCount: null }).classification, 'INFRA_FAIL');
+    for (const optional of [
+      { gate: 'diagnostic', required: false, timedOut: true },
+      { gate: 'diagnostic', required: false, status: 'execution_unavailable', infraFailure: 'missing tool' },
+    ]) {
+      assert.equal(classifyTrial({ ...input, gateResults: [passed, optional] }).classification, 'PASS');
+    }
+    for (const reasonCode of ['MODEL_UNRESOLVED', 'NOT_READY']) {
+      const refused = { ...input, invokerResult: { exitCode: 0, outcomeKind: 'refusal', success: false, reasonCode } };
+      for (const changedFileCount of [1, 0, null]) {
+        assert.equal(classifyTrial({ ...refused, changedFileCount }).classification, 'INFRA_FAIL');
+      }
+      assert.equal(classifyTrial({ ...refused, gateResults: [{ gate: 'tests', timedOut: true }] }).classification, 'TIMEOUT');
+      assert.equal(classifyTrial({ ...refused, rawEvidenceUnavailable: true, timedOut: true }).classification, 'INFRA_FAIL');
+    }
+    const failedGate = { gate: 'tests', required: true, status: 'failed', exitCode: 1 };
+    const failed = { ...input, invokerResult: { exitCode: 0 }, changedFileCount: null, gateResults: [failedGate] };
+    assert.equal(classifyTrial(failed).classification, 'FAIL');
+    assert.equal(classifyTrial({ ...failed, gateResults: [failedGate, { gate: 'build', required: true, status: 'execution_unavailable' }] }).classification, 'INFRA_FAIL');
+    assert.equal(classifyTrial({ ...failed, invokerResult: { exitCode: 0, infraFailure: 'transport failed' } }).classification, 'INFRA_FAIL');
+    assert.equal(classifyTrial({ ...failed, gateResults: [failedGate, { gate: 'build', required: true, timedOut: true }] }).classification, 'TIMEOUT');
+    assert.equal(classifyTrial({ ...input, invokerResult: { exitCode: 0, outcomeKind: 'success', success: false } }).classification, 'PASS');
+    assert.equal(classifyTrial({ ...input, invokerResult: { exitCode: 0, success: false } }).classification, 'INFRA_FAIL');
   });
 
   it('baseline-diff: commit-then-clean protected edits fail vs fixture baseline', async () => {

@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { preflight } from './preflight.js';
 import { SCHEMA_VERSION } from './contracts.js';
 import { sha256Json, sha256Buffer, digestArtifactDir } from './digest.js';
-import { computePostureFingerprint } from './posture.js';
+import { computePostureFingerprint, resolvePoeticBin } from './posture.js';
 import {
   parseResolvedModelEvidence,
 } from './invokers/index.js';
@@ -1058,6 +1058,7 @@ export async function runCampaign(opts) {
               campaignId: safeCampaignIdForExec,
               campaignDir,
               trialId: trial.id,
+              expectedFixtureDigest: trial.expectedFixtureDigest,
             })
           : {
               workspaceDir: await peers.trialPathUnder(executionRoot, trial.id),
@@ -1093,14 +1094,30 @@ export async function runCampaign(opts) {
         });
 
         const invoker = peers.getInvoker(arm.invocationPath);
-        const timeoutMs = experiment.timeoutMs;
         const request = peers.buildInvocationRequest({
           arm,
           task,
           workspaceDir: workspace.workspaceDir,
           requestId: trial.id,
-          timeoutMs,
+          timeoutMs: experiment.timeoutMs,
         });
+        const timeoutMs = request.timeoutMs;
+        const poeticBin = resolvePoeticBin(arm.poeticBin);
+        const postureFingerprint = computePostureFingerprint({
+          invocationPath: arm.invocationPath,
+          provider: arm.provider,
+          envAllowlist: arm.envAllowlist,
+          sandboxMode: arm.sandboxMode,
+          command: arm.command,
+          args: arm.args || [],
+          promptTransport: arm.promptTransport,
+          timeoutMs,
+          poeticBin,
+          extra: arm.posture,
+        });
+        if (trial.postureFingerprint !== postureFingerprint) {
+          throw new Error('effective invocation settings do not match the frozen trial posture');
+        }
         // Invocation scratch lives under the external execution workspace only —
         // never under campaign/artifacts (provider is OS-confined away from campaign).
         const scratchDir = path.join(workspace.workspaceDir, '.aicb-scratch');
@@ -1120,7 +1137,7 @@ export async function runCampaign(opts) {
         );
 
         const invokerResultRaw = await invoker({
-          poeticBin: arm.poeticBin || process.env.AICB_POETIC_BIN || 'poetic',
+          poeticBin,
           requestPath,
           outputPath,
           request,
@@ -1294,14 +1311,7 @@ export async function runCampaign(opts) {
           resolvedModel: modelEv.resolvedModel,
           resolvedModelAvailable: modelEv.resolvedModelAvailable,
           resolvedModelSource: modelEv.resolvedModelSource,
-          postureFingerprint:
-            trial.postureFingerprint ||
-            computePostureFingerprint({
-              invocationPath: arm.invocationPath,
-              envAllowlist: arm.envAllowlist,
-              sandboxMode: arm.sandboxMode,
-              extra: arm.posture,
-            }),
+          postureFingerprint,
           // Versioned neutral invocation protocol evidence (not exit status).
           ...protocolEvidence,
           hashes: {
@@ -1408,7 +1418,9 @@ export async function runCampaign(opts) {
               : { executionRoot }),
           };
           try {
-            const infraDigests = peers.buildTrialDigests({});
+            const infraDigests = peers.buildTrialDigests({
+              fixtureDigest: trial.expectedFixtureDigest,
+            });
             infraDigests.rawEvidenceUnavailable = true;
             const {
               expectedFixtureDigest: _expFix2,

@@ -21,6 +21,49 @@ import {
 } from './helpers/complete-trial.js';
 
 describe('digest evidence binding + tamper', () => {
+  it('requires provider attestation before exposing a resolved model identity', async () => {
+    const { parseResolvedModelEvidence } = await import('../harness/invokers/index.js');
+    const model = { resolved: { availability: 'available', value: 'reported-model' } };
+    const attested = parseResolvedModelEvidence({ model: { ...model, resolutionSource: 'provider-result' } });
+    assert.equal(attested.available, true);
+    assert.equal(attested.resolvedModel, 'reported-model');
+    assert.equal(attested.source, 'model.resolved.value');
+    for (const resolutionSource of ['request', 'config-default', undefined]) {
+      const fallback = parseResolvedModelEvidence({ model: { ...model, resolutionSource } });
+      assert.equal(fallback.available, false);
+      assert.equal(fallback.resolvedModel, null);
+      assert.equal(fallback.source, 'unattested-model');
+    }
+  });
+
+  it('rejects a changed fixture before establishing a new workspace baseline', async () => {
+    const { createIsolatedWorkspace } = await import('../harness/workspace.js');
+    const { digestArtifactDir } = await import('../harness/digest.js');
+    const root = await mkdtemp(path.join(os.tmpdir(), 'aicb-frozen-copy-'));
+    try {
+      const fixtureDir = path.join(root, 'fixture');
+      await mkdir(fixtureDir);
+      await writeFile(path.join(fixtureDir, 'source.txt'), 'frozen\n');
+      const expectedFixtureDigest = await digestArtifactDir(fixtureDir);
+      let gitCalls = 0;
+      const gitSpawn = async () => {
+        gitCalls += 1;
+        return { exitCode: 0, stdout: 'a'.repeat(40), stderr: '' };
+      };
+      const opts = { fixtureDir, workspaceRoot: path.join(root, 'workspaces'),
+        trialId: 'frozen-copy', expectedFixtureDigest, gitSpawn };
+      const unchanged = await createIsolatedWorkspace(opts);
+      assert.equal(unchanged.fixtureHash, expectedFixtureDigest);
+      assert.ok(gitCalls > 0);
+      gitCalls = 0;
+      await writeFile(path.join(fixtureDir, 'source.txt'), 'changed after scheduling\n');
+      await assert.rejects(() => createIsolatedWorkspace(opts), /frozen fixture digest/);
+      assert.equal(gitCalls, 0, 'mismatch must stop before baseline Git initialization');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('quarantine hashes exact raw stdout/stderr/output bytes (not lengths)', async () => {
     const {
       quarantineRawOutput,

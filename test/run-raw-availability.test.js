@@ -11,7 +11,10 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { writeFileSync } from 'node:fs';
 import {
+  cp,
+  mkdir,
   mkdtemp,
   writeFile,
   readFile,
@@ -224,6 +227,76 @@ describe('isRawEvidenceUnavailable detection', () => {
 });
 
 describe('runCampaign raw evidence availability', () => {
+  it('early catch preserves frozen fixture authority for resume and a partial report', async () => {
+    const { runCampaign } = await import('../harness/run.js');
+    const { readTrialResult } = await import('../harness/results.js');
+    const { saveManifest } = await import('../harness/manifest.js');
+    const temp = await mkdtemp(path.join(os.tmpdir(), 'aicb-raw-early-catch-'));
+    const corpusRoot = path.join(temp, 'benchmarks');
+    const suiteDir = path.join(corpusRoot, 'cli-comparison');
+    const fixture = path.join(suiteDir, 'fixtures/js-event-emitter-harness');
+    const campaignDir = path.join(temp, 'campaign');
+    const bin = await writeFakePoetic(`#!/usr/bin/env node
+const fs = require('fs');
+const args = process.argv.slice(2);
+const out = args[args.indexOf('--output') + 1];
+const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
+${FAKE_POETIC_WRITE_FULL_V1_CJS}
+writeFullV1(req, out, { stdout: 'verified sibling\\n', resolvedModel: 'dummy-model', requestedModel: req.model });
+`);
+    try {
+      await mkdir(path.join(suiteDir, 'tasks/greenfield'), { recursive: true });
+      await writeFile(path.join(suiteDir, 'suite.yaml'), `name: cli-comparison\nrepetitions: 1\ntasks:\n  - ${TASK}\n`);
+      await cp(path.join(CORPUS, 'cli-comparison/tasks/greenfield/003-js-event-emitter.yaml'),
+        path.join(suiteDir, 'tasks/greenfield/003-js-event-emitter.yaml'));
+      await cp(path.join(CORPUS, 'cli-comparison/fixtures/js-event-emitter-harness'), fixture, { recursive: true });
+      const packageFile = path.join(fixture, 'package.json');
+      const original = await readFile(packageFile);
+      const experiment = {
+        id: 'raw-avail-early-catch', schemaVersion: 1, suiteId: 'cli-comparison',
+        taskIds: [TASK], repetitions: 2, seed: 105, timeoutMs: 15_000,
+        arms: [{ name: 'dummy', provider: 'fake', model: 'dummy-model',
+          invocationPath: 'poetic-adapter', poeticBin: bin }],
+      };
+      const options = { experiment, corpusRoot, campaignDir, harnessRoot: REPO, execute: true };
+      let finished = 0;
+      const result = await runCampaign({ ...options, resume: false, log(message) {
+        if (!message.startsWith('trial ')) return;
+        finished += 1;
+        // Freeze genuine bytes first; change only this temporary fixture before
+        // the next copy, then restore it before evidence/resume checks.
+        writeFileSync(packageFile, finished === 1 ? Buffer.concat([original, Buffer.from('\n')]) : original);
+      } });
+      assert.equal(finished, 2);
+      const caught = result.manifest.trials.find((trial) => /does not match the frozen fixture digest/i.test(trial.classificationReason));
+      assert.ok(caught, 'second workspace copy must take the early catch path');
+      assert.match(caught.expectedFixtureDigest, /^[a-f0-9]{64}$/);
+      const stored = await readTrialResult(campaignDir, caught.id);
+      assert.equal(stored.classification, 'INFRA_FAIL');
+      assertRawUnavailableDigests(stored.digests);
+      assert.equal(stored.digests.fixtureDigest, caught.expectedFixtureDigest);
+
+      // Simulate the durable-write/manifest-update crash window, then adopt the
+      // unavailable terminal result without invoking either trial again.
+      caught.state = 'running'; // crash fixture: manifest did not receive the terminal update
+      await saveManifest(campaignDir, result.manifest);
+      const messages = [];
+      const resumed = await runCampaign({ ...options, resume: true, maxTrials: 0, log: (message) => messages.push(message) });
+      assert.equal(resumed.ok, true, JSON.stringify(resumed.errors));
+      assert.equal(resumed.stage, 'complete');
+      assert.equal(resumed.executed, 0);
+      assert.equal(resumed.manifest.trials.find((trial) => trial.id === caught.id).state, 'failed');
+      assert.ok(messages.some((message) => message.includes(caught.id) && message.includes('adopted durable result')));
+      assert.equal(resumed.report.byArm.length, 1);
+      const stats = resumed.report.byArm[0].stats;
+      assert.equal(stats.completed, 1, 'only the verified sibling is reportable');
+      for (const rate of ['passRate', 'capabilityPassRate', 'infraRate', 'timeoutRate']) assert.equal(stats[rate], null);
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+      await rm(path.dirname(bin), { recursive: true, force: true });
+    }
+  });
+
   it('poetic-adapter missing raw → rawEvidenceUnavailable, not PASS-reportable', async () => {
     const { runCampaign } = await import('../harness/run.js');
     const { readTrialResult } = await import('../harness/results.js');

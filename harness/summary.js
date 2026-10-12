@@ -67,12 +67,8 @@ function emptyStats() {
  * @returns {boolean}
  */
 function isTerminal(trial) {
-  return (
-    trial.state === 'completed' ||
-    trial.state === 'failed' ||
-    trial.state === 'skipped' ||
-    (trial.classification != null && trial.classification !== '')
-  );
+  return (trial.state === 'completed' || trial.state === 'failed') &&
+    CLASSIFICATIONS.includes(trial.classification);
 }
 
 /**
@@ -248,34 +244,47 @@ export function buildReport(manifest, trialResults) {
   // n/completed/classifications. Callers pass verified reportableResults.
   /** @type {object[]} */
   const trials = [];
+  const scheduled = Array.isArray(manifest?.trials) ? manifest.trials : [];
+  const scheduledIds = new Set(scheduled.map((t) => t.id));
+  const observedIds = new Set();
   for (const r of results) {
-    if (r == null || typeof r !== 'object') continue;
+    if (r == null || typeof r !== 'object' || !isTerminal(r)) continue;
+    if (scheduled.length > 0 && !scheduledIds.has(r.id)) continue;
+    if (observedIds.has(r.id)) continue;
+    observedIds.add(r.id);
     trials.push(r);
   }
 
-  /** @type {Map<string, { cell: object, stats: ReturnType<typeof emptyStats>, durations: number[] }>} */
+  // An omitted/unavailable scheduled result must not make a partial slice
+  // look like a completed comparison. Keep observed counts and durations.
+  const complete = (rows, dimensions = []) => {
+    if (scheduled.length === 0) return true;
+    const relevant = scheduled.filter((t) => dimensions.every((dim) =>
+      JSON.stringify(dimValue(t, dim)) === JSON.stringify(dimValue(rows[0] ?? {}, dim))));
+    const rowIds = new Set(rows.map((t) => t.id));
+    return relevant.every((t) => rowIds.has(t.id));
+  };
+
+  /** @type {Map<string, { cell: object, stats: ReturnType<typeof emptyStats>, durations: number[], trials: object[] }>} */
   const cellMap = new Map();
 
   for (const t of trials) {
     const arm = t.arm != null ? String(t.arm) : 'unknown';
     const taskId = t.taskId != null ? String(t.taskId) : 'unknown';
     const invocationPath = t.invocationPath != null ? String(t.invocationPath) : 'unknown';
-    const requestedModel =
-      t.requestedModel != null ? String(t.requestedModel) : null;
+    const requestedModel = t.requestedModel != null ? String(t.requestedModel) : null;
     // Honest: resolvedModel stays null when unavailable (no invent from requested)
-    const resolvedModel =
-      t.resolvedModel != null ? String(t.resolvedModel) : null;
-    const postureFingerprint =
-      t.postureFingerprint != null ? String(t.postureFingerprint) : null;
+    const resolvedModel = t.resolvedModel != null ? String(t.resolvedModel) : null;
+    const postureFingerprint = t.postureFingerprint != null ? String(t.postureFingerprint) : null;
     // Separate cells by requestedModel when resolved is unavailable
-    const key = [
+    const key = JSON.stringify([
       arm,
       taskId,
       invocationPath,
-      requestedModel ?? '',
-      resolvedModel ?? '',
-      postureFingerprint ?? '',
-    ].join('\0');
+      requestedModel,
+      resolvedModel,
+      postureFingerprint,
+    ]);
 
     let entry = cellMap.get(key);
     if (!entry) {
@@ -291,16 +300,18 @@ export function buildReport(manifest, trialResults) {
         },
         stats: emptyStats(),
         durations: [],
+        trials: [],
       };
       cellMap.set(key, entry);
     }
+    entry.trials.push(t);
     accumulate(entry.stats, t, { durations: entry.durations });
   }
 
   /** @type {object[]} */
   const cells = [];
   for (const entry of cellMap.values()) {
-    finalizeStats(entry.stats, entry.durations, true);
+    finalizeStats(entry.stats, entry.durations, complete(entry.trials, ['arm', 'taskId', 'invocationPath', 'requestedModel', 'postureFingerprint']));
     cells.push({
       ...entry.cell,
       stats: entry.stats,
@@ -323,11 +334,18 @@ export function buildReport(manifest, trialResults) {
   finalizeStats(
     totals,
     totalDurations,
-    globalHomogeneous.ok && singleCell,
+    globalHomogeneous.ok && singleCell && complete(trials),
   );
 
   /** @type {object[]} */
   const refusals = [];
+  if (!complete(trials)) {
+    refusals.push({
+      reason: 'rates withheld for incomplete scheduled slices',
+      dimensions: ['arm', 'taskId'],
+      detail: `${observedIds.size}/${scheduledIds.size} scheduled trials have reportable terminal results`,
+    });
+  }
   if (!globalHomogeneous.ok && trials.length > 0) {
     // Record that global passRate was refused (not an error — expected multi-arm campaigns)
     refusals.push({
@@ -343,21 +361,17 @@ export function buildReport(manifest, trialResults) {
   const armMap = new Map();
   for (const t of trials) {
     const arm = t.arm != null ? String(t.arm) : 'unknown';
-    const invocationPath =
-      t.invocationPath != null ? String(t.invocationPath) : 'unknown';
-    const requestedModel =
-      t.requestedModel != null ? String(t.requestedModel) : undefined;
-    const resolvedModel =
-      t.resolvedModel != null ? String(t.resolvedModel) : null;
-    const postureFingerprint =
-      t.postureFingerprint != null ? String(t.postureFingerprint) : null;
-    const key = [
+    const invocationPath = t.invocationPath != null ? String(t.invocationPath) : 'unknown';
+    const requestedModel = t.requestedModel != null ? String(t.requestedModel) : null;
+    const resolvedModel = t.resolvedModel != null ? String(t.resolvedModel) : null;
+    const postureFingerprint = t.postureFingerprint != null ? String(t.postureFingerprint) : null;
+    const key = JSON.stringify([
       arm,
       invocationPath,
-      requestedModel ?? '',
-      resolvedModel ?? '',
-      postureFingerprint ?? '',
-    ].join('\0');
+      requestedModel,
+      resolvedModel,
+      postureFingerprint,
+    ]);
     let entry = armMap.get(key);
     if (!entry) {
       entry = {
@@ -386,7 +400,7 @@ export function buildReport(manifest, trialResults) {
     if (!h.ok) {
       refusals.push(...h.refusals);
     }
-    finalizeStats(entry.stats, entry.durations, h.ok);
+    finalizeStats(entry.stats, entry.durations, h.ok && complete(entry.trials, ['arm', 'invocationPath', 'requestedModel', 'postureFingerprint']));
     byArm.push({ ...entry.row, stats: entry.stats });
   }
   byArm.sort((a, b) => String(a.arm).localeCompare(String(b.arm)));
@@ -411,21 +425,17 @@ export function buildReport(manifest, trialResults) {
     accumulate(taskEntry.stats, t, { durations: taskEntry.durations });
 
     const arm = t.arm != null ? String(t.arm) : 'unknown';
-    const invocationPath =
-      t.invocationPath != null ? String(t.invocationPath) : 'unknown';
-    const requestedModel =
-      t.requestedModel != null ? String(t.requestedModel) : null;
-    const resolvedModel =
-      t.resolvedModel != null ? String(t.resolvedModel) : null;
-    const postureFingerprint =
-      t.postureFingerprint != null ? String(t.postureFingerprint) : null;
-    const akey = [
+    const invocationPath = t.invocationPath != null ? String(t.invocationPath) : 'unknown';
+    const requestedModel = t.requestedModel != null ? String(t.requestedModel) : null;
+    const resolvedModel = t.resolvedModel != null ? String(t.resolvedModel) : null;
+    const postureFingerprint = t.postureFingerprint != null ? String(t.postureFingerprint) : null;
+    const akey = JSON.stringify([
       arm,
       invocationPath,
-      requestedModel ?? '',
-      resolvedModel ?? '',
-      postureFingerprint ?? '',
-    ].join('\0');
+      requestedModel,
+      resolvedModel,
+      postureFingerprint,
+    ]);
     let aEntry = taskEntry.armMap.get(akey);
     if (!aEntry) {
       aEntry = {
@@ -454,7 +464,7 @@ export function buildReport(manifest, trialResults) {
     finalizeStats(
       taskEntry.stats,
       taskEntry.durations,
-      taskHomogeneous.ok,
+      taskHomogeneous.ok && complete(taskEntry.trials, ['taskId']),
     );
     if (!taskHomogeneous.ok) {
       refusals.push({
@@ -468,7 +478,7 @@ export function buildReport(manifest, trialResults) {
     const nested = [];
     for (const aEntry of taskEntry.armMap.values()) {
       const h = assertHomogeneous(aEntry.trials);
-      finalizeStats(aEntry.stats, aEntry.durations, h.ok);
+      finalizeStats(aEntry.stats, aEntry.durations, h.ok && complete(aEntry.trials, ['taskId', 'arm', 'invocationPath', 'requestedModel', 'postureFingerprint']));
       nested.push({ ...aEntry.row, stats: aEntry.stats });
     }
     nested.sort((a, b) => String(a.arm).localeCompare(String(b.arm)));

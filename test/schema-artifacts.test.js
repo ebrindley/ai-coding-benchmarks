@@ -467,6 +467,18 @@ describe('schema artifacts (trial + report)', () => {
     assert.equal(homo.totals.timeoutRate, 0);
     assertValid(homo, schema);
 
+    // Missing scheduled evidence preserves observations but withholds the
+    // incomplete arm/task rates using the existing refusal dimensions.
+    const partial = asJsonArtifact(buildReport({
+      ...manifest,
+      trials: [trialResults[0], { ...trialResults[0], id: 'unavailable', state: 'failed' }],
+    }, [trialResults[0]]));
+    assert.equal(partial.totals.completed, 1);
+    assert.equal(partial.byArm[0].stats.passRate, null);
+    assert.equal(partial.byTask[0].stats.capabilityPassRate, null);
+    assert.deepEqual(partial.refusals[0].dimensions, ['arm', 'taskId']);
+    assertValid(partial, schema);
+
     // Capability denom excludes INFRA_FAIL and TIMEOUT; legacy passRate includes them
     const mixedClass = asJsonArtifact(
       buildReport(manifest, [
@@ -866,10 +878,8 @@ describe('schema artifacts (trial + report)', () => {
       assert.ok(result.manifest);
       const trialId = result.manifest.trials[0].id;
       const onDisk = await readTrialResult(campaignOk, trialId);
-      assert.ok(
-        onDisk.exitCode === 0 || onDisk.exitCode === null,
-        `exitCode=${onDisk.exitCode}`,
-      );
+      assert.equal(onDisk.exitCode, 0, 'native true must execute past frozen input checks');
+      assert.doesNotMatch(onDisk.classificationReason ?? '', /frozen|fixture.*match|posture.*match/i);
       assert.ok(
         typeof onDisk.executionRoot === 'string' || onDisk.executionRoot === null,
       );

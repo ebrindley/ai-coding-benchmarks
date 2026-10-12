@@ -154,4 +154,79 @@ describe('schedule + aggregation refusal', () => {
       }
     }
   });
+
+  it('pools terminal observations while preserving conditional capability rates', async () => {
+    const { buildReport } = await import('../harness/summary.js');
+    const base = { arm: 'a', invocationPath: 'native-cli', requestedModel: 'm', resolvedModel: null, postureFingerprint: null, state: 'completed' };
+    const results = [
+      { ...base, id: 'a', taskId: 'one', classification: 'PASS', durationMs: 10 },
+      { ...base, id: 'b', taskId: 'two', classification: 'TIMEOUT', durationMs: 100 },
+      { ...base, id: 'c', taskId: 'two', classification: 'TIMEOUT', durationMs: 100 },
+    ];
+    const report = buildReport({ trials: results }, results);
+    const stats = report.byArm[0].stats;
+    assert.equal(stats.passRate, 1 / 3);
+    assert.equal(stats.timeoutRate, 2 / 3);
+    assert.equal(stats.infraRate, 0);
+    assert.equal(stats.meanDurationMs, 70);
+    assert.equal(stats.capabilityPassRate, 1);
+    assert.equal(report.byTask.find((t) => t.taskId === 'two').stats.capabilityPassRate, null);
+  });
+
+  it('excludes unfinished and off-schedule rows, withholding incomplete slice rates', async () => {
+    const { buildReport } = await import('../harness/summary.js');
+    const base = { arm: 'a', taskId: 't', invocationPath: 'native-cli', requestedModel: null, classification: 'PASS', durationMs: 10 };
+    const scheduled = ['done', 'pending', 'running', 'skipped', 'unavailable'].map((id) => ({ ...base, id }));
+    const results = [
+      { ...base, id: 'done', state: 'completed' },
+      { ...base, id: 'pending', state: 'pending', durationMs: 1000 },
+      { ...base, id: 'running', state: 'running', durationMs: 1000 },
+      { ...base, id: 'skipped', state: 'skipped', durationMs: 1000 },
+      { ...base, id: 'off-schedule', state: 'completed', durationMs: 1000 },
+    ];
+    const report = buildReport({ trials: scheduled }, results);
+    assert.equal(report.totals.completed, 1);
+    assert.equal(report.totals.pass, 1);
+    assert.equal(report.byArm[0].stats.meanDurationMs, 10);
+    for (const name of ['passRate', 'capabilityPassRate', 'infraRate', 'timeoutRate']) {
+      assert.equal(report.byArm[0].stats[name], null, name);
+      assert.equal(report.cells[0].stats[name], null, name);
+    }
+    assert.match(report.refusals[0].reason, /incomplete/);
+  });
+
+  it('keeps null and empty requested-model identities in separate cells', async () => {
+    const { buildReport } = await import('../harness/summary.js');
+    const results = [null, ''].map((requestedModel, i) => ({
+      id: String(i), arm: 'a', taskId: 't', invocationPath: 'native-cli',
+      requestedModel, classification: 'PASS', state: 'completed',
+    }));
+    const report = buildReport({ trials: results }, results);
+    assert.equal(report.cells.length, 2);
+    assert.equal(report.byArm.length, 2);
+    assert.equal(report.byTask[0].byArm.length, 2);
+    assert.equal(report.totals.passRate, null);
+  });
+
+  it('withholds rates from resolved-model partitions of one frozen scheduled slice', async () => {
+    const { buildReport } = await import('../harness/summary.js');
+    const base = { arm: 'a', taskId: 't', invocationPath: 'poetic-adapter', requestedModel: 'm', postureFingerprint: null };
+    const schedule = ['pass', 'unattested'].map((id) => ({ ...base, id }));
+    for (const classification of ['TIMEOUT', 'INFRA_FAIL']) {
+      const results = [
+        { ...base, id: 'pass', state: 'completed', classification: 'PASS', resolvedModel: 'actual-model', durationMs: 10 },
+        { ...base, id: 'unattested', state: 'failed', classification, resolvedModel: null, durationMs: 100 },
+      ];
+      const report = buildReport({ trials: schedule }, results);
+      assert.equal(report.totals.completed, 2);
+      assert.equal(report.totals.meanDurationMs, 55);
+      assert.equal(report.cells.length, 2);
+      for (const row of [...report.cells, ...report.byArm, ...report.byTask[0].byArm]) {
+        assert.equal(row.stats.completed, 1);
+        assert.equal(row.stats.meanDurationMs, row.resolvedModel === null ? 100 : 10);
+        for (const rate of ['passRate', 'capabilityPassRate', 'infraRate', 'timeoutRate']) assert.equal(row.stats[rate], null);
+      }
+      assert.equal(report.byTask[0].stats.passRate, null);
+    }
+  });
 });

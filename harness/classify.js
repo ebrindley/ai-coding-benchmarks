@@ -81,7 +81,7 @@ function invokerInfraFailure(invokerResult) {
         ? String(r.outcomeKind)
         : 'non-success';
     // timeout is handled separately (TIMEOUT precedence)
-    if (kind === 'timeout') return null;
+    if (kind === 'timeout' || kind === 'success') return null;
     return `invoker non-success outcome: ${kind}`;
   }
   if (
@@ -107,15 +107,27 @@ function invokerNonZero(invokerResult) {
   return Number(r.exitCode) !== 0;
 }
 
+/** Required executable gates may establish a valid repair despite CLI exit. */
+function gatePassed(gate) {
+  return gate.required !== false &&
+    gate.status === 'passed' &&
+    Number.isInteger(gate.exitCode) &&
+    gate.exitCode === (gate.expectedExitCode ?? 0) &&
+    gate.timedOut !== true &&
+    !gate.infraFailure &&
+    (!gate.classificationSignal || gate.classificationSignal === 'PASS');
+}
+
 /**
  * Classify a single trial from invoker + gate outcomes.
  *
  * Rules:
- * - TIMEOUT if any timeout (trial flag, invoker, or gate)
+ * - TIMEOUT if trial/invoker timeout or a required gate timeout
  * - INFRA_FAIL if invoker/gate infraFailure, confinement unavailable, or
  *   rawEvidenceUnavailable (truncation / missing raw / spawn failure, etc.)
  * - NO_OP if completed with zero meaningful file changes (changedFileCount === 0)
- * - FAIL if any required gate non-zero / failed, or invoker non-zero without infra
+ * - FAIL if a required gate fails or CLI exit is non-zero
+ *   without a passing required executable gate
  * - PASS otherwise
  *
  * Invariant: when rawEvidenceUnavailable is true, classification is always
@@ -157,7 +169,9 @@ export function classifyTrial({
     gateStatuses: [],
   };
 
-  const gates = Array.isArray(gateResults) ? gateResults : [];
+  const gates = Array.isArray(gateResults)
+    ? gateResults.map((g) => ({ ...g, status: typeof g.status === 'string' ? g.status.trim() : g.status }))
+    : [];
 
   // --- TIMEOUT ---
   if (timedOut === true) {
@@ -169,6 +183,7 @@ export function classifyTrial({
     reasons.push('invoker timed out');
   }
   for (const g of gates) {
+    if (g.required === false) continue;
     if (g.timedOut === true || g.classificationSignal === 'TIMEOUT') {
       signals.push('TIMEOUT');
       reasons.push(`gate "${g.gate ?? '?'}" timed out`);
@@ -196,11 +211,11 @@ export function classifyTrial({
       typeof g.infraFailure === 'string' && g.infraFailure.trim() !== ''
         ? g.infraFailure
         : null;
-    if (
+    if (g.required !== false && (
       status === 'execution_unavailable' ||
       signal === 'INFRA_FAIL' ||
       infra
-    ) {
+    )) {
       signals.push('INFRA_FAIL');
       reasons.push(
         `gate "${g.gate ?? '?'}" infrastructure failure` +
@@ -223,7 +238,9 @@ export function classifyTrial({
   }
 
   // --- FAIL ---
-  if (invokerNonZero(invokerResult) && !invInfra && !invokerTimedOut(invokerResult)) {
+  const requiredExecutableGates = gates.filter((g) => g.required !== false && g.status !== 'structural');
+  const repairAccepted = requiredExecutableGates.length > 0 && requiredExecutableGates.every(gatePassed);
+  if (invokerNonZero(invokerResult) && !invInfra && !invokerTimedOut(invokerResult) && !repairAccepted) {
     signals.push('FAIL');
     const code =
       invokerResult && typeof invokerResult === 'object'
@@ -235,19 +252,26 @@ export function classifyTrial({
     const required = g.required !== false;
     if (!required) continue;
     // Structural gates are non-executable: never silent PASS, never FAIL from runner alone.
-    if (g.status === 'structural') {
-      continue;
-    }
+    if (g.status === 'structural') continue;
     // Timeouts / infra already recorded above with higher precedence.
     if (g.timedOut === true || g.status === 'execution_unavailable') {
       continue;
     }
-    if (g.status === 'failed' || g.classificationSignal === 'FAIL') {
+    if (g.status === 'failed' || g.classificationSignal === 'FAIL' ||
+        (g.status === 'passed' && !gatePassed(g)) ||
+        (g.exitCode != null && (!Number.isInteger(g.exitCode) || g.exitCode !== (g.expectedExitCode ?? 0)))) {
       signals.push('FAIL');
       reasons.push(
         `required gate "${g.gate ?? '?'}" failed (exit ${g.exitCode ?? 'null'}, expected ${g.expectedExitCode ?? 0})`,
       );
     }
+  }
+
+  // Unknown file accounting prevents claiming a pass. It does not erase a
+  // capability miss already established by the provider or required gates.
+  if (changedFileCount === null && !signals.includes('FAIL')) {
+    signals.push('INFRA_FAIL');
+    reasons.push('meaningful file change count unavailable');
   }
 
   // Default PASS when no adverse signals.

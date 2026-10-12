@@ -19,6 +19,7 @@ import {
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SCHEMA_VERSION } from './contracts.js';
+import { classifyTrial, CLASSIFICATION_PRECEDENCE } from './classify.js';
 import { assertSafeTrialId, trialPathUnder } from './paths.js';
 import {
   sha256Buffer,
@@ -844,17 +845,22 @@ export async function tryAdoptDurableTrialResult(campaignDir, manifestTrial) {
     }
   }
 
-  const evidence = await verifyCampaignEvidenceDigests(
-    campaignDir,
-    [{ ...manifestTrial, state }],
-    [result],
-    { failOnUnavailable: true },
-  );
-  if (!evidence.ok || evidence.verified !== 1) {
+  // Unavailable provider bytes prevent scoring, but a bound terminal record
+  // still proves the attempt finished. Do not rerun it into a different result.
+  const terminalEvidence = await verifyTrialEvidenceDigests(campaignDir, trialId, result, {
+    manifestTrial,
+    expectedFixtureDigest: manifestTrial.expectedFixtureDigest,
+  });
+  if (terminalEvidence.unavailable && terminalEvidence.mismatches.length === 0 &&
+      result.classification === 'INFRA_FAIL') {
+    return { ok: true, result, state, classification: result.classification };
+  }
+
+  if (!terminalEvidence.ok) {
     return {
       ok: false,
       reason:
-        evidence.error ||
+        terminalEvidence.error ||
         'durable result evidence is unavailable or failed verification',
     };
   }
@@ -1374,6 +1380,8 @@ export async function verifyTrialEvidenceDigests(
   const mismatches = [];
   /** @type {Record<string, unknown>} */
   const recomputed = {};
+  if (!ADOPTABLE_RESULT_STATES.has(result.state)) mismatches.push('state:not-terminal');
+  if (!Object.hasOwn(CLASSIFICATION_PRECEDENCE, result.classification)) mismatches.push('classification:missing');
 
   // Always recompute final-record resultDigest over the complete stored envelope.
   const expectedResultDigest = computeFinalResultDigest(result);
@@ -1411,6 +1419,7 @@ export async function verifyTrialEvidenceDigests(
   // still be retained for diagnostics, but unavailable stays true and
   // reportable stays false (never unavailable:false for a raw-unavailable record).
   if (hasRawEvidenceUnavailableFlag(result)) {
+    if (result.classification !== 'INFRA_FAIL') mismatches.push('classification:raw-unavailable');
     return {
       ok: false,
       trialId: safeId,
@@ -1508,6 +1517,20 @@ export async function verifyTrialEvidenceDigests(
     mismatches.push('rawOutputFileSha256');
   }
 
+  // Check only what the stored protocol and gates establish. Other
+  // invoker flags are not persisted, so they cannot be inferred or reconstructed.
+  const invokerEvidence = { exitCode: result.exitCode };
+  if (result.outcomeKind != null) invokerEvidence.outcomeKind = result.outcomeKind;
+  const established = classifyTrial({
+    invokerResult: invokerEvidence,
+    gateResults: result.gateResults,
+    changedFileCount: result.changedFileCount,
+  }).classification;
+  if (CLASSIFICATION_PRECEDENCE[result.classification] < CLASSIFICATION_PRECEDENCE[established] ||
+      (result.classification === 'NO_OP' && result.changedFileCount != null && result.changedFileCount !== 0)) {
+    mismatches.push('classification:established-outcome');
+  }
+
   // Artifact digest: ONLY campaignDir/artifacts/<trialId> (containment-checked).
   // Never trust result.artifactDir or any caller-supplied external path.
   let artifactDir = null;
@@ -1566,8 +1589,9 @@ export async function verifyTrialEvidenceDigests(
 
 /**
  * Verify evidence digests for all completed/failed trials before report/export.
- * Fail closed on mismatch, missing result, or unavailable records when
- * `failOnUnavailable` is true (default for report/export/summary paths).
+ * Fail closed on mismatch or missing result. With failOnUnavailable (default),
+ * clean unavailable siblings can accompany verified observations; an
+ * all-unavailable report is refused. Unavailable rows never enter the report.
  *
  * @param {string} campaignDir
  * @param {object[]} trials - manifest trials (need id + state; optional expectedFixtureDigest)
@@ -1628,6 +1652,7 @@ export async function verifyCampaignEvidenceDigests(
   const reportableResults = [];
   /** @type {Array<{ trialId: string, error: string, mismatches: string[] }>} */
   const failures = [];
+  const unavailableFailures = [];
 
   for (const t of trials || []) {
     if (!t || typeof t !== 'object') continue;
@@ -1678,8 +1703,8 @@ export async function verifyCampaignEvidenceDigests(
     if (v.unavailable || isUnavailableForReport(result)) {
       // rawEvidenceUnavailable (any classification) — not verified, not reportable.
       unavailable += 1;
-      if (failOnUnavailable) {
-        failures.push({
+      if (failOnUnavailable || v.mismatches?.length > 0) {
+        const failure = {
           trialId: id,
           error:
             v.error ||
@@ -1687,7 +1712,9 @@ export async function verifyCampaignEvidenceDigests(
           mismatches: v.mismatches?.length
             ? v.mismatches
             : ['unavailable'],
-        });
+        };
+        if (v.mismatches?.length > 0) failures.push(failure);
+        else unavailableFailures.push(failure);
       }
       continue;
     }
@@ -1702,6 +1729,10 @@ export async function verifyCampaignEvidenceDigests(
     verified += 1;
     reportableResults.push(result);
   }
+
+  // A clean unavailable sibling may be omitted from a partial report. Never
+  // publish an all-unavailable campaign or soften an integrity mismatch.
+  if (failOnUnavailable && verified === 0) failures.push(...unavailableFailures);
 
   if (failures.length > 0) {
     return {

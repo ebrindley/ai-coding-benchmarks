@@ -578,7 +578,7 @@ describe('export + quarantine + cli', () => {
     try {
       await seedVerifiedCampaign(campaign, {
         resultExtras: {
-          classification: 'INFRA_FAIL',
+          classification: 'TIMEOUT',
           state: 'failed',
           classificationReason:
             'invoker infra failure: provider said Authorization: Bearer redacted-token and DATABASE_URL=dsn-must-not-export',
@@ -630,7 +630,7 @@ describe('export + quarantine + cli', () => {
       // Bounded identifiers retained
       assert.equal(parsed.reasonCode, 'provider_timeout');
       assert.equal(parsed.outcomeKind, 'timeout');
-      assert.equal(parsed.classification, 'INFRA_FAIL');
+      assert.equal(parsed.classification, 'TIMEOUT');
 
       // Free-form classificationReason / error stripped
       assert.equal(parsed.classificationReason, undefined);

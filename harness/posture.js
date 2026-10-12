@@ -14,19 +14,55 @@ import { sha256Json } from './digest.js';
  * @property {string} invocationPath - 'poetic-adapter' | 'native-cli' | 'poetic-system'
  * @property {string[] | Record<string, string> | null | undefined} envAllowlist
  * @property {string | null | undefined} sandboxMode
+ * @property {string} [provider]
+ * @property {string} [command]
+ * @property {string[]} [args]
+ * @property {string} [promptTransport]
+ * @property {number} [timeoutMs]
+ * @property {string} [poeticBin]
  * @property {unknown} [extra] - optional additional posture-affecting fields
  */
 
 /**
- * Compute a stable sha256 hex fingerprint of run posture.
- *
+ * Share the effective deadline between request, execution and posture.
+ * The legacy arm fallback remains available to programmatic callers only.
+ * @param {number} [timeoutMs]
+ * @param {number} [legacyArmTimeoutMs]
+ * @returns {number}
+ */
+export function resolveTrialTimeoutMs(timeoutMs, legacyArmTimeoutMs) {
+  const supplied = timeoutMs ?? legacyArmTimeoutMs;
+  const timeout = typeof supplied === 'number' ? supplied : Number(supplied);
+  if (supplied == null || !Number.isFinite(timeout) || timeout <= 0) return 600_000;
+  const whole = Math.floor(timeout);
+  if (whole <= 0) throw new Error('timeoutMs must be a positive number');
+  return whole;
+}
+
+/**
+ * Arm overrides predate the experiment schema and remain programmatic-only.
+ * @param {string} [legacyArmBin]
+ * @param {string} [envBin]
+ * @returns {string}
+ */
+export function resolvePoeticBin(legacyArmBin, envBin = process.env.AICB_POETIC_BIN) {
+  return legacyArmBin || envBin || 'poetic';
+}
+
+/**
  * @param {PostureInput} input
  * @returns {string} sha256 hex of canonical JSON
  */
 export function computePostureFingerprint({
   invocationPath,
+  provider,
   envAllowlist,
   sandboxMode,
+  command,
+  args,
+  promptTransport,
+  timeoutMs,
+  poeticBin,
   extra,
 }) {
   if (invocationPath == null || invocationPath === '') {
@@ -48,7 +84,16 @@ export function computePostureFingerprint({
   const payload = {
     envAllowlist: normalizedAllowlist,
     invocationPath: String(invocationPath),
+    provider: provider ?? null,
     sandboxMode: sandboxMode == null ? null : String(sandboxMode),
+    timeoutMs: resolveTrialTimeoutMs(timeoutMs),
+    ...(invocationPath === 'native-cli'
+      ? {
+          command: command ?? null,
+          args: args ?? [],
+          promptTransport: promptTransport ?? 'stdin',
+        }
+      : { poeticBin: resolvePoeticBin(poeticBin) }),
   };
 
   if (extra !== undefined) {

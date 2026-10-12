@@ -3,6 +3,7 @@
  */
 
 import path from 'node:path';
+import { resolveTrialTimeoutMs } from '../posture.js';
 import { invokePoeticAdapter } from './poetic-adapter.js';
 import { invokeNativeCli } from './native-cli.js';
 import { invokePoeticSystem } from './poetic-system.js';
@@ -75,17 +76,7 @@ export function buildInvocationRequest({
     task.goal ??
     '';
 
-  let resolvedTimeout = timeoutMs;
-  if (resolvedTimeout == null && arm.timeoutMs != null) {
-    resolvedTimeout = Number(arm.timeoutMs);
-  }
-  if (resolvedTimeout == null || !Number.isFinite(resolvedTimeout) || resolvedTimeout <= 0) {
-    resolvedTimeout = 600_000;
-  }
-  resolvedTimeout = Math.floor(Number(resolvedTimeout));
-  if (resolvedTimeout <= 0) {
-    throw new Error('buildInvocationRequest: timeoutMs must be a positive number');
-  }
+  const resolvedTimeout = resolveTrialTimeoutMs(timeoutMs, arm.timeoutMs);
 
   /** @type {Record<string, unknown>} */
   const request = {
@@ -112,6 +103,7 @@ export function buildInvocationRequest({
  *   model.resolved = { availability: "available", value: "..." }
  *   model.resolved = { availability: "unavailable", reason: "..." }
  *
+ * Available identities require model.resolutionSource = "provider-result".
  * Never stringifies the resolved object. Never falls back to a requested model.
  *
  * @param {unknown} artifact - parsed JSON from poetic --output
@@ -147,6 +139,14 @@ export function parseResolvedModelEvidence(artifact) {
     r.availability != null ? String(r.availability).toLowerCase() : '';
   if (availability === 'available') {
     if (typeof r.value === 'string' && r.value.trim() !== '') {
+      if (m.resolutionSource !== 'provider-result') {
+        return {
+          resolvedModel: null,
+          available: false,
+          source: 'unattested-model',
+          reason: 'resolved model was not reported by the provider',
+        };
+      }
       return {
         resolvedModel: r.value.trim(),
         available: true,
