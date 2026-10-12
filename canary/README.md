@@ -47,3 +47,13 @@ canary/scripts/run-canary.sh
 The corpus is pinned to commit
 `9eef589959858af368b168e674685ef597468fa1`. Runtime logs and generated fixture
 repositories remain under ignored `canary/logs/` and `canary/workspaces/`.
+
+Preparation reads fixture and task bytes directly from that commit, even when
+the checkout has newer files. Preflight checks those prepared bytes and rejects
+additional meaningful files; ignored dependencies and build artifacts are allowed.
+It also requires the checkout's corpus and harness to match the pin. Preparing
+pinned workspaces does not bypass that check or update the pin.
+
+Only the OpenCode model-list probe uses the ignored `canary/.config/` directory
+as its XDG configuration home. Poetic and the canary run keep their existing
+configuration resolution.

@@ -29,6 +29,7 @@ raw-provider-output/
 .harness-artifacts/
 canary/logs/
 canary/workspaces/
+canary/.config/
 
 # OS/editor noise
 .DS_Store

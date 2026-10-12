@@ -37,7 +37,7 @@ done < <(
   jq -r '.models[] | [.identifier, .indexedModelIdentifier] | @tsv' "$models"
 )
 
-while IFS= read -r task_id; do
+while IFS=$'\t' read -r task_id task_file fixture; do
   workspace="$root/canary/workspaces/$task_id"
   if [[ ! -d "$workspace/.git" ]]; then
     printf 'Error: missing prepared workspace: %s\n' "$workspace" >&2
@@ -51,11 +51,54 @@ while IFS= read -r task_id; do
     printf 'Error: workspace corpus SHA mismatch: %s\n' "$task_id" >&2
     exit 1
   fi
-done < <(jq -r '.tasks[].taskId' "$tasks")
+  node --input-type=module - "$root" "$expected_sha" "$fixture" "$task_file" "$workspace" <<'NODE'
+import { execFileSync } from 'node:child_process';
+import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import path from 'node:path';
 
+const [root, sha, fixture, taskFile, workspace] = process.argv.slice(2);
+const git = (...args) => execFileSync('git', ['-C', root, ...args]);
+const fail = (name) => {
+  console.error(`Error: prepared workspace differs from pinned commit ${sha}: ${name}`);
+  process.exit(1);
+};
+const pinned = new Set();
+for (const entry of git('ls-tree', '-rz', sha, '--', fixture).toString().split('\0').filter(Boolean)) {
+  const [metadata, fullPath] = entry.split('\t');
+  const [mode, , blob] = metadata.split(' ');
+  const name = fullPath.slice(fixture.length + 1);
+  pinned.add(name);
+  const target = path.join(workspace, name);
+  try {
+    const stat = lstatSync(target);
+    const bytes = mode === '120000'
+      ? (stat.isSymbolicLink() ? Buffer.from(readlinkSync(target)) : null)
+      : (stat.isFile() ? readFileSync(target) : null);
+    if (!bytes || !bytes.equals(git('cat-file', 'blob', blob))) fail(name);
+  } catch {
+    fail(name);
+  }
+}
+const visible = execFileSync('git', [
+  '-C', workspace, 'ls-files', '-z', '--cached', '--others', '--exclude-standard',
+]).toString().split('\0').filter(Boolean);
+for (const name of visible) {
+  if (name.startsWith('.canary/') || name === 'opencode.json') continue;
+  if (!pinned.has(name)) fail(name);
+}
+try {
+  if (!readFileSync(path.join(workspace, '.canary/task.yaml'))
+    .equals(git('show', `${sha}:${taskFile}`))) fail('.canary/task.yaml');
+} catch {
+  fail('.canary/task.yaml');
+}
+NODE
+done < <(jq -r '.tasks[] | [.taskId, .taskFile, .fixture] | @tsv' "$tasks")
+
+mkdir -p "$root/canary/.config"
 opencode_models="$(
   cd "$root/canary/workspaces/brownfield-008-js-to-ts-migration"
-  opencode models lmstudio
+  XDG_CONFIG_HOME="$root/canary/.config" opencode models lmstudio
 )"
 while IFS= read -r identifier; do
   if ! grep -Fq "lmstudio/$identifier" <<<"$opencode_models"; then
