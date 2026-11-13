@@ -58,7 +58,7 @@
     },
     "invocationPath": {
       "type": "string",
-      "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+      "enum": ["build-adapter", "native-cli", "build-system"]
     },
     "requestedModel": {
       "type": ["string", "null"],
@@ -108,12 +108,12 @@
     "protocolEvidenceVersion": {
       "type": ["integer", "null"],
       "enum": [1, null],
-      "description": "Version of the neutral invocation protocol evidence envelope persisted on this trial. Required (value 1) for new reportable poetic-adapter records; null/absent allowed for older records and non-adapter paths where the contract permits."
+      "description": "Version of the neutral invocation protocol evidence envelope persisted on this trial. Required (value 1) for new reportable build-adapter records; null/absent allowed for older records and non-adapter paths where the contract permits."
     },
     "protocolSchema": {
       "type": ["string", "null"],
       "pattern": "^[A-Za-z0-9._-]{1,128}$",
-      "description": "Stable schema id for protocol evidence (e.g. poetic.provider.invoke.result.v1). Bounded identifier only; never free-form text. Pattern applies only when a string is present."
+      "description": "Stable schema id for protocol evidence (e.g. build.provider.invoke.result.v1). Bounded identifier only; never free-form text. Pattern applies only when a string is present."
     },
     "hashes": {
       "type": "object",

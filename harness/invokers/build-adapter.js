@@ -1,11 +1,11 @@
 /**
- * Poetic adapter invoker: argv-safe `poetic provider invoke --request … --output …`.
+ * Build adapter invoker: argv-safe `build provider invoke --request … --output …`.
  *
  * Does not pass arbitrary env from corpus task YAML. Only harness-controlled
- * env (explicit `env` or filtered process.env) is used. Tests inject `poeticBin`.
+ * env (explicit `env` or filtered process.env) is used. Tests inject `buildBin`.
  *
  * Bridge contract: CLI may exit 0 after writing an artifact. The harness MUST
- * parse `poetic.provider.invoke.result.v1` and map `outcome.kind` / `reasonCode`
+ * parse `build.provider.invoke.result.v1` and map `outcome.kind` / `reasonCode`
  * into the invoker result. Non-success outcomes are never treated as success.
  *
  * Fresh result binding: before each invoke the harness securely clears
@@ -28,10 +28,10 @@ import {
 import { assertSafeIdSegment, PathEscapeError } from '../paths.js';
 
 /** Bridge result schema id. */
-export const POETIC_INVOKE_RESULT_SCHEMA = 'poetic.provider.invoke.result.v1';
+export const BUILD_INVOKE_RESULT_SCHEMA = 'build.provider.invoke.result.v1';
 
 /**
- * Deterministic provider raw quarantine — mirrors Poetic's public
+ * Deterministic provider raw quarantine — mirrors Build's public
  * `resolveArtifactQuarantineDir(outputPath, requestId)` EXACTLY:
  *
  *   const base = path.basename(path.resolve(outputPath));
@@ -58,8 +58,8 @@ export const PROVIDER_RAW_STDOUT_NAME = 'stdout.txt';
 export const PROVIDER_RAW_STDERR_NAME = 'stderr.txt';
 
 /**
- * Resolve Poetic's deterministic quarantine directory name for an output path.
- * Exact mirror of Poetic: strip only trailing `.json` (case-insensitive).
+ * Resolve Build's deterministic quarantine directory name for an output path.
+ * Exact mirror of Build: strip only trailing `.json` (case-insensitive).
  *
  * @param {string} outputPath
  * @returns {string} e.g. "output.invoke-artifacts"
@@ -73,7 +73,7 @@ export function resolveProviderRawArtifactsDirName(outputPath) {
 }
 
 /**
- * Documented outcome kinds for poetic.provider.invoke.result.v1.
+ * Documented outcome kinds for build.provider.invoke.result.v1.
  * - success: provider completed without harness-level failure
  * - timeout: wall-clock / provider timeout
  * - provider_error: provider transport/API/runtime error
@@ -81,7 +81,7 @@ export function resolveProviderRawArtifactsDirName(outputPath) {
  * - aborted: invocation aborted (signal, cancel, user abort)
  * - internal_error: bridge/internal failure while producing a result artifact
  */
-export const POETIC_OUTCOME_KINDS = Object.freeze([
+export const BUILD_OUTCOME_KINDS = Object.freeze([
   'success',
   'timeout',
   'provider_error',
@@ -91,13 +91,13 @@ export const POETIC_OUTCOME_KINDS = Object.freeze([
 ]);
 
 /** @type {ReadonlySet<string>} */
-const OUTCOME_KIND_SET = new Set(POETIC_OUTCOME_KINDS);
+const OUTCOME_KIND_SET = new Set(BUILD_OUTCOME_KINDS);
 
 /**
- * Stable reason codes from poetic ProviderInvokeReasonCode.
+ * Stable reason codes from build ProviderInvokeReasonCode.
  * Free-form text is never accepted on the parse boundary.
  */
-export const POETIC_REASON_CODES = Object.freeze([
+export const BUILD_REASON_CODES = Object.freeze([
   'SUCCESS',
   'MODEL_UNRESOLVED',
   'PROVIDER_ERROR',
@@ -111,9 +111,9 @@ export const POETIC_REASON_CODES = Object.freeze([
 ]);
 
 /** @type {ReadonlySet<string>} */
-const REASON_CODE_SET = new Set(POETIC_REASON_CODES);
+const REASON_CODE_SET = new Set(BUILD_REASON_CODES);
 
-/** Model resolutionSource enum from Poetic types.ts */
+/** Model resolutionSource enum from Build types.ts */
 export const MODEL_RESOLUTION_SOURCES = Object.freeze([
   'request',
   'provider-result',
@@ -141,7 +141,7 @@ export const CLEANUP_STATUSES = Object.freeze([
 
 /**
  * Bounded adapter reasonCode syntax for ordinary/exported records.
- * Accepts Poetic ProviderInvokeReasonCode values and other bounded ids.
+ * Accepts Build ProviderInvokeReasonCode values and other bounded ids.
  * Free-form text is rejected at the parse boundary (never flows into results).
  */
 export const REASON_CODE_RE = /^[A-Za-z0-9._-]{1,128}$/;
@@ -472,8 +472,8 @@ export function mapOutcomeKind(kind, reasonCode = null) {
 }
 
 /**
- * Parse and validate a poetic.provider.invoke.result.v1 artifact against the
- * real ProviderInvokeResultV1 contract (poetic types.ts). Fail closed: invalid
+ * Parse and validate a build.provider.invoke.result.v1 artifact against the
+ * real ProviderInvokeResultV1 contract (build types.ts). Fail closed: invalid
  * never retains model/artifact evidence.
  *
  * Required top-level: schema, requestId, outcome, provider, model, versions,
@@ -483,7 +483,7 @@ export function mapOutcomeKind(kind, reasonCode = null) {
  * Non-success outcome kinds remain valid when the rest of the schema is sound;
  * identity binding is separate ({@link bindInvokeResultToRequest}).
  *
- * @param {unknown} artifact - parsed JSON or JSON string from poetic --output
+ * @param {unknown} artifact - parsed JSON or JSON string from build --output
  * @returns {ParsedInvokeResult}
  */
 export function parseInvokeResult(artifact) {
@@ -503,9 +503,9 @@ export function parseInvokeResult(artifact) {
 
   const rec = /** @type {Record<string, unknown>} */ (obj);
   const schema = rec.schema != null ? String(rec.schema) : '';
-  if (schema !== POETIC_INVOKE_RESULT_SCHEMA) {
+  if (schema !== BUILD_INVOKE_RESULT_SCHEMA) {
     return invalidParse(
-      `invoke result schema mismatch: expected ${POETIC_INVOKE_RESULT_SCHEMA}, got ${schema || '(missing)'}`,
+      `invoke result schema mismatch: expected ${BUILD_INVOKE_RESULT_SCHEMA}, got ${schema || '(missing)'}`,
       'schema-mismatch',
     );
   }
@@ -640,7 +640,7 @@ export function parseInvokeResult(artifact) {
     return invalidParse('invoke result missing versions object', 'missing-versions');
   }
   const v = /** @type {Record<string, unknown>} */ (versions);
-  for (const key of /** @type {const} */ (['poetic', 'providerCli'])) {
+  for (const key of /** @type {const} */ (['build', 'providerCli'])) {
     const err = validateAvailabilityCoded(v[key], `versions.${key}`, {
       valueType: 'string',
     });
@@ -1201,7 +1201,7 @@ export function bindInvokeResultToRequest(parsed, expected) {
 
 /**
  * Deterministic expected provider raw paths under the output's parent.
- * Exact mirror of Poetic resolveArtifactQuarantineDir(outputPath, requestId)
+ * Exact mirror of Build resolveArtifactQuarantineDir(outputPath, requestId)
  * plus stdout.txt / stderr.txt filenames.
  *
  * @param {string} outputPath
@@ -1245,7 +1245,7 @@ export function expectedProviderRawPaths(outputPath, requestId) {
 
 /**
  * After full schema + identity binding (requestId/provider/model.requested),
- * ingest actual Poetic provider stdout/stderr from deterministic quarantine
+ * ingest actual Build provider stdout/stderr from deterministic quarantine
  * paths under the scratch tree (<stem>.invoke-artifacts/<requestId>/).
  * Fail closed on missing/unsafe/escape/symlink paths — never claim provider
  * evidence.
@@ -1314,7 +1314,7 @@ export async function ingestProviderRawEvidence(outputPath, requestId, opts = {}
 }
 
 /**
- * Invoke Poetic via the provider-adapter path.
+ * Invoke Build via the provider-adapter path.
  *
  * Always parses the result artifact after spawn. Bridge process exit 0 alone
  * is not success — only a fully schema-valid result with identity bound to
@@ -1322,9 +1322,9 @@ export async function ingestProviderRawEvidence(outputPath, requestId, opts = {}
  * outcome.kind === 'success' yields success: true.
  *
  * @param {object} opts
- * @param {string} opts.poeticBin - path or name of poetic executable (injectable for tests)
+ * @param {string} opts.buildBin - path or name of build executable (injectable for tests)
  * @param {string} opts.requestPath - path to request JSON file
- * @param {string} opts.outputPath - path where poetic writes its response
+ * @param {string} opts.outputPath - path where build writes its response
  * @param {string} [opts.cwd]
  * @param {NodeJS.ProcessEnv | Record<string, string | undefined> | null} [opts.env] harness-controlled only
  * @param {number} [opts.timeoutMs]
@@ -1334,8 +1334,8 @@ export async function ingestProviderRawEvidence(outputPath, requestId, opts = {}
  * @param {unknown} [opts.taskEnv] - REJECTED if present (smuggling guard; never merge task YAML env)
  * @returns {Promise<InvokerResult>}
  */
-export async function invokePoeticAdapter({
-  poeticBin,
+export async function invokeBuildAdapter({
+  buildBin,
   requestPath,
   outputPath,
   cwd,
@@ -1359,7 +1359,7 @@ export async function invokePoeticAdapter({
       outcomeKind: null,
       reasonCode: null,
       infraFailure:
-        'refusing taskEnv: poetic-adapter does not merge corpus task YAML env/credentials',
+        'refusing taskEnv: build-adapter does not merge corpus task YAML env/credentials',
     };
   }
   if (rest && Object.prototype.hasOwnProperty.call(rest, 'task')) {
@@ -1389,7 +1389,7 @@ export async function invokePoeticAdapter({
         'campaignDir is required for provider confinement (fail closed; unconfined refused)',
     };
   }
-  if (poeticBin == null || String(poeticBin).trim() === '') {
+  if (buildBin == null || String(buildBin).trim() === '') {
     return {
       exitCode: null,
       timedOut: false,
@@ -1399,7 +1399,7 @@ export async function invokePoeticAdapter({
       success: false,
       outcomeKind: null,
       reasonCode: null,
-      infraFailure: 'poeticBin is required',
+      infraFailure: 'buildBin is required',
     };
   }
   if (requestPath == null || String(requestPath).trim() === '') {
@@ -1496,12 +1496,12 @@ export async function invokePoeticAdapter({
   ];
 
   // Fail-closed OS confinement: campaign tree inaccessible while provider is alive.
-  // Nested Poetic sandboxes (if any) run inside this outer restriction.
+  // Nested Build sandboxes (if any) run inside this outer restriction.
   // Private TMPDIR lives under the already-writable scratch bind (request parent)
-  // so Poetic's os.tmpdir() raw spool remains writable under bubblewrap.
+  // so Build's os.tmpdir() raw spool remains writable under bubblewrap.
   const scratchParent = path.dirname(path.resolve(String(requestPath)));
   const result = await spawnControlled({
-    command: String(poeticBin),
+    command: String(buildBin),
     args,
     cwd,
     env,
@@ -1566,7 +1566,7 @@ export async function invokePoeticAdapter({
 
   // After full schema + identity bind: ingest actual provider raw from
   // deterministic <stem>.invoke-artifacts/<requestId>/{stdout,stderr}.txt
-  // (Poetic resolveArtifactQuarantineDir contract).
+  // (Build resolveArtifactQuarantineDir contract).
   // On any invalid/missing/unsafe path: do not claim provider evidence.
   if (fullyBound) {
     const raw = await ingestProviderRawEvidence(

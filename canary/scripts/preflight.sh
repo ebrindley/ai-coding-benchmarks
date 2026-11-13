@@ -7,7 +7,7 @@ models="$root/canary/config/models.json"
 tasks="$root/canary/config/tasks.json"
 missing_gate_tools=()
 
-for command in git jq lms curl opencode poetic node npm; do
+for command in git jq lms curl opencode build node npm; do
   command -v "$command" >/dev/null || {
     printf 'Error: required command not found: %s\n' "$command" >&2
     exit 1

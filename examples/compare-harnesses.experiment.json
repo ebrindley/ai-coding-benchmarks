@@ -15,10 +15,10 @@
   },
   "arms": [
     {
-      "name": "harness-poetic-adapter",
+      "name": "harness-build-adapter",
       "provider": "REPLACE_WITH_PROVIDER",
       "model": "REPLACE_WITH_MODEL",
-      "invocationPath": "poetic-adapter",
+      "invocationPath": "build-adapter",
       "envAllowlist": [],
       "sandboxMode": "read-only"
     },

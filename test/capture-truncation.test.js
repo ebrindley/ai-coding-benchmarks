@@ -1,6 +1,6 @@
 /**
  * Capture truncation must fail closed: retained prefixes are incomplete raw.
- * native-cli / poetic-system propagate stdoutTruncatedChars / stderrTruncatedChars
+ * native-cli / build-system propagate stdoutTruncatedChars / stderrTruncatedChars
  * so isRawEvidenceUnavailable marks digests non-reportable.
  */
 
@@ -154,26 +154,26 @@ process.exit(0);
     }
   });
 
-  it('poetic-system returns truncation metadata when stdout exceeds captureLimit', async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-trunc-poetic-'));
+  it('build-system returns truncation metadata when stdout exceeds captureLimit', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-trunc-build-'));
     try {
       const campaignDir = path.join(dir, '_campaign');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-      // Fake poetic binary: ignore argv, emit oversized stdout.
+      // Fake build binary: ignore argv, emit oversized stdout.
       const bin = await writeExecutable(
         dir,
-        'fake-poetic',
+        'fake-build',
         `#!/usr/bin/env node
 process.stdout.write('P'.repeat(${TINY_CAPTURE_LIMIT + 17}));
 process.exit(0);
 `,
       );
 
-      const { invokePoeticSystem } = await import(
-        '../harness/invokers/poetic-system.js'
+      const { invokeBuildSystem } = await import(
+        '../harness/invokers/build-system.js'
       );
-      const result = await invokePoeticSystem({
-        poeticBin: bin,
+      const result = await invokeBuildSystem({
+        buildBin: bin,
         prompt: 'do something',
         provider: 'test-provider',
         model: 'test-model',
@@ -190,34 +190,34 @@ process.exit(0);
 
       const { isRawEvidenceUnavailable } = await import('../harness/run.js');
       assert.equal(
-        isRawEvidenceUnavailable('poetic-system', result),
+        isRawEvidenceUnavailable('build-system', result),
         true,
-        'truncated poetic-system raw must be unavailable',
+        'truncated build-system raw must be unavailable',
       );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  it('poetic-system under limit does not set truncation metadata', async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-trunc-poetic-ok-'));
+  it('build-system under limit does not set truncation metadata', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-trunc-build-ok-'));
     try {
       const campaignDir = path.join(dir, '_campaign');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const bin = await writeExecutable(
         dir,
-        'fake-poetic',
+        'fake-build',
         `#!/usr/bin/env node
 process.stdout.write('ok\\n');
 process.exit(0);
 `,
       );
 
-      const { invokePoeticSystem } = await import(
-        '../harness/invokers/poetic-system.js'
+      const { invokeBuildSystem } = await import(
+        '../harness/invokers/build-system.js'
       );
-      const result = await invokePoeticSystem({
-        poeticBin: bin,
+      const result = await invokeBuildSystem({
+        buildBin: bin,
         prompt: 'do something',
         provider: 'test-provider',
         model: 'test-model',
@@ -233,7 +233,7 @@ process.exit(0);
       assert.equal(result.rawTruncated, undefined);
 
       const { isRawEvidenceUnavailable } = await import('../harness/run.js');
-      assert.equal(isRawEvidenceUnavailable('poetic-system', result), false);
+      assert.equal(isRawEvidenceUnavailable('build-system', result), false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -254,7 +254,7 @@ describe('isRawEvidenceUnavailable truncation fail-closed', () => {
       true,
     );
     assert.equal(
-      isRawEvidenceUnavailable('poetic-system', {
+      isRawEvidenceUnavailable('build-system', {
         exitCode: 0,
         stdout: '',
         stderr: 'err-prefix',
@@ -489,22 +489,22 @@ process.exit(0);
     }
   });
 
-  it('nominally successful oversized poetic-system → INFRA_FAIL + non-reportable digests', async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-trunc-class-poetic-'));
+  it('nominally successful oversized build-system → INFRA_FAIL + non-reportable digests', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-trunc-class-build-'));
     try {
       const campaignDir = path.join(dir, '_campaign');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const bin = await writeExecutable(
         dir,
-        'fake-poetic',
+        'fake-build',
         `#!/usr/bin/env node
 process.stdout.write('P'.repeat(${TINY_CAPTURE_LIMIT + 17}));
 process.exit(0);
 `,
       );
 
-      const { invokePoeticSystem } = await import(
-        '../harness/invokers/poetic-system.js'
+      const { invokeBuildSystem } = await import(
+        '../harness/invokers/build-system.js'
       );
       const { isRawEvidenceUnavailable } = await import('../harness/run.js');
       const { classifyTrial } = await import('../harness/classify.js');
@@ -513,8 +513,8 @@ process.exit(0);
         isUnavailableForReport,
       } = await import('../harness/results.js');
 
-      const invokerResult = await invokePoeticSystem({
-        poeticBin: bin,
+      const invokerResult = await invokeBuildSystem({
+        buildBin: bin,
         prompt: 'do something',
         provider: 'test-provider',
         model: 'test-model',
@@ -527,7 +527,7 @@ process.exit(0);
       assert.equal(invokerResult.rawTruncated, true);
 
       const rawUnavailable = isRawEvidenceUnavailable(
-        'poetic-system',
+        'build-system',
         invokerResult,
       );
       assert.equal(rawUnavailable, true);
@@ -554,7 +554,7 @@ process.exit(0);
     }
   });
 
-  it('poetic-adapter truncated capture metadata → unavailable + INFRA_FAIL (not PASS)', async () => {
+  it('build-adapter truncated capture metadata → unavailable + INFRA_FAIL (not PASS)', async () => {
     const { isRawEvidenceUnavailable } = await import('../harness/run.js');
     const { classifyTrial } = await import('../harness/classify.js');
     const {
@@ -575,7 +575,7 @@ process.exit(0);
       rawTruncated: true,
     };
     assert.equal(
-      isRawEvidenceUnavailable('poetic-adapter', invokerResult),
+      isRawEvidenceUnavailable('build-adapter', invokerResult),
       true,
     );
 

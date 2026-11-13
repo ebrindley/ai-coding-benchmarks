@@ -1,5 +1,5 @@
 /**
- * Fake Poetic invocation, gate confinement, classification, bridge model evidence,
+ * Fake Build invocation, gate confinement, classification, bridge model evidence,
  * system argv, structural gates, meaningful change counts.
  */
 
@@ -67,10 +67,10 @@ describe('invokers + gates + classify', () => {
     assert.equal(noFallback.resolvedModel, null);
   });
 
-  it('poetic-adapter request matches bridge contract and fake receives it', async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-poetic-'));
+  it('build-adapter request matches bridge contract and fake receives it', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-build-'));
     try {
-      const bin = path.join(dir, 'fake-poetic');
+      const bin = path.join(dir, 'fake-build');
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -86,7 +86,7 @@ const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
 // Report modes seen at invoke time (request already written by harness with 0600).
 const reqMode = fs.statSync(reqPath).mode & 0o777;
 const outModeBefore = fs.existsSync(out) ? (fs.statSync(out).mode & 0o777) : null;
-// Actual provider raw: strip only trailing .json (Poetic resolveArtifactQuarantineDir)
+// Actual provider raw: strip only trailing .json (Build resolveArtifactQuarantineDir)
 const base = path.basename(path.resolve(out));
 const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
 const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
@@ -98,7 +98,7 @@ const unavail = (r) => ({ availability: 'unavailable', reason: r });
 const now = new Date().toISOString();
 const rm = req.model != null && String(req.model).trim() !== '' ? String(req.model) : null;
 fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
+  schema: 'build.provider.invoke.result.v1',
   requestId: req.requestId,
   outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
   provider: { requested: avail(req.provider), resolved: avail(req.provider) },
@@ -107,7 +107,7 @@ fs.writeFileSync(out, JSON.stringify({
     resolved: avail('resolved-from-provider'),
     resolutionSource: 'provider-result',
   },
-  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  versions: { build: avail('t'), providerCli: unavail('n/a') },
   posture: {
     fingerprint: avail('${'e'.repeat(64)}'),
     argvRedacted: avail(['x']),
@@ -139,9 +139,9 @@ process.stdout.write('done');
 
       const {
         buildInvocationRequest,
-        invokePoeticAdapter,
+        invokeBuildAdapter,
         parseResolvedModelEvidence,
-        POETIC_INVOKE_REQUEST_SCHEMA,
+        BUILD_INVOKE_REQUEST_SCHEMA,
       } = await import('../harness/invokers/index.js');
       const { stat } = await import('node:fs/promises');
 
@@ -155,7 +155,7 @@ process.stdout.write('done');
         timeoutMs: 120_000,
       });
 
-      assert.equal(request.schema, POETIC_INVOKE_REQUEST_SCHEMA);
+      assert.equal(request.schema, BUILD_INVOKE_REQUEST_SCHEMA);
       assert.equal(request.requestId, 'req-1');
       assert.equal('trialId' in request, false);
       assert.equal('workspace' in request, false);
@@ -166,8 +166,8 @@ process.stdout.write('done');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const requestPath = path.join(artDir, 'req.json');
       const outputPath = path.join(artDir, 'out.json');
-      const result = await invokePoeticAdapter({
-        poeticBin: bin,
+      const result = await invokeBuildAdapter({
+        buildBin: bin,
         requestPath,
         outputPath,
         request,
@@ -188,7 +188,7 @@ process.stdout.write('done');
       assert.ok(!result.stdout.includes('done'));
 
       const written = JSON.parse(await readFile(outputPath, 'utf8'));
-      assert.equal(written.schema, 'poetic.provider.invoke.result.v1');
+      assert.equal(written.schema, 'build.provider.invoke.result.v1');
       assert.equal(written.provider.requested.value, request.provider);
       // Model evidence from bound parsedOutput only
       const evidence = parseResolvedModelEvidence(result.parsedOutput);
@@ -207,18 +207,18 @@ process.stdout.write('done');
     }
   });
 
-  it('poetic-adapter maps all bridge outcome kinds with CLI exit 0', async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-poetic-out-'));
+  it('build-adapter maps all bridge outcome kinds with CLI exit 0', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-build-out-'));
     try {
       const {
-        invokePoeticAdapter,
+        invokeBuildAdapter,
         parseInvokeResult,
-        POETIC_INVOKE_RESULT_SCHEMA,
-        POETIC_OUTCOME_KINDS,
+        BUILD_INVOKE_RESULT_SCHEMA,
+        BUILD_OUTCOME_KINDS,
       } = await import('../harness/invokers/index.js');
       const { classifyTrial } = await import('../harness/classify.js');
 
-      assert.deepEqual([...POETIC_OUTCOME_KINDS], [
+      assert.deepEqual([...BUILD_OUTCOME_KINDS], [
         'success',
         'timeout',
         'provider_error',
@@ -237,8 +237,8 @@ process.stdout.write('done');
         internal_error: { timedOut: false, success: false, classif: 'INFRA_FAIL' },
       };
 
-      for (const kind of POETIC_OUTCOME_KINDS) {
-        const bin = path.join(dir, `fake-poetic-${kind}`);
+      for (const kind of BUILD_OUTCOME_KINDS) {
+        const bin = path.join(dir, `fake-build-${kind}`);
         await writeFile(
           bin,
           `#!/usr/bin/env node
@@ -261,7 +261,7 @@ const kind = ${JSON.stringify(kind)};
 const reasonCode = kind === 'success' ? 'SUCCESS' : kind === 'timeout' ? 'PROVIDER_TIMEOUT' : kind === 'aborted' ? 'PROVIDER_ABORTED' : kind === 'internal_error' ? 'INTERNAL_ERROR' : kind === 'refusal' ? 'NOT_READY' : 'PROVIDER_ERROR';
 const exitCode = kind === 'success' ? 0 : 1;
 fs.writeFileSync(out, JSON.stringify({
-  schema: ${JSON.stringify(POETIC_INVOKE_RESULT_SCHEMA)},
+  schema: ${JSON.stringify(BUILD_INVOKE_RESULT_SCHEMA)},
   requestId: 'r-${kind}',
   outcome: { kind, exitCode, reasonCode },
   provider: { requested: avail(req.provider), resolved: avail(req.provider) },
@@ -270,7 +270,7 @@ fs.writeFileSync(out, JSON.stringify({
     resolved: unavail('n/a'),
     resolutionSource: 'unavailable',
   },
-  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  versions: { build: avail('t'), providerCli: unavail('n/a') },
   posture: {
     fingerprint: avail('${'f'.repeat(64)}'),
     argvRedacted: avail(['x']),
@@ -303,12 +303,12 @@ process.exit(0);
         const outputPath = path.join(dir, `out-${kind}.json`);
         const campaignDir = path.join(dir, `_campaign_${kind}`);
         await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-        const result = await invokePoeticAdapter({
-          poeticBin: bin,
+        const result = await invokeBuildAdapter({
+          buildBin: bin,
           requestPath,
           outputPath,
           request: {
-            schema: 'poetic.provider.invoke.request.v1',
+            schema: 'build.provider.invoke.request.v1',
             requestId: `r-${kind}`,
             provider: 'fake',
             prompt: 'x',
@@ -362,7 +362,7 @@ process.exit(0);
       }
 
       // Invalid / missing outcome with exit 0 must not PASS
-      const badBin = path.join(dir, 'fake-poetic-bad');
+      const badBin = path.join(dir, 'fake-build-bad');
       await writeFile(
         badBin,
         `#!/usr/bin/env node
@@ -377,8 +377,8 @@ process.exit(0);
       await chmod(badBin, 0o755);
       const badCampaign = path.join(dir, '_campaign_bad');
       await mkdir(badCampaign, { recursive: true, mode: 0o700 });
-      const badResult = await invokePoeticAdapter({
-        poeticBin: badBin,
+      const badResult = await invokeBuildAdapter({
+        buildBin: badBin,
         requestPath: path.join(dir, 'req-bad.json'),
         outputPath: path.join(dir, 'out-bad.json'),
         request: { schema: 'x', requestId: 'b', provider: 'p', prompt: 'p', workingDirectory: dir, timeoutMs: 1 },
@@ -403,10 +403,10 @@ process.exit(0);
     }
   });
 
-  it('poetic-system uses exact public argv including --in-place', async () => {
+  it('build-system uses exact public argv including --in-place', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-psys-'));
     try {
-      const bin = path.join(dir, 'fake-poetic');
+      const bin = path.join(dir, 'fake-build');
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -421,13 +421,13 @@ process.exit(0);
       const argvOut = path.join(dir, 'argv.json');
 
       const {
-        buildPoeticSystemArgv,
-        invokePoeticSystem,
+        makeBuildSystemArgv,
+        invokeBuildSystem,
         timeoutMsToWholeMinutes,
-      } = await import('../harness/invokers/poetic-system.js');
+      } = await import('../harness/invokers/build-system.js');
 
       assert.equal(timeoutMsToWholeMinutes(90_000), 2);
-      const expected = buildPoeticSystemArgv({
+      const expected = makeBuildSystemArgv({
         prompt: 'fix the bug',
         provider: 'anthropic',
         model: 'claude-x',
@@ -450,8 +450,8 @@ process.exit(0);
 
       const campaignDir = path.join(dir, '_campaign');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-      const result = await invokePoeticSystem({
-        poeticBin: bin,
+      const result = await invokeBuildSystem({
+        buildBin: bin,
         prompt: 'fix the bug',
         provider: 'anthropic',
         model: 'claude-x',
@@ -502,21 +502,21 @@ process.exit(0);
     }
   });
 
-  it('meaningful change count excludes .poetic bookkeeping', async () => {
+  it('meaningful change count excludes .build-project bookkeeping', async () => {
     const {
       countMeaningfulChangedFiles,
       parseChangedPaths,
       filterMeaningfulChangedPaths,
     } = await import('../harness/gates.js');
     const porcelain =
-      ' M .poetic/telemetry.json\n M .poetic/run.log\n M src/app.js\n';
+      ' M .build-project/telemetry.json\n M .build-project/run.log\n M src/app.js\n';
     const all = parseChangedPaths(porcelain);
-    assert.ok(all.some((p) => p.startsWith('.poetic/')));
+    assert.ok(all.some((p) => p.startsWith('.build-project/')));
     const meaningful = filterMeaningfulChangedPaths(all);
     assert.deepEqual(meaningful, ['src/app.js']);
     assert.equal(countMeaningfulChangedFiles(porcelain), 1);
     assert.equal(
-      countMeaningfulChangedFiles(' M .poetic/only.json\n'),
+      countMeaningfulChangedFiles(' M .build-project/only.json\n'),
       0,
     );
   });

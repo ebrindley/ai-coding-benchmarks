@@ -1,5 +1,5 @@
 /**
- * Fail-closed OS confinement for provider / Poetic-system process trees.
+ * Fail-closed OS confinement for provider / Build-system process trees.
  *
  * While the provider is alive, the campaign control/evidence tree must be
  * inaccessible for both reads and writes. This is stronger than path-tree
@@ -14,7 +14,7 @@
  * to that directory. Campaign-control storage is never used as temp parent.
  *
  * Honesty bound:
- * - Nested sandboxes (e.g. Poetic's own provider sandbox) run *inside* this
+ * - Nested sandboxes (e.g. Build's own provider sandbox) run *inside* this
  *   outer restriction; we do not claim nested-sandbox introspection.
  * - Windows has no supported primitive here → execution_unavailable.
  * - Gate confinement is separate (gates.js); this module is for invokers only.
@@ -187,7 +187,7 @@ export function buildProviderSeatbeltProfile(campaignPaths) {
  * Create a private 0700 temp directory under an already-writable confinement
  * bind (workspace or scratch). Never under campaign control storage.
  *
- * Poetic creates its raw spool under `os.tmpdir()`; under bubblewrap host
+ * Build creates its raw spool under `os.tmpdir()`; under bubblewrap host
  * `/tmp` is read-only, so the child must receive TMPDIR pointing here.
  *
  * @param {string} parentDir - absolute parent already (or soon) RW-bound
@@ -204,7 +204,7 @@ export async function createProviderPrivateTemp(parentDir) {
   // The harness must establish the workspace/scratch parent itself. Do not
   // create arbitrary caller-selected ancestors from this confinement helper.
   const dir = await mkdtemp(path.join(parent, PROVIDER_PRIVATE_TEMP_PREFIX));
-  // Force 0700 independent of umask (Poetic expects a private spool parent).
+  // Force 0700 independent of umask (Build expects a private spool parent).
   await chmod(dir, 0o700);
   return dir;
 }

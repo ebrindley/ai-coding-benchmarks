@@ -208,8 +208,8 @@ describe('provider confinement', () => {
     const {
       parseInvokeResult,
       sanitizeAdapterReasonCode,
-      POETIC_INVOKE_RESULT_SCHEMA,
-    } = await import('../harness/invokers/poetic-adapter.js');
+      BUILD_INVOKE_RESULT_SCHEMA,
+    } = await import('../harness/invokers/build-adapter.js');
 
     assert.equal(sanitizeAdapterReasonCode('ok'), 'ok');
     assert.equal(sanitizeAdapterReasonCode('rc-timeout'), 'rc-timeout');
@@ -220,7 +220,7 @@ describe('provider confinement', () => {
     assert.equal(sanitizeAdapterReasonCode('a'.repeat(129)), null);
 
     const { buildValidInvokeResultV1 } = await import(
-      './helpers/poetic-result-v1.js'
+      './helpers/build-result-v1.js'
     );
 
     // Free-form reasonCode is not a ProviderInvokeReasonCode → invalid
@@ -431,7 +431,7 @@ const report = {
   osTmpdir: os.tmpdir(),
 };
 try {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'poetic-probe-'));
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'build-probe-'));
   fs.writeFileSync(path.join(d, 'spool.bin'), 'raw-ok');
   report.spoolOk = true;
   report.spoolDir = d;
@@ -485,12 +485,12 @@ process.stdout.write(JSON.stringify(report));
     }
   });
 
-  it('poetic-adapter refuses taskEnv (no task-env injection)', async () => {
-    const { invokePoeticAdapter } = await import(
-      '../harness/invokers/poetic-adapter.js'
+  it('build-adapter refuses taskEnv (no task-env injection)', async () => {
+    const { invokeBuildAdapter } = await import(
+      '../harness/invokers/build-adapter.js'
     );
-    const r = await invokePoeticAdapter({
-      poeticBin: 'poetic',
+    const r = await invokeBuildAdapter({
+      buildBin: 'build',
       requestPath: '/tmp/req.json',
       outputPath: '/tmp/out.json',
       campaignDir: '/tmp/camp',
@@ -500,7 +500,7 @@ process.stdout.write(JSON.stringify(report));
     assert.match(String(r.infraFailure), /taskEnv|refusing/i);
   });
 
-  it('bwrap Poetic-invocation: os.tmpdir() spool writable under confined TMPDIR', async (t) => {
+  it('bwrap Build-invocation: os.tmpdir() spool writable under confined TMPDIR', async (t) => {
     const {
       detectProviderConfinement,
     } = await import('../harness/invokers/provider-confine.js');
@@ -508,18 +508,18 @@ process.stdout.write(JSON.stringify(report));
     if (!conf.available || conf.kind !== 'bwrap') {
       t.skip(
         conf.available
-          ? `provider confinement is ${conf.kind}, not bwrap; skip Linux bubblewrap Poetic integration`
-          : `bwrap not available (${conf.reason}); skip Linux bubblewrap Poetic integration`,
+          ? `provider confinement is ${conf.kind}, not bwrap; skip Linux bubblewrap Build integration`
+          : `bwrap not available (${conf.reason}); skip Linux bubblewrap Build integration`,
       );
       return;
     }
 
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bwrap-poetic-'));
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bwrap-build-'));
     try {
-      // Fake Poetic mirrors real raw-stream-capture: mkdtemp under os.tmpdir()
+      // Fake Build mirrors real raw-stream-capture: mkdtemp under os.tmpdir()
       // then writes a valid result v1. Under bwrap without constrained TMPDIR
       // this fails because host /tmp is RO; with the fix it succeeds.
-      const bin = path.join(dir, 'fake-poetic');
+      const bin = path.join(dir, 'fake-build');
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -533,10 +533,10 @@ if (reqIdx < 0 || outIdx < 0) { process.stderr.write('bad args'); process.exit(2
 const reqPath = args[reqIdx + 1];
 const out = args[outIdx + 1];
 const req = JSON.parse(fs.readFileSync(reqPath, 'utf8'));
-// --- Poetic-like private spool under os.tmpdir() (must be writable) ---
+// --- Build-like private spool under os.tmpdir() (must be writable) ---
 let spoolDir;
 try {
-  spoolDir = fs.mkdtempSync(path.join(os.tmpdir(), 'poetic-invoke-raw-'));
+  spoolDir = fs.mkdtempSync(path.join(os.tmpdir(), 'build-invoke-raw-'));
   fs.chmodSync(spoolDir, 0o700);
   fs.writeFileSync(
     path.join(spoolDir, 'stdout.spool'),
@@ -560,7 +560,7 @@ const unavail = (r) => ({ availability: 'unavailable', reason: r });
 const now = new Date().toISOString();
 const rm = req.model != null && String(req.model).trim() !== '' ? String(req.model) : null;
 fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
+  schema: 'build.provider.invoke.result.v1',
   requestId: req.requestId,
   outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
   provider: { requested: avail(req.provider), resolved: avail(req.provider) },
@@ -569,7 +569,7 @@ fs.writeFileSync(out, JSON.stringify({
     resolved: avail('bwrap-resolved'),
     resolutionSource: 'provider-result',
   },
-  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  versions: { build: avail('t'), providerCli: unavail('n/a') },
   posture: {
     fingerprint: avail('${'e'.repeat(64)}'),
     argvRedacted: avail(['x']),
@@ -600,7 +600,7 @@ process.exit(0);
 
       const {
         buildInvocationRequest,
-        invokePoeticAdapter,
+        invokeBuildAdapter,
       } = await import('../harness/invokers/index.js');
 
       const workspaceDir = path.join(dir, 'ws');
@@ -626,8 +626,8 @@ process.exit(0);
       const requestPath = path.join(scratchDir, 'request.json');
       const outputPath = path.join(scratchDir, 'output.json');
 
-      const result = await invokePoeticAdapter({
-        poeticBin: bin,
+      const result = await invokeBuildAdapter({
+        buildBin: bin,
         requestPath,
         outputPath,
         request,
@@ -647,7 +647,7 @@ process.exit(0);
       assert.equal(
         result.exitCode,
         0,
-        `bwrap poetic invoke failed: ${result.infraFailure || result.stderr || result.stdout}`,
+        `bwrap build invoke failed: ${result.infraFailure || result.stderr || result.stdout}`,
       );
       assert.equal(result.success, true);
       assert.equal(result.outcomeKind, 'success');

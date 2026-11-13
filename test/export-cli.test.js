@@ -157,7 +157,7 @@ function sampleFrozenExperiment(extra = {}) {
         name: 'arm-a',
         provider: 'provider-a',
         model: 'model-a',
-        invocationPath: 'poetic-adapter',
+        invocationPath: 'build-adapter',
         sandboxMode: 'read-only',
         promptTransport: 'stdin',
         command: '/Users/localuser/bin/evil-cli',
@@ -298,7 +298,7 @@ describe('export + quarantine + cli', () => {
         name: 'arm-a',
         provider: 'provider-a',
         model: 'model-a',
-        invocationPath: 'poetic-adapter',
+        invocationPath: 'build-adapter',
         sandboxMode: 'read-only',
         promptTransport: 'stdin',
       },
@@ -367,7 +367,7 @@ describe('export + quarantine + cli', () => {
       assert.equal(man.experiment.timeoutMs, 900000);
       assert.equal(man.experiment.arms[0].provider, 'provider-a');
       assert.equal(man.experiment.arms[0].model, 'model-a');
-      assert.equal(man.experiment.arms[0].invocationPath, 'poetic-adapter');
+      assert.equal(man.experiment.arms[0].invocationPath, 'build-adapter');
       assert.equal(man.experiment.arms[0].sandboxMode, 'read-only');
 
       const manText = JSON.stringify(man);

@@ -8,7 +8,7 @@
       "identifier": "qwen36-27b-6bit",
       "indexedModelIdentifier": "mlx-community/Qwen3.6-27B-6bit",
       "quantization": "6bit",
-      "poeticVariant": "opencode:lmstudio/qwen36-27b-6bit:conservative:local"
+      "buildVariant": "opencode:lmstudio/qwen36-27b-6bit:conservative:local"
     },
     {
       "arm": "qwen36-27b-4bit",
@@ -17,7 +17,7 @@
       "indexedModelIdentifier": "unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-UD-Q4_K_XL.gguf",
       "quantization": "Q4_K_XL",
       "disableMtp": true,
-      "poeticVariant": "opencode:lmstudio/qwen36-27b-4bit:conservative:local"
+      "buildVariant": "opencode:lmstudio/qwen36-27b-4bit:conservative:local"
     },
     {
       "arm": "qwen36-35b-a3b-6bit",
@@ -25,7 +25,7 @@
       "identifier": "qwen36-35b-a3b-6bit",
       "indexedModelIdentifier": "mlx-community/Qwen3.6-35B-A3B-6bit",
       "quantization": "6bit",
-      "poeticVariant": "opencode:lmstudio/qwen36-35b-a3b-6bit:conservative:local"
+      "buildVariant": "opencode:lmstudio/qwen36-35b-a3b-6bit:conservative:local"
     }
   ]
 }

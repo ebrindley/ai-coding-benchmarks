@@ -1,6 +1,6 @@
 /**
  * Capability isolation (execution workspaces outside campaign tree) and
- * fresh poetic-adapter result binding (requestId + secure outputPath prep).
+ * fresh build-adapter result binding (requestId + secure outputPath prep).
  *
  * Honesty bound for isolation tests: filesystem-tree separation only —
  * not OS-level read isolation.
@@ -23,7 +23,7 @@ import {
   realpath,
   access,
 } from 'node:fs/promises';
-import { FAKE_POETIC_WRITE_FULL_V1_CJS, buildValidInvokeResultV1 } from './helpers/poetic-result-v1.js';
+import { FAKE_BUILD_WRITE_FULL_V1_CJS, buildValidInvokeResultV1 } from './helpers/build-result-v1.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -155,12 +155,12 @@ describe('capability isolation: workspaces outside campaign tree', () => {
     const { runCampaign } = await import('../harness/run.js');
     const { readTrialResult } = await import('../harness/results.js');
     const campaignDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-model-bind-'));
-    const binDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-fake-poetic-'));
+    const binDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-fake-build-'));
     try {
-      // Fake Poetic: writes a full success artifact with WRONG requestId and a
+      // Fake Build: writes a full success artifact with WRONG requestId and a
       // tempting resolved model id on disk. Harness must clear parsedOutput and
       // never reopen outputPath to attribute that model.
-      const bin = path.join(binDir, 'fake-poetic');
+      const bin = path.join(binDir, 'fake-build');
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -174,7 +174,7 @@ const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
 // naive path reader could still find success-shaped content.
 const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', 'stale-other-request');
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
-${FAKE_POETIC_WRITE_FULL_V1_CJS}
+${FAKE_BUILD_WRITE_FULL_V1_CJS}
 const req = { requestId: 'stale-other-request', provider: 'fake', model: 'requested-arm-model' };
 writeFullV1(req, out, {
   requestId: 'stale-other-request',
@@ -203,8 +203,8 @@ process.exit(0);
               name: 'adapter-mismatch',
               provider: 'fake',
               model: 'requested-arm-model',
-              invocationPath: 'poetic-adapter',
-              poeticBin: bin,
+              invocationPath: 'build-adapter',
+              buildBin: bin,
             },
           ],
         },
@@ -252,12 +252,12 @@ describe('fresh adapter result binding', () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bind-wrong-'));
     try {
       const {
-        invokePoeticAdapter,
-        POETIC_INVOKE_RESULT_SCHEMA,
+        invokeBuildAdapter,
+        BUILD_INVOKE_RESULT_SCHEMA,
       } = await import('../harness/invokers/index.js');
 
-      // Fake poetic exits 0 without overwriting output (stale file would remain if not cleared).
-      const bin = path.join(dir, 'fake-poetic');
+      // Fake build exits 0 without overwriting output (stale file would remain if not cleared).
+      const bin = path.join(dir, 'fake-build');
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -277,7 +277,7 @@ process.exit(0);
       await writeFile(
         outputPath,
         JSON.stringify({
-          schema: POETIC_INVOKE_RESULT_SCHEMA,
+          schema: BUILD_INVOKE_RESULT_SCHEMA,
           requestId: 'stale-other-request',
           outcome: { kind: 'success', reasonCode: 'planted' },
           model: { resolved: { availability: 'unavailable', reason: 'n/a' } },
@@ -287,12 +287,12 @@ process.exit(0);
 
       const campaignDir = path.join(dir, '_campaign');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-      const result = await invokePoeticAdapter({
-        poeticBin: bin,
+      const result = await invokeBuildAdapter({
+        buildBin: bin,
         requestPath,
         outputPath,
         request: {
-          schema: 'poetic.provider.invoke.request.v1',
+          schema: 'build.provider.invoke.request.v1',
           requestId: 'current-request-id',
           provider: 'fake',
           prompt: 'x',
@@ -316,11 +316,11 @@ process.exit(0);
   it('rejects successful artifact written with mismatched requestId', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bind-mis-'));
     try {
-      const { invokePoeticAdapter } = await import(
+      const { invokeBuildAdapter } = await import(
         '../harness/invokers/index.js'
       );
 
-      const bin = path.join(dir, 'fake-poetic');
+      const bin = path.join(dir, 'fake-build');
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -336,7 +336,7 @@ fs.mkdirSync(qDir, { recursive: true });
 fs.writeFileSync(path.join(qDir, 'stdout.txt'), '');
 fs.writeFileSync(path.join(qDir, 'stderr.txt'), '');
 fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
+  schema: 'build.provider.invoke.result.v1',
   requestId: 'wrong-id',
   outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
   provider: { requested: avail('fake'), resolved: avail('fake') },
@@ -345,7 +345,7 @@ fs.writeFileSync(out, JSON.stringify({
     resolved: unavail('n/a'),
     resolutionSource: 'unavailable',
   },
-  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  versions: { build: avail('t'), providerCli: unavail('n/a') },
   posture: {
     fingerprint: avail('${'a'.repeat(64)}'),
     argvRedacted: avail(['x']),
@@ -373,12 +373,12 @@ process.exit(0);
       const outputPath = path.join(dir, 'out.json');
       const campaignDir = path.join(dir, '_campaign');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-      const result = await invokePoeticAdapter({
-        poeticBin: bin,
+      const result = await invokeBuildAdapter({
+        buildBin: bin,
         requestPath,
         outputPath,
         request: {
-          schema: 'poetic.provider.invoke.request.v1',
+          schema: 'build.provider.invoke.request.v1',
           requestId: 'expected-id',
           provider: 'fake',
           prompt: 'x',
@@ -406,11 +406,11 @@ process.exit(0);
   it('accepts matching requestId as success', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bind-ok-'));
     try {
-      const { invokePoeticAdapter } = await import(
+      const { invokeBuildAdapter } = await import(
         '../harness/invokers/index.js'
       );
 
-      const bin = path.join(dir, 'fake-poetic');
+      const bin = path.join(dir, 'fake-build');
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -431,7 +431,7 @@ const unavail = (r) => ({ availability: 'unavailable', reason: r });
 const now = new Date().toISOString();
 const rm = req.model != null && String(req.model).trim() !== '' ? String(req.model) : null;
 fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
+  schema: 'build.provider.invoke.result.v1',
   requestId: req.requestId,
   outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
   provider: { requested: avail(req.provider), resolved: avail(req.provider) },
@@ -440,7 +440,7 @@ fs.writeFileSync(out, JSON.stringify({
     resolved: avail('m1'),
     resolutionSource: 'provider-result',
   },
-  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  versions: { build: avail('t'), providerCli: unavail('n/a') },
   posture: {
     fingerprint: avail('${'a'.repeat(64)}'),
     argvRedacted: avail(['x']),
@@ -473,12 +473,12 @@ process.exit(0);
       const outputPath = path.join(dir, 'out.json');
       const campaignDir = path.join(dir, '_campaign');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-      const result = await invokePoeticAdapter({
-        poeticBin: bin,
+      const result = await invokeBuildAdapter({
+        buildBin: bin,
         requestPath,
         outputPath,
         request: {
-          schema: 'poetic.provider.invoke.request.v1',
+          schema: 'build.provider.invoke.request.v1',
           requestId: 'match-me',
           provider: 'fake',
           prompt: 'x',
@@ -507,7 +507,7 @@ process.exit(0);
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-bind-sym-'));
     try {
       const {
-        invokePoeticAdapter,
+        invokeBuildAdapter,
         prepareFreshOutputPath,
       } = await import('../harness/invokers/index.js');
 
@@ -515,7 +515,7 @@ process.exit(0);
       await writeFile(
         target,
         JSON.stringify({
-          schema: 'poetic.provider.invoke.result.v1',
+          schema: 'build.provider.invoke.result.v1',
           requestId: 'via-symlink',
           outcome: { kind: 'success', reasonCode: 'planted' },
         }),
@@ -531,7 +531,7 @@ process.exit(0);
       assert.equal(prep.ok, false);
       assert.match(String(prep.infraFailure), /symlink/i);
 
-      const bin = path.join(dir, 'fake-poetic');
+      const bin = path.join(dir, 'fake-build');
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -543,12 +543,12 @@ process.exit(0);
 
       const campaignDir = path.join(dir, '_campaign');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-      const result = await invokePoeticAdapter({
-        poeticBin: bin,
+      const result = await invokeBuildAdapter({
+        buildBin: bin,
         requestPath: path.join(dir, 'req.json'),
         outputPath,
         request: {
-          schema: 'poetic.provider.invoke.request.v1',
+          schema: 'build.provider.invoke.request.v1',
           requestId: 'current',
           provider: 'fake',
           prompt: 'x',
@@ -572,14 +572,14 @@ process.exit(0);
     }
   });
 
-  it('Poetic path contract: output.json → output.invoke-artifacts/<requestId>/; multi-dot; e2e ingest', async () => {
+  it('Build path contract: output.json → output.invoke-artifacts/<requestId>/; multi-dot; e2e ingest', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-raw-contract-'));
     try {
       const {
         expectedProviderRawPaths,
         resolveProviderRawArtifactsDirName,
         ingestProviderRawEvidence,
-        invokePoeticAdapter,
+        invokeBuildAdapter,
         PROVIDER_RAW_ARTIFACTS_SUFFIX,
       } = await import('../harness/invokers/index.js');
 
@@ -644,7 +644,7 @@ process.exit(0);
         'payload.invoke-artifacts',
       );
 
-      // End-to-end: fake Poetic writes under output.invoke-artifacts/<id>/
+      // End-to-end: fake Build writes under output.invoke-artifacts/<id>/
       await mkdir(paths.dir, { recursive: true, mode: 0o700 });
       await writeFile(paths.stdoutPath, 'CONTRACT_STDOUT\n', 'utf8');
       await writeFile(paths.stderrPath, 'CONTRACT_STDERR\n', 'utf8');
@@ -656,7 +656,7 @@ process.exit(0);
       assert.equal(ingested.stdout, 'CONTRACT_STDOUT\n');
       assert.equal(ingested.stderr, 'CONTRACT_STDERR\n');
 
-      const bin = path.join(dir, 'fake-poetic-contract');
+      const bin = path.join(dir, 'fake-build-contract');
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -670,7 +670,7 @@ const base = path.basename(path.resolve(out));
 const stem = base.toLowerCase().endsWith('.json') ? base.slice(0, -5) : base;
 const rawDir = path.join(path.dirname(path.resolve(out)), stem + '.invoke-artifacts', req.requestId);
 fs.mkdirSync(rawDir, { recursive: true, mode: 0o700 });
-${FAKE_POETIC_WRITE_FULL_V1_CJS}
+${FAKE_BUILD_WRITE_FULL_V1_CJS}
 writeFullV1(req, out, {
   stdout: 'E2E_CONTRACT_OUT\\n',
   stderr: 'E2E_CONTRACT_ERR\\n',
@@ -684,12 +684,12 @@ process.exit(0);
       const campaignDir = path.join(dir, '_camp');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
       const e2eOut = path.join(dir, 'scratch', 'output.json');
-      const e2e = await invokePoeticAdapter({
-        poeticBin: bin,
+      const e2e = await invokeBuildAdapter({
+        buildBin: bin,
         requestPath: path.join(dir, 'scratch', 'request.json'),
         outputPath: e2eOut,
         request: {
-          schema: 'poetic.provider.invoke.request.v1',
+          schema: 'build.provider.invoke.request.v1',
           requestId: 'e2e-req',
           provider: 'fake',
           prompt: 'x',
@@ -725,7 +725,7 @@ process.exit(0);
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-raw-path-'));
     try {
       const {
-        invokePoeticAdapter,
+        invokeBuildAdapter,
         expectedProviderRawPaths,
         ingestProviderRawEvidence,
         bindInvokeResultToRequest,
@@ -800,7 +800,7 @@ process.exit(0);
       assert.equal(bound.success, false);
 
       // Full adapter: missing raw → no success
-      const bin = path.join(dir, 'fake-poetic-noraw');
+      const bin = path.join(dir, 'fake-build-noraw');
       await writeFile(
         bin,
         `#!/usr/bin/env node
@@ -808,7 +808,7 @@ const fs = require('fs');
 const args = process.argv.slice(2);
 const out = args[args.indexOf('--output') + 1];
 const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
-${FAKE_POETIC_WRITE_FULL_V1_CJS}
+${FAKE_BUILD_WRITE_FULL_V1_CJS}
 writeFullV1(req, out, { writeRaw: false, resolvedModel: 'm-x' });
 process.exit(0);
 `,
@@ -817,12 +817,12 @@ process.exit(0);
       await chmod(bin, 0o755);
       const campaignDir = path.join(dir, '_camp');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-      const noRaw = await invokePoeticAdapter({
-        poeticBin: bin,
+      const noRaw = await invokeBuildAdapter({
+        buildBin: bin,
         requestPath: path.join(dir, 'req-nr.json'),
         outputPath: path.join(dir, 'out-nr.json'),
         request: {
-          schema: 'poetic.provider.invoke.request.v1',
+          schema: 'build.provider.invoke.request.v1',
           requestId: 'no-raw-req',
           provider: 'fake',
           prompt: 'x',

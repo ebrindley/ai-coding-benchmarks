@@ -11,14 +11,14 @@
     "contrast": "model-only",
     "hold-fixed": "provider + invocationPath + posture identical; only `model` varies.",
     "note": "Whole suite runs (taskIds omitted). The interesting output is the per-language and per-category sub-score PROFILE, not the single composite: one model may lead on Python and trail on TypeScript. Report the profile, not just the winner.",
-    "replace-before-running": "Set `provider`/`model` to real ids registered in your Poetic install."
+    "replace-before-running": "Set `provider`/`model` to real ids registered in your Build install."
   },
   "arms": [
     {
       "name": "model-A",
       "provider": "REPLACE_WITH_PROVIDER",
       "model": "REPLACE_WITH_MODEL_A",
-      "invocationPath": "poetic-adapter",
+      "invocationPath": "build-adapter",
       "envAllowlist": [],
       "sandboxMode": "read-only"
     },
@@ -26,7 +26,7 @@
       "name": "model-B",
       "provider": "REPLACE_WITH_PROVIDER",
       "model": "REPLACE_WITH_MODEL_B",
-      "invocationPath": "poetic-adapter",
+      "invocationPath": "build-adapter",
       "envAllowlist": [],
       "sandboxMode": "read-only"
     }

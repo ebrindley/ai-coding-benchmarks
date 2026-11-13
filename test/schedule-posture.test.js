@@ -15,10 +15,10 @@ describe('schedule + aggregation refusal', () => {
       repetitions: 2,
       arms: [
         {
-          name: 'a-poetic',
-          provider: 'poetic',
+          name: 'a-build',
+          provider: 'build',
           model: 'model-x',
-          invocationPath: 'poetic-adapter',
+          invocationPath: 'build-adapter',
         },
         {
           name: 'b-native',
@@ -70,7 +70,7 @@ describe('schedule + aggregation refusal', () => {
         arm: 'b',
         taskId: 't',
         state: 'pending',
-        invocationPath: 'poetic-adapter',
+        invocationPath: 'build-adapter',
       },
     ];
     const active = [
@@ -103,7 +103,7 @@ describe('schedule + aggregation refusal', () => {
         id: 't1',
         arm: 'a',
         taskId: 'task',
-        invocationPath: 'poetic-adapter',
+        invocationPath: 'build-adapter',
         requestedModel: 'm1',
         resolvedModel: null,
         postureFingerprint: 'a'.repeat(64),
@@ -140,7 +140,7 @@ describe('schedule + aggregation refusal', () => {
     );
     assert.equal(mixed.length, 0);
     const paths = new Set(report.cells.map((c) => c.invocationPath));
-    assert.ok(paths.has('poetic-adapter'));
+    assert.ok(paths.has('build-adapter'));
     assert.ok(paths.has('native-cli'));
     // When resolvedModel is unavailable, distinct requestedModels stay separate
     const nativeCells = report.cells.filter((c) => c.invocationPath === 'native-cli');
@@ -210,7 +210,7 @@ describe('schedule + aggregation refusal', () => {
 
   it('withholds rates from resolved-model partitions of one frozen scheduled slice', async () => {
     const { buildReport } = await import('../harness/summary.js');
-    const base = { arm: 'a', taskId: 't', invocationPath: 'poetic-adapter', requestedModel: 'm', postureFingerprint: null };
+    const base = { arm: 'a', taskId: 't', invocationPath: 'build-adapter', requestedModel: 'm', postureFingerprint: null };
     const schedule = ['pass', 'unattested'].map((id) => ({ ...base, id }));
     for (const classification of ['TIMEOUT', 'INFRA_FAIL']) {
       const results = [

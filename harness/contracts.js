@@ -2,12 +2,12 @@
  * Shared module contracts for the external benchmark harness.
  * Pure documentation of shapes — no runtime dependency on this file required.
  *
- * invocationPath (experiment arms): 'poetic-adapter' | 'native-cli' | 'poetic-system'
+ * invocationPath (experiment arms): 'build-adapter' | 'native-cli' | 'build-system'
  * Trial classification precedence: TIMEOUT > INFRA_FAIL > NO_OP > FAIL > PASS
  *
- * Poetic adapter bridge:
- * - request schema: poetic.provider.invoke.request.v1
- * - result schema:  poetic.provider.invoke.result.v1
+ * Build adapter bridge:
+ * - request schema: build.provider.invoke.request.v1
+ * - result schema:  build.provider.invoke.result.v1
  * - result.outcome.kind: success | timeout | provider_error | refusal | aborted | internal_error
  * - Bridge may exit 0 after writing the artifact; harness maps outcome.kind/reasonCode
  *   and never treats non-success kinds as PASS.
@@ -18,9 +18,9 @@
 export const SCHEMA_VERSION = 1;
 
 export const INVOCATION_PATHS = Object.freeze([
-  'poetic-adapter',
+  'build-adapter',
   'native-cli',
-  'poetic-system',
+  'build-system',
 ]);
 
 export const TRIAL_STATUSES = Object.freeze([

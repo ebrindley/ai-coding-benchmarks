@@ -26,7 +26,7 @@ you run it:
   **separate execution root** (not under the campaign control tree). They must
   not inherit this repository's agent instruction files as trusted policy for
   the model under test.
-- **Provider invocations** (poetic-adapter, native-cli, poetic-system) are
+- **Provider invocations** (build-adapter, native-cli, build-system) are
   wrapped in an OS confinement layer while the process tree is alive:
   - macOS: `sandbox-exec` with `(allow default)` plus explicit **deny** of
     `file-read*` / `file-write*` on the canonical campaign tree.
@@ -38,7 +38,7 @@ you run it:
     **after** the provider exits.
   - Honesty: this denies access to the campaign path under the outer
     confinement; it does not claim full multi-tenant isolation, and nested
-    sandboxes inside Poetic (if any) run *within* this outer restriction.
+    sandboxes inside Build (if any) run *within* this outer restriction.
 - Raw provider output is **secret-bearing**. It is quarantined under the
   campaign directory, excluded from sanitized export by default, and must not be
   committed. The `export` command produces a sanitized bundle; upload/publish is

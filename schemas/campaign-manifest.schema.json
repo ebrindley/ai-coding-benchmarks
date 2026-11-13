@@ -83,7 +83,7 @@
           "repetition": { "type": "integer", "minimum": 1 },
           "invocationPath": {
             "type": "string",
-            "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+            "enum": ["build-adapter", "native-cli", "build-system"]
           },
           "requestedModel": { "type": "string" },
           "resolvedModel": { "type": ["string", "null"] },

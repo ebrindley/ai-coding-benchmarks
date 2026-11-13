@@ -50,11 +50,11 @@ import {
 export const PROTOCOL_EVIDENCE_VERSION = 1;
 
 /**
- * Stable schema id for poetic-adapter protocol evidence (must match invoker parse).
+ * Stable schema id for build-adapter protocol evidence (must match invoker parse).
  * Re-declared here so results verification does not require loading invokers.
  */
-export const PROTOCOL_SCHEMA_POETIC_INVOKE_RESULT_V1 =
-  'poetic.provider.invoke.result.v1';
+export const PROTOCOL_SCHEMA_BUILD_INVOKE_RESULT_V1 =
+  'build.provider.invoke.result.v1';
 
 /** Bound for campaign result.json / raw evidence nofollow reads. */
 const CAMPAIGN_READ_MAX_BYTES = DEFAULT_SAFE_READ_MAX_BYTES;
@@ -1183,9 +1183,9 @@ export function isUnavailableForReport(result) {
  * outcomeKind / reasonCode are bounded identifiers only (never free-form text).
  * Transport exitCode is intentionally excluded — callers persist it separately.
  *
- * For poetic-adapter, stamps protocolSchema + protocolEvidenceVersion whenever
+ * For build-adapter, stamps protocolSchema + protocolEvidenceVersion whenever
  * any bounded protocol field is present. Non-adapter paths may carry bounded
- * fields without claiming the poetic result schema.
+ * fields without claiming the build result schema.
  *
  * @param {string} invocationPath
  * @param {object | null | undefined} invokerResult
@@ -1205,7 +1205,7 @@ export function extractProtocolEvidence(invocationPath, invokerResult) {
   const reasonCode = sanitizeBoundedIdentifier(r.reasonCode);
   const hasAny = outcomeKind != null || reasonCode != null;
 
-  if (invocationPath === 'poetic-adapter') {
+  if (invocationPath === 'build-adapter') {
     if (!hasAny) {
       // No parse-bound protocol fields (e.g. spawn failed before artifact).
       // Leave absent rather than inventing SUCCESS / empty schema claims.
@@ -1215,7 +1215,7 @@ export function extractProtocolEvidence(invocationPath, invokerResult) {
       outcomeKind,
       reasonCode,
       protocolEvidenceVersion: PROTOCOL_EVIDENCE_VERSION,
-      protocolSchema: PROTOCOL_SCHEMA_POETIC_INVOKE_RESULT_V1,
+      protocolSchema: PROTOCOL_SCHEMA_BUILD_INVOKE_RESULT_V1,
     };
   }
 
@@ -1224,21 +1224,21 @@ export function extractProtocolEvidence(invocationPath, invokerResult) {
     outcomeKind,
     reasonCode,
     protocolEvidenceVersion: PROTOCOL_EVIDENCE_VERSION,
-    // Non-adapter paths do not claim the poetic invoke result schema.
+    // Non-adapter paths do not claim the build invoke result schema.
     protocolSchema: null,
   };
 }
 
 /**
- * Whether a stored result claims reportable poetic-adapter protocol evidence.
+ * Whether a stored result claims reportable build-adapter protocol evidence.
  * Raw-unavailable / non-adapter records do not claim it (back-compat soft path).
  *
  * @param {object} result
  * @returns {boolean}
  */
-export function claimsPoeticAdapterProtocolEvidence(result) {
+export function claimsBuildAdapterProtocolEvidence(result) {
   if (!result || typeof result !== 'object') return false;
-  if (result.invocationPath !== 'poetic-adapter') return false;
+  if (result.invocationPath !== 'build-adapter') return false;
   // Explicit unavailability: not reportable, no protocol requirement.
   if (hasRawEvidenceUnavailableFlag(result)) return false;
   if (isUnavailableForReport(result)) return false;
@@ -1246,23 +1246,23 @@ export function claimsPoeticAdapterProtocolEvidence(result) {
 }
 
 /**
- * Collect protocol-evidence issues for reportable poetic-adapter records.
+ * Collect protocol-evidence issues for reportable build-adapter records.
  * Fail closed: missing/invalid outcomeKind, reasonCode, version, or schema.
  * Older records without protocol fields fail when they claim reportable
- * poetic-adapter evidence (raw digests present, rawEvidenceUnavailable absent).
+ * build-adapter evidence (raw digests present, rawEvidenceUnavailable absent).
  * Non-adapter and unavailable records return no issues (existing contract).
  *
  * @param {object} result
  * @returns {string[]}
  */
 export function collectProtocolEvidenceIssues(result) {
-  if (!claimsPoeticAdapterProtocolEvidence(result)) return [];
+  if (!claimsBuildAdapterProtocolEvidence(result)) return [];
   /** @type {string[]} */
   const issues = [];
   if (result.protocolEvidenceVersion !== PROTOCOL_EVIDENCE_VERSION) {
     issues.push('protocolEvidenceVersion');
   }
-  if (result.protocolSchema !== PROTOCOL_SCHEMA_POETIC_INVOKE_RESULT_V1) {
+  if (result.protocolSchema !== PROTOCOL_SCHEMA_BUILD_INVOKE_RESULT_V1) {
     issues.push('protocolSchema');
   }
   if (!isBoundedIdentifier(result.outcomeKind)) {
@@ -1434,7 +1434,7 @@ export async function verifyTrialEvidenceDigests(
     };
   }
 
-  // Reportable poetic-adapter evidence requires versioned neutral protocol fields.
+  // Reportable build-adapter evidence requires versioned neutral protocol fields.
   // Transport exitCode is not a substitute. Older records without these fields
   // fail closed when they claim reportable adapter evidence.
   const protocolIssues = collectProtocolEvidenceIssues(result);
@@ -1447,7 +1447,7 @@ export async function verifyTrialEvidenceDigests(
       unavailable: false,
       reportable: false,
       recomputed,
-      error: `poetic-adapter protocol evidence missing or invalid (fail closed): ${protocolIssues.join(', ')}`,
+      error: `build-adapter protocol evidence missing or invalid (fail closed): ${protocolIssues.join(', ')}`,
     };
   }
 

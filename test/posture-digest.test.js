@@ -19,12 +19,12 @@ describe('posture + digest', () => {
   it('posture fingerprint is stable and sensitive to path/model-adjacent config', async () => {
     const { computePostureFingerprint } = await import('../harness/posture.js');
     const a = computePostureFingerprint({
-      invocationPath: 'poetic-adapter',
+      invocationPath: 'build-adapter',
       envAllowlist: ['B', 'A'],
       sandboxMode: 'strict',
     });
     const b = computePostureFingerprint({
-      invocationPath: 'poetic-adapter',
+      invocationPath: 'build-adapter',
       envAllowlist: ['A', 'B'],
       sandboxMode: 'strict',
     });
@@ -46,7 +46,7 @@ describe('posture + digest', () => {
   });
 
   it('distinguishes supported effective invocation settings without splitting defaults', async () => {
-    const { computePostureFingerprint, resolveTrialTimeoutMs, resolvePoeticBin } =
+    const { computePostureFingerprint, resolveTrialTimeoutMs, resolveBuildBin } =
       await import('../harness/posture.js');
     const base = {
       invocationPath: 'native-cli', provider: 'provider-a', command: 'cli',
@@ -59,11 +59,11 @@ describe('posture + digest', () => {
       { args: ['--model', 'model-b'] }, { promptTransport: 'prompt-file' },
       { timeoutMs: 2000 },
     ]) assert.notEqual(fingerprint, computePostureFingerprint({ ...base, ...delta }));
-    const poetic = { invocationPath: 'poetic-adapter', provider: 'provider-a', poeticBin: 'poetic-a' };
-    assert.notEqual(computePostureFingerprint(poetic), computePostureFingerprint({ ...poetic, poeticBin: 'poetic-b' }));
-    assert.equal(resolvePoeticBin(undefined, ''), 'poetic');
-    assert.equal(resolvePoeticBin(undefined, 'env-poetic'), 'env-poetic');
-    assert.equal(resolvePoeticBin('injected-poetic', 'env-poetic'), 'injected-poetic');
+    const build = { invocationPath: 'build-adapter', provider: 'provider-a', buildBin: 'build-a' };
+    assert.notEqual(computePostureFingerprint(build), computePostureFingerprint({ ...build, buildBin: 'build-b' }));
+    assert.equal(resolveBuildBin(undefined, ''), 'build');
+    assert.equal(resolveBuildBin(undefined, 'env-build'), 'env-build');
+    assert.equal(resolveBuildBin('injected-build', 'env-build'), 'injected-build');
     assert.equal(resolveTrialTimeoutMs(undefined), 600_000);
   });
 

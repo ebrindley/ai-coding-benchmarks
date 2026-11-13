@@ -50,7 +50,7 @@
           "provider": { "type": "string" },
           "invocationPath": {
             "type": "string",
-            "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+            "enum": ["build-adapter", "native-cli", "build-system"]
           },
           "requestedModel": { "type": ["string", "null"] },
           "resolvedModel": { "type": ["string", "null"] },
@@ -78,7 +78,7 @@
                 "arm": { "type": "string" },
                 "invocationPath": {
                   "type": "string",
-                  "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+                  "enum": ["build-adapter", "native-cli", "build-system"]
                 },
                 "requestedModel": { "type": ["string", "null"] },
                 "resolvedModel": { "type": ["string", "null"] },
@@ -214,7 +214,7 @@
         "taskId": { "type": "string" },
         "invocationPath": {
           "type": "string",
-          "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+          "enum": ["build-adapter", "native-cli", "build-system"]
         },
         "requestedModel": { "type": ["string", "null"] },
         "resolvedModel": { "type": ["string", "null"] },

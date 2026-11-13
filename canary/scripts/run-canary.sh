@@ -19,7 +19,7 @@ fi
 variants=()
 while IFS= read -r variant; do
   variants[${#variants[@]}]="$variant"
-done < <(jq -r '.models[].poeticVariant' "$models")
+done < <(jq -r '.models[].buildVariant' "$models")
 if [[ "${#variants[@]}" -ne 3 ]]; then
   printf 'Error: expected exactly three model variants.\n' >&2
   exit 1
@@ -36,7 +36,7 @@ run_task() {
   printf '\nRunning %s with all three model arms.\n' "$task_id"
   (
     cd "$workspace"
-    poetic compete \
+    build run competition \
       --task-file .canary/task.yaml \
       --variant "${variants[0]}" \
       --variant "${variants[1]}" \

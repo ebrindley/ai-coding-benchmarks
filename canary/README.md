@@ -1,4 +1,4 @@
-# Qwen3.6 Poetic Canary
+# Qwen3.6 Build Canary
 
 This disposable canary compares three locally hosted Qwen3.6 configurations:
 
@@ -7,8 +7,8 @@ This disposable canary compares three locally hosted Qwen3.6 configurations:
 - Qwen3.6 35B-A3B MLX 6-bit
 
 Each task runs sequentially. Within a task, all three model arms run
-simultaneously through OpenCode and Poetic with a concurrency limit of three.
-Poetic uses an anonymized AI primary judge and the multi-lens secondary judge.
+simultaneously through OpenCode and Build with a concurrency limit of three.
+Build uses an anonymized AI primary judge and the multi-lens secondary judge.
 Lab mode preserves every variant worktree and never applies a winner.
 
 The installed MLX OptiQ 4-bit model is excluded because LM Studio MLX 1.10.1
@@ -55,5 +55,5 @@ It also requires the checkout's corpus and harness to match the pin. Preparing
 pinned workspaces does not bypass that check or update the pin.
 
 Only the OpenCode model-list probe uses the ignored `canary/.config/` directory
-as its XDG configuration home. Poetic and the canary run keep their existing
+as its XDG configuration home. Build and the canary run keep their existing
 configuration resolution.

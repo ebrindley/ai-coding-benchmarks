@@ -1,6 +1,6 @@
 /**
  * Neutral protocol evidence: outcomeKind/reasonCode persistence, fail-closed
- * verify for reportable poetic-adapter records, sanitized export (no raw text),
+ * verify for reportable build-adapter records, sanitized export (no raw text),
  * and chunk-boundary capture fidelity.
  */
 
@@ -25,14 +25,14 @@ import {
  * @param {string} campaign
  * @param {object} extras
  */
-async function seedReportablePoeticTrial(campaign, extras = {}) {
+async function seedReportableBuildTrial(campaign, extras = {}) {
   const {
     quarantineRawOutput,
     writeTrialResult,
     buildTrialDigests,
     computeArtifactDigest,
     PROTOCOL_EVIDENCE_VERSION,
-    PROTOCOL_SCHEMA_POETIC_INVOKE_RESULT_V1,
+    PROTOCOL_SCHEMA_BUILD_INVOKE_RESULT_V1,
   } = await import('../harness/results.js');
 
   const trialId = extras.id ?? 't-proto';
@@ -49,7 +49,7 @@ async function seedReportablePoeticTrial(campaign, extras = {}) {
   const frozen = completeManifestTrial({
     id: trialId,
     experimentId: 'exp-proto',
-    invocationPath: 'poetic-adapter',
+    invocationPath: 'build-adapter',
     postureFingerprint: posture,
     state: extras.state ?? 'completed',
     requestedModel: extras.requestedModel ?? 'm-req',
@@ -64,7 +64,7 @@ async function seedReportablePoeticTrial(campaign, extras = {}) {
           protocolEvidenceVersion:
             extras.protocolEvidenceVersion ?? PROTOCOL_EVIDENCE_VERSION,
           protocolSchema:
-            extras.protocolSchema ?? PROTOCOL_SCHEMA_POETIC_INVOKE_RESULT_V1,
+            extras.protocolSchema ?? PROTOCOL_SCHEMA_BUILD_INVOKE_RESULT_V1,
         };
 
   const written = await writeTrialResult(
@@ -73,7 +73,7 @@ async function seedReportablePoeticTrial(campaign, extras = {}) {
     completeTrialResult({
       id: trialId,
       experimentId: 'exp-proto',
-      invocationPath: 'poetic-adapter',
+      invocationPath: 'build-adapter',
       postureFingerprint: posture,
       requestedModel: extras.requestedModel ?? 'm-req',
       state: extras.state ?? 'completed',
@@ -96,14 +96,14 @@ async function seedReportablePoeticTrial(campaign, extras = {}) {
 }
 
 describe('protocol evidence extract + persist shape', () => {
-  it('extractProtocolEvidence stamps versioned poetic fields; ignores free-form', async () => {
+  it('extractProtocolEvidence stamps versioned build fields; ignores free-form', async () => {
     const {
       extractProtocolEvidence,
       PROTOCOL_EVIDENCE_VERSION,
-      PROTOCOL_SCHEMA_POETIC_INVOKE_RESULT_V1,
+      PROTOCOL_SCHEMA_BUILD_INVOKE_RESULT_V1,
     } = await import('../harness/results.js');
 
-    const success = extractProtocolEvidence('poetic-adapter', {
+    const success = extractProtocolEvidence('build-adapter', {
       outcomeKind: 'success',
       reasonCode: 'SUCCESS',
       exitCode: 0,
@@ -112,10 +112,10 @@ describe('protocol evidence extract + persist shape', () => {
       outcomeKind: 'success',
       reasonCode: 'SUCCESS',
       protocolEvidenceVersion: PROTOCOL_EVIDENCE_VERSION,
-      protocolSchema: PROTOCOL_SCHEMA_POETIC_INVOKE_RESULT_V1,
+      protocolSchema: PROTOCOL_SCHEMA_BUILD_INVOKE_RESULT_V1,
     });
 
-    const modelUnresolved = extractProtocolEvidence('poetic-adapter', {
+    const modelUnresolved = extractProtocolEvidence('build-adapter', {
       outcomeKind: 'provider_error',
       reasonCode: 'MODEL_UNRESOLVED',
       exitCode: 0,
@@ -126,12 +126,12 @@ describe('protocol evidence extract + persist shape', () => {
     assert.equal(modelUnresolved.reasonCode, 'MODEL_UNRESOLVED');
     assert.equal(
       modelUnresolved.protocolSchema,
-      PROTOCOL_SCHEMA_POETIC_INVOKE_RESULT_V1,
+      PROTOCOL_SCHEMA_BUILD_INVOKE_RESULT_V1,
     );
     assert.ok(!JSON.stringify(modelUnresolved).includes('Bearer'));
     assert.ok(!JSON.stringify(modelUnresolved).includes('sk-test'));
 
-    const timeout = extractProtocolEvidence('poetic-adapter', {
+    const timeout = extractProtocolEvidence('build-adapter', {
       outcomeKind: 'timeout',
       reasonCode: 'PROVIDER_TIMEOUT',
       exitCode: null,
@@ -139,13 +139,13 @@ describe('protocol evidence extract + persist shape', () => {
     assert.equal(timeout.outcomeKind, 'timeout');
     assert.equal(timeout.reasonCode, 'PROVIDER_TIMEOUT');
 
-    const freeFormDropped = extractProtocolEvidence('poetic-adapter', {
+    const freeFormDropped = extractProtocolEvidence('build-adapter', {
       outcomeKind: 'provider said nope with spaces',
       reasonCode: 'free form secret=hunter2',
     });
     assert.deepEqual(freeFormDropped, {});
 
-    const empty = extractProtocolEvidence('poetic-adapter', {
+    const empty = extractProtocolEvidence('build-adapter', {
       exitCode: 1,
       success: false,
     });
@@ -178,7 +178,7 @@ describe('protocol evidence verify fail-closed', () => {
         { id: 'unstored-infra', classification: 'INFRA_FAIL', resultExtras: { changedFileCount: 1 }, ok: true },
       ];
       for (const c of cases) {
-        const { frozen, result } = await seedReportablePoeticTrial(campaign, c);
+        const { frozen, result } = await seedReportableBuildTrial(campaign, c);
         const verified = await verifyTrialEvidenceDigests(campaign, c.id, result, { manifestTrial: frozen });
         assert.equal(verified.ok, c.ok, `${c.id}: ${verified.error}`);
         if (!c.ok) assert.ok(verified.mismatches.includes('classification:established-outcome'), c.id);
@@ -192,9 +192,9 @@ describe('protocol evidence verify fail-closed', () => {
     const { tryAdoptDurableTrialResult, verifyCampaignEvidenceDigests, buildTrialDigests } = await import('../harness/results.js');
     const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-proto-terminal-unavailable-'));
     try {
-      const frozen = completeManifestTrial({ id: 'unavailable', invocationPath: 'poetic-adapter', state: 'failed' });
+      const frozen = completeManifestTrial({ id: 'unavailable', invocationPath: 'build-adapter', state: 'failed' });
       const { result } = await writeCompleteTrial(campaign, frozen.id, {
-        invocationPath: 'poetic-adapter', state: 'failed', classification: 'INFRA_FAIL',
+        invocationPath: 'build-adapter', state: 'failed', classification: 'INFRA_FAIL',
         digests: buildTrialDigests({ rawEvidenceUnavailable: true }),
       }, { manifestTrial: frozen });
       const adopted = await tryAdoptDurableTrialResult(campaign, { ...frozen, state: 'running' });
@@ -206,7 +206,7 @@ describe('protocol evidence verify fail-closed', () => {
       assert.deepEqual(check.reportableResults, []);
       const allUnavailable = await verifyCampaignEvidenceDigests(campaign, [frozen], [result]);
       assert.equal(allUnavailable.ok, false);
-      const sibling = await seedReportablePoeticTrial(campaign, { id: 'reportable' });
+      const sibling = await seedReportableBuildTrial(campaign, { id: 'reportable' });
       const partial = await verifyCampaignEvidenceDigests(campaign, [frozen, sibling.frozen], [result, sibling.result]);
       assert.equal(partial.ok, true, partial.error);
       assert.equal(partial.unavailable, 1);
@@ -221,7 +221,7 @@ describe('protocol evidence verify fail-closed', () => {
     }
   });
 
-  it('reportable poetic-adapter success/timeout/provider_error/MODEL_UNRESOLVED verify', async () => {
+  it('reportable build-adapter success/timeout/provider_error/MODEL_UNRESOLVED verify', async () => {
     const { verifyTrialEvidenceDigests } = await import(
       '../harness/results.js'
     );
@@ -262,7 +262,7 @@ describe('protocol evidence verify fail-closed', () => {
       ];
 
       for (const c of cases) {
-        const { frozen, result } = await seedReportablePoeticTrial(campaign, c);
+        const { frozen, result } = await seedReportableBuildTrial(campaign, c);
         const v = await verifyTrialEvidenceDigests(
           campaign,
           c.id,
@@ -284,19 +284,19 @@ describe('protocol evidence verify fail-closed', () => {
     }
   });
 
-  it('reportable poetic-adapter without protocol fields fails closed', async () => {
+  it('reportable build-adapter without protocol fields fails closed', async () => {
     const {
       verifyTrialEvidenceDigests,
       collectProtocolEvidenceIssues,
-      claimsPoeticAdapterProtocolEvidence,
+      claimsBuildAdapterProtocolEvidence,
     } = await import('../harness/results.js');
     const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-proto-miss-'));
     try {
-      const { frozen, result } = await seedReportablePoeticTrial(campaign, {
+      const { frozen, result } = await seedReportableBuildTrial(campaign, {
         id: 't-old',
         omitProtocol: true,
       });
-      assert.equal(claimsPoeticAdapterProtocolEvidence(result), true);
+      assert.equal(claimsBuildAdapterProtocolEvidence(result), true);
       const issues = collectProtocolEvidenceIssues(result);
       assert.ok(issues.includes('outcomeKind'));
       assert.ok(issues.includes('reasonCode'));
@@ -315,7 +315,7 @@ describe('protocol evidence verify fail-closed', () => {
     }
   });
 
-  it('raw-unavailable poetic-adapter does not require protocol fields (back-compat soft path)', async () => {
+  it('raw-unavailable build-adapter does not require protocol fields (back-compat soft path)', async () => {
     const { verifyTrialEvidenceDigests, buildTrialDigests } = await import(
       '../harness/results.js'
     );
@@ -324,7 +324,7 @@ describe('protocol evidence verify fail-closed', () => {
       const frozen = completeManifestTrial({
         id: 't-unavail',
         experimentId: 'exp-proto',
-        invocationPath: 'poetic-adapter',
+        invocationPath: 'build-adapter',
         state: 'failed',
       });
       const { result } = await writeCompleteTrial(
@@ -332,7 +332,7 @@ describe('protocol evidence verify fail-closed', () => {
         't-unavail',
         {
           experimentId: 'exp-proto',
-          invocationPath: 'poetic-adapter',
+          invocationPath: 'build-adapter',
           state: 'failed',
           classification: 'INFRA_FAIL',
           digests: buildTrialDigests({ rawEvidenceUnavailable: true }),
@@ -351,7 +351,7 @@ describe('protocol evidence verify fail-closed', () => {
     }
   });
 
-  it('native-cli reportable records do not require poetic protocol fields', async () => {
+  it('native-cli reportable records do not require build protocol fields', async () => {
     const {
       quarantineRawOutput,
       writeTrialResult,
@@ -405,13 +405,13 @@ describe('protocol evidence sanitized export', () => {
     const { exportSanitizedBundle } = await import('../harness/export.js');
     const {
       PROTOCOL_EVIDENCE_VERSION,
-      PROTOCOL_SCHEMA_POETIC_INVOKE_RESULT_V1,
+      PROTOCOL_SCHEMA_BUILD_INVOKE_RESULT_V1,
     } = await import('../harness/results.js');
 
     const campaign = await mkdtemp(path.join(os.tmpdir(), 'aicb-proto-export-'));
     const out = await mkdtemp(path.join(os.tmpdir(), 'aicb-proto-export-out-'));
     try {
-      const { trialId, frozen } = await seedReportablePoeticTrial(campaign, {
+      const { trialId, frozen } = await seedReportableBuildTrial(campaign, {
         id: 't1',
         outcomeKind: 'provider_error',
         reasonCode: 'MODEL_UNRESOLVED',
@@ -459,7 +459,7 @@ describe('protocol evidence sanitized export', () => {
       assert.equal(parsed.protocolEvidenceVersion, PROTOCOL_EVIDENCE_VERSION);
       assert.equal(
         parsed.protocolSchema,
-        PROTOCOL_SCHEMA_POETIC_INVOKE_RESULT_V1,
+        PROTOCOL_SCHEMA_BUILD_INVOKE_RESULT_V1,
       );
       assert.equal(parsed.exitCode, 0);
       // Free-form stripped
@@ -527,7 +527,7 @@ setImmediate(() => {
 
   it('ingestProviderRawEvidence retains exact file bytes for quarantine', async () => {
     const { ingestProviderRawEvidence, expectedProviderRawPaths } =
-      await import('../harness/invokers/poetic-adapter.js');
+      await import('../harness/invokers/build-adapter.js');
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-raw-bytes-'));
     try {
       const outputPath = path.join(dir, 'output.json');

@@ -233,7 +233,7 @@ export async function cleanupExecutionWorkspace(workspaceDir, opts = {}) {
 }
 
 /**
- * Non-protected trial branch for in-place Poetic edits.
+ * Non-protected trial branch for in-place Build edits.
  * @param {string} trialId
  * @returns {string}
  */
@@ -505,7 +505,7 @@ export async function copyFixtureTree(fixtureRoot, destRoot) {
 
 /**
  * Initialize a fresh git repository on a non-protected trial branch
- * `run/aicb-<safe-trial>` so in-place Poetic runs are not rejected.
+ * `run/aicb-<safe-trial>` so in-place Build runs are not rejected.
  *
  * @param {string} workspaceDir
  * @param {object} [opts]

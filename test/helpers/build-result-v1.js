@@ -1,6 +1,6 @@
 /**
- * Build a complete poetic.provider.invoke.result.v1 object matching
- * ProviderInvokeResultV1 (poetic types.ts). For harness tests/fakes.
+ * Build a complete build.provider.invoke.result.v1 object matching
+ * ProviderInvokeResultV1 (build types.ts). For harness tests/fakes.
  */
 
 /**
@@ -71,7 +71,7 @@ export function buildValidInvokeResultV1(opts = {}) {
 
   /** @type {Record<string, unknown>} */
   const result = {
-    schema: 'poetic.provider.invoke.result.v1',
+    schema: 'build.provider.invoke.result.v1',
     requestId,
     outcome: {
       kind: outcomeKind,
@@ -95,7 +95,7 @@ export function buildValidInvokeResultV1(opts = {}) {
         resolvedModel != null ? 'provider-result' : 'unavailable',
     },
     versions: {
-      poetic: available('0.0.0-test'),
+      build: available('0.0.0-test'),
       providerCli: unavailable('provider CLI version not probed'),
     },
     posture: {
@@ -146,10 +146,10 @@ export function buildValidInvokeResultV1(opts = {}) {
 }
 
 /**
- * CommonJS helper source for fake poetic scripts. Defines writeFullV1(req, out, opts).
+ * CommonJS helper source for fake build scripts. Defines writeFullV1(req, out, opts).
  * Embed in fake scripts after requiring fs/path.
  */
-export const FAKE_POETIC_WRITE_FULL_V1_CJS = `
+export const FAKE_BUILD_WRITE_FULL_V1_CJS = `
 function writeFullV1(req, out, opts) {
   opts = opts || {};
   var fs = require('fs');
@@ -176,7 +176,7 @@ function writeFullV1(req, out, opts) {
   }
   var now = new Date().toISOString();
   var resultObj = {
-    schema: 'poetic.provider.invoke.result.v1',
+    schema: 'build.provider.invoke.result.v1',
     requestId: requestId,
     outcome: { kind: kind, exitCode: exitCode, reasonCode: reasonCode },
     provider: { requested: avail(providerName), resolved: avail(providerName) },
@@ -185,7 +185,7 @@ function writeFullV1(req, out, opts) {
       resolved: resolvedModel != null ? avail(resolvedModel) : unavail('model not resolved'),
       resolutionSource: resolvedModel != null ? 'provider-result' : 'unavailable'
     },
-    versions: { poetic: avail('0.0.0-test'), providerCli: unavail('not probed') },
+    versions: { build: avail('0.0.0-test'), providerCli: unavail('not probed') },
     posture: {
       fingerprint: avail('${'a'.repeat(64)}'),
       argvRedacted: avail(['provider', 'invoke']),

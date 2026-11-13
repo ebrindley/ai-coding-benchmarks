@@ -129,9 +129,9 @@ unattributable. Keep contrasts one-variable.
 
 ## Caveats that affect attribution (read before making claims)
 
-- **Resolved-model proof is path-dependent.** Only `poetic-adapter` records
-  verified resolved-model evidence. `native-cli` and `poetic-system` cannot
-  prove which model/backend actually served the request, so use `poetic-adapter`
+- **Resolved-model proof is path-dependent.** Only `build-adapter` records
+  verified resolved-model evidence. `native-cli` and `build-system` cannot
+  prove which model/backend actually served the request, so use `build-adapter`
   for any **provider** or **quantization** claim, and confirm backend identity
   out-of-band otherwise.
 - **Concurrency tasks.** `brownfield-011-go-worker-pool-race` relies on the Go

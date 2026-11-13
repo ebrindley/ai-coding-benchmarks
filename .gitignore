@@ -48,5 +48,5 @@ id_rsa
 id_ed25519
 .npmrc
 
-# Poetic runtime data (dropped by poetic CLI invocations from this cwd)
-.poetic/
+# Build runtime data (dropped by build CLI invocations from this cwd)
+.build-project/

@@ -1,7 +1,7 @@
 /**
  * Campaign-level raw evidence availability (finding 1).
  *
- * Missing/invalid poetic raw, requestId bind failure, confinement refusal,
+ * Missing/invalid build raw, requestId bind failure, confinement refusal,
  * and command-not-found must store rawEvidenceUnavailable and never present
  * empty raw digests as verified reportable evidence.
  */
@@ -22,7 +22,7 @@ import {
   rm,
   access,
 } from 'node:fs/promises';
-import { FAKE_POETIC_WRITE_FULL_V1_CJS } from './helpers/poetic-result-v1.js';
+import { FAKE_BUILD_WRITE_FULL_V1_CJS } from './helpers/build-result-v1.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CORPUS = path.join(REPO, 'benchmarks');
@@ -30,11 +30,11 @@ const TASK = 'greenfield-003-js-event-emitter';
 
 /**
  * @param {string} body
- * @returns {Promise<string>} path to executable fake poetic bin
+ * @returns {Promise<string>} path to executable fake build bin
  */
-async function writeFakePoetic(body) {
-  const binDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-fake-poetic-'));
-  const bin = path.join(binDir, 'fake-poetic');
+async function writeFakeBuild(body) {
+  const binDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-fake-build-'));
+  const bin = path.join(binDir, 'fake-build');
   await writeFile(bin, body, 'utf8');
   await chmod(bin, 0o755);
   return bin;
@@ -112,11 +112,11 @@ async function assertNoVerifiedEmptyRawDir(campaignDir, trialId) {
 }
 
 describe('isRawEvidenceUnavailable detection', () => {
-  it('detects poetic-adapter non-actual, confinement, spawn, and empty-stream infra', async () => {
+  it('detects build-adapter non-actual, confinement, spawn, and empty-stream infra', async () => {
     const { isRawEvidenceUnavailable } = await import('../harness/run.js');
 
     assert.equal(
-      isRawEvidenceUnavailable('poetic-adapter', {
+      isRawEvidenceUnavailable('build-adapter', {
         providerRawEvidence: 'unavailable',
         success: false,
         stdout: '',
@@ -125,7 +125,7 @@ describe('isRawEvidenceUnavailable detection', () => {
       true,
     );
     assert.equal(
-      isRawEvidenceUnavailable('poetic-adapter', {
+      isRawEvidenceUnavailable('build-adapter', {
         providerRawEvidence: 'actual',
         success: true,
         parsedOutput: { requestId: 'x' },
@@ -135,7 +135,7 @@ describe('isRawEvidenceUnavailable detection', () => {
       false,
     );
     assert.equal(
-      isRawEvidenceUnavailable('poetic-adapter', {
+      isRawEvidenceUnavailable('build-adapter', {
         providerRawEvidence: 'actual',
         success: false,
         parsedOutput: null,
@@ -184,7 +184,7 @@ describe('isRawEvidenceUnavailable detection', () => {
       true,
     );
     assert.equal(
-      isRawEvidenceUnavailable('poetic-system', {
+      isRawEvidenceUnavailable('build-system', {
         exitCode: null,
         stdout: '',
         stderr: '',
@@ -236,12 +236,12 @@ describe('runCampaign raw evidence availability', () => {
     const suiteDir = path.join(corpusRoot, 'cli-comparison');
     const fixture = path.join(suiteDir, 'fixtures/js-event-emitter-harness');
     const campaignDir = path.join(temp, 'campaign');
-    const bin = await writeFakePoetic(`#!/usr/bin/env node
+    const bin = await writeFakeBuild(`#!/usr/bin/env node
 const fs = require('fs');
 const args = process.argv.slice(2);
 const out = args[args.indexOf('--output') + 1];
 const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
-${FAKE_POETIC_WRITE_FULL_V1_CJS}
+${FAKE_BUILD_WRITE_FULL_V1_CJS}
 writeFullV1(req, out, { stdout: 'verified sibling\\n', resolvedModel: 'dummy-model', requestedModel: req.model });
 `);
     try {
@@ -256,7 +256,7 @@ writeFullV1(req, out, { stdout: 'verified sibling\\n', resolvedModel: 'dummy-mod
         id: 'raw-avail-early-catch', schemaVersion: 1, suiteId: 'cli-comparison',
         taskIds: [TASK], repetitions: 2, seed: 105, timeoutMs: 15_000,
         arms: [{ name: 'dummy', provider: 'fake', model: 'dummy-model',
-          invocationPath: 'poetic-adapter', poeticBin: bin }],
+          invocationPath: 'build-adapter', buildBin: bin }],
       };
       const options = { experiment, corpusRoot, campaignDir, harnessRoot: REPO, execute: true };
       let finished = 0;
@@ -297,18 +297,18 @@ writeFullV1(req, out, { stdout: 'verified sibling\\n', resolvedModel: 'dummy-mod
     }
   });
 
-  it('poetic-adapter missing raw → rawEvidenceUnavailable, not PASS-reportable', async () => {
+  it('build-adapter missing raw → rawEvidenceUnavailable, not PASS-reportable', async () => {
     const { runCampaign } = await import('../harness/run.js');
     const { readTrialResult } = await import('../harness/results.js');
 
     const campaignDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-raw-noraw-'));
     // Success-shaped full v1 + matching requestId but no invoke-artifacts files.
-    const bin = await writeFakePoetic(`#!/usr/bin/env node
+    const bin = await writeFakeBuild(`#!/usr/bin/env node
 const fs = require('fs');
 const args = process.argv.slice(2);
 const out = args[args.indexOf('--output') + 1];
 const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
-${FAKE_POETIC_WRITE_FULL_V1_CJS}
+${FAKE_BUILD_WRITE_FULL_V1_CJS}
 writeFullV1(req, out, {
   writeRaw: false,
   resolvedModel: 'must-not-pass-without-raw',
@@ -331,8 +331,8 @@ process.exit(0);
               name: 'adapter-noraw',
               provider: 'fake',
               model: 'requested-model',
-              invocationPath: 'poetic-adapter',
-              poeticBin: bin,
+              invocationPath: 'build-adapter',
+              buildBin: bin,
             },
           ],
         },
@@ -367,12 +367,12 @@ process.exit(0);
     const { readTrialResult } = await import('../harness/results.js');
 
     const campaignDir = await mkdtemp(path.join(os.tmpdir(), 'aicb-raw-mismatch-'));
-    const bin = await writeFakePoetic(`#!/usr/bin/env node
+    const bin = await writeFakeBuild(`#!/usr/bin/env node
 const fs = require('fs');
 const args = process.argv.slice(2);
 const out = args[args.indexOf('--output') + 1];
 const req = JSON.parse(fs.readFileSync(args[args.indexOf('--request') + 1], 'utf8'));
-${FAKE_POETIC_WRITE_FULL_V1_CJS}
+${FAKE_BUILD_WRITE_FULL_V1_CJS}
 writeFullV1(req, out, {
   requestId: 'stale-other-request',
   stdout: 'planted-stdout\\n',
@@ -396,8 +396,8 @@ process.exit(0);
               name: 'adapter-mismatch',
               provider: 'fake',
               model: 'requested-arm-model',
-              invocationPath: 'poetic-adapter',
-              poeticBin: bin,
+              invocationPath: 'build-adapter',
+              buildBin: bin,
             },
           ],
         },

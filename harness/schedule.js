@@ -7,7 +7,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { computePostureFingerprint, resolveTrialTimeoutMs, resolvePoeticBin } from './posture.js';
+import { computePostureFingerprint, resolveTrialTimeoutMs, resolveBuildBin } from './posture.js';
 
 /**
  * mulberry32 PRNG — returns a function yielding [0, 1).
@@ -159,7 +159,7 @@ export function expandExperiment(experiment, opts = {}) {
         args: arm.args,
         promptTransport: arm.promptTransport,
         timeoutMs: resolveTrialTimeoutMs(experiment.timeoutMs, arm.timeoutMs),
-        poeticBin: resolvePoeticBin(arm.poeticBin),
+        buildBin: resolveBuildBin(arm.buildBin),
         extra: arm.posture,
       });
     } catch {

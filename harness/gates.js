@@ -1046,15 +1046,15 @@ export function buildSeatbeltProfile(
 }
 
 /**
- * Whether a relative path is Poetic/harness bookkeeping (not meaningful edits).
+ * Whether a relative path is Build/harness bookkeeping (not meaningful edits).
  * @param {string} relPath
  * @returns {boolean}
  */
 export function isBookkeepingPath(relPath) {
   const norm = relPath.replace(/\\/g, '/').replace(/^\.\//, '');
   return (
-    norm === '.poetic' ||
-    norm.startsWith('.poetic/') ||
+    norm === '.build-project' ||
+    norm.startsWith('.build-project/') ||
     norm === '.aicb-workspace' ||
     norm.startsWith('.git/')
   );
@@ -1296,7 +1296,7 @@ export function collectChangedPathsFromGitOutputs(nameStatusZ, untrackedZ) {
 }
 
 /**
- * Filter out bookkeeping paths (.poetic/**, etc.).
+ * Filter out bookkeeping paths (.build-project/**, etc.).
  * Shared by baseline-diff and changed-file counting.
  * @param {string[]} paths
  * @returns {string[]}

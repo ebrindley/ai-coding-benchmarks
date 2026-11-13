@@ -37,7 +37,7 @@ function setup() {
   put('canary/config/tasks.json', JSON.stringify({ tasks: [{ taskId, taskFile, fixture }] }));
   put('canary/config/models.json', JSON.stringify({ models: [{ identifier: 'dummy', indexedModelIdentifier: 'dummy-model' }] }));
   put('canary/config/opencode.json', '{}\n');
-  for (const command of ['curl', 'poetic', 'npm', 'go', 'mvn']) put(`bin/${command}`, '#!/bin/sh\nexit 0\n', 0o755);
+  for (const command of ['curl', 'build', 'npm', 'go', 'mvn']) put(`bin/${command}`, '#!/bin/sh\nexit 0\n', 0o755);
   put('bin/lms', '#!/bin/sh\nprintf \'[{"identifier":"dummy","indexedModelIdentifier":"dummy-model"}]\\n\'\n', 0o755);
   put('bin/opencode', '#!/bin/sh\n[ "$XDG_CONFIG_HOME" = "$EXPECTED_CONFIG_HOME" ] || exit 91\nprintf "lmstudio/dummy\\n"\n', 0o755);
   const env = { ...process.env, PATH: `${root}/bin:${process.env.PATH}`,

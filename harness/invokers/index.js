@@ -4,21 +4,21 @@
 
 import path from 'node:path';
 import { resolveTrialTimeoutMs } from '../posture.js';
-import { invokePoeticAdapter } from './poetic-adapter.js';
+import { invokeBuildAdapter } from './build-adapter.js';
 import { invokeNativeCli } from './native-cli.js';
-import { invokePoeticSystem } from './poetic-system.js';
+import { invokeBuildSystem } from './build-system.js';
 
-export const POETIC_INVOKE_REQUEST_SCHEMA = 'poetic.provider.invoke.request.v1';
+export const BUILD_INVOKE_REQUEST_SCHEMA = 'build.provider.invoke.request.v1';
 
 const INVOKERS = Object.freeze({
-  'poetic-adapter': invokePoeticAdapter,
+  'build-adapter': invokeBuildAdapter,
   'native-cli': invokeNativeCli,
-  'poetic-system': invokePoeticSystem,
+  'build-system': invokeBuildSystem,
 });
 
 /**
  * @param {string} invocationPath
- * @returns {typeof invokePoeticAdapter | typeof invokeNativeCli | typeof invokePoeticSystem}
+ * @returns {typeof invokeBuildAdapter | typeof invokeNativeCli | typeof invokeBuildSystem}
  */
 export function getInvoker(invocationPath) {
   const fn = INVOKERS[invocationPath];
@@ -32,8 +32,8 @@ export function getInvoker(invocationPath) {
 }
 
 /**
- * Build a poetic-adapter request matching bridge contract:
- * schema poetic.provider.invoke.request.v1, requestId, provider, optional non-null model,
+ * Create a build-adapter request matching the bridge contract:
+ * schema build.provider.invoke.request.v1, requestId, provider, optional non-null model,
  * prompt, absolute workingDirectory, positive timeoutMs.
  * No trialId/workspace aliases.
  *
@@ -80,7 +80,7 @@ export function buildInvocationRequest({
 
   /** @type {Record<string, unknown>} */
   const request = {
-    schema: POETIC_INVOKE_REQUEST_SCHEMA,
+    schema: BUILD_INVOKE_REQUEST_SCHEMA,
     requestId: String(requestId),
     provider: String(arm.provider),
     prompt: String(prompt),
@@ -106,7 +106,7 @@ export function buildInvocationRequest({
  * Available identities require model.resolutionSource = "provider-result".
  * Never stringifies the resolved object. Never falls back to a requested model.
  *
- * @param {unknown} artifact - parsed JSON from poetic --output
+ * @param {unknown} artifact - parsed JSON from build --output
  * @returns {{ resolvedModel: string | null, available: boolean, source: string, reason?: string }}
  */
 export function parseResolvedModelEvidence(artifact) {
@@ -177,7 +177,7 @@ export function parseResolvedModelEvidence(artifact) {
 }
 
 export {
-  invokePoeticAdapter,
+  invokeBuildAdapter,
   parseInvokeResult,
   mapOutcomeKind,
   prepareFreshOutputPath,
@@ -188,16 +188,16 @@ export {
   expectedProviderRawPaths,
   ingestProviderRawEvidence,
   resolveProviderRawArtifactsDirName,
-  POETIC_INVOKE_RESULT_SCHEMA,
-  POETIC_OUTCOME_KINDS,
+  BUILD_INVOKE_RESULT_SCHEMA,
+  BUILD_OUTCOME_KINDS,
   REASON_CODE_RE,
   PROVIDER_RAW_ARTIFACTS_SUFFIX,
   PROVIDER_RAW_ARTIFACTS_DIR,
   PROVIDER_RAW_STDOUT_NAME,
   PROVIDER_RAW_STDERR_NAME,
-} from './poetic-adapter.js';
+} from './build-adapter.js';
 export { invokeNativeCli, PROMPT_TRANSPORTS } from './native-cli.js';
-export { invokePoeticSystem } from './poetic-system.js';
+export { invokeBuildSystem } from './build-system.js';
 export {
   detectProviderConfinement,
   buildProviderSeatbeltProfile,

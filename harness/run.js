@@ -1,6 +1,6 @@
 /**
  * Canonical `run` orchestration: preflight → expand → lock → trials → summary.
- * No Poetic workflow wrapper. Does not invoke live providers unless invokers are configured.
+ * No Build workflow wrapper. Does not invoke live providers unless invokers are configured.
  * Resumable and deterministic.
  */
 
@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { preflight } from './preflight.js';
 import { SCHEMA_VERSION } from './contracts.js';
 import { sha256Json, sha256Buffer, digestArtifactDir } from './digest.js';
-import { computePostureFingerprint, resolvePoeticBin } from './posture.js';
+import { computePostureFingerprint, resolveBuildBin } from './posture.js';
 import {
   parseResolvedModelEvidence,
 } from './invokers/index.js';
@@ -366,7 +366,7 @@ export function tasksByIdFromLoad(loaded) {
 /**
  * Resolve model evidence honestly after an invoker returns.
  *
- * poetic-adapter: model evidence comes ONLY from the invoker's fully validated,
+ * build-adapter: model evidence comes ONLY from the invoker's fully validated,
  * requestId-bound `parsedOutput`. Never reopen outputPath/campaign copies as a
  * fallback (stale/mismatched artifacts may still sit on disk).
  *
@@ -375,7 +375,7 @@ export function tasksByIdFromLoad(loaded) {
  * @returns {{ resolvedModel: string | null, resolvedModelAvailable: boolean, resolvedModelSource: string }}
  */
 function resolveModelEvidence(invocationPath, invokerResult) {
-  if (invocationPath === 'poetic-adapter') {
+  if (invocationPath === 'build-adapter') {
     const artifact = invokerResult?.parsedOutput ?? null;
     if (artifact == null) {
       return {
@@ -391,7 +391,7 @@ function resolveModelEvidence(invocationPath, invokerResult) {
       resolvedModelSource: parsed.source,
     };
   }
-  // native-cli / poetic-system: unavailable unless invoker returned explicit evidence
+  // native-cli / build-system: unavailable unless invoker returned explicit evidence
   if (
     invokerResult?.resolvedModel != null &&
     String(invokerResult.resolvedModel).trim() !== ''
@@ -456,8 +456,8 @@ export function normalizeInvokerInfraSignals(invocationPath, invokerResult) {
   if (typeof r.infraFailure === 'string' && r.infraFailure.trim() !== '') {
     return invokerResult;
   }
-  // poetic-adapter already sets infraFailure when raw is missing / bind fails.
-  if (invocationPath === 'poetic-adapter') {
+  // build-adapter already sets infraFailure when raw is missing / bind fails.
+  if (invocationPath === 'build-adapter') {
     return invokerResult;
   }
   if (looksLikeCommandNotFound(r)) {
@@ -475,7 +475,7 @@ export function normalizeInvokerInfraSignals(invocationPath, invokerResult) {
 /**
  * Detect whether provider raw evidence is unavailable for reportable digests.
  *
- * Missing/invalid poetic raw, confinement refusal, spawn failures, and
+ * Missing/invalid build raw, confinement refusal, spawn failures, and
  * command-not-found must never become verified empty raw digests.
  *
  * @param {string} invocationPath
@@ -507,10 +507,10 @@ export function isRawEvidenceUnavailable(invocationPath, invokerResult) {
     return true;
   }
 
-  // poetic-adapter: only fully ingested provider raw is reportable evidence.
+  // build-adapter: only fully ingested provider raw is reportable evidence.
   // Missing raw, bind failure, or non-actual marker → unavailable (never empty
   // quiet-CLI bytes as verified digests).
-  if (invocationPath === 'poetic-adapter') {
+  if (invocationPath === 'build-adapter') {
     if (r.providerRawEvidence !== 'actual') return true;
     // Defensive: actual marker without bound artifact still cannot attribute.
     if (r.parsedOutput == null && r.success === false) return true;
@@ -547,7 +547,7 @@ export function isRawEvidenceUnavailable(invocationPath, invokerResult) {
     return true;
   }
 
-  // native-cli / poetic-system: invoker failed before usable stream evidence.
+  // native-cli / build-system: invoker failed before usable stream evidence.
   if (infra && !hasStreamEvidence) {
     return true;
   }
@@ -1102,7 +1102,7 @@ export async function runCampaign(opts) {
           timeoutMs: experiment.timeoutMs,
         });
         const timeoutMs = request.timeoutMs;
-        const poeticBin = resolvePoeticBin(arm.poeticBin);
+        const buildBin = resolveBuildBin(arm.buildBin);
         const postureFingerprint = computePostureFingerprint({
           invocationPath: arm.invocationPath,
           provider: arm.provider,
@@ -1112,7 +1112,7 @@ export async function runCampaign(opts) {
           args: arm.args || [],
           promptTransport: arm.promptTransport,
           timeoutMs,
-          poeticBin,
+          buildBin,
           extra: arm.posture,
         });
         if (trial.postureFingerprint !== postureFingerprint) {
@@ -1137,7 +1137,7 @@ export async function runCampaign(opts) {
         );
 
         const invokerResultRaw = await invoker({
-          poeticBin,
+          buildBin,
           requestPath,
           outputPath,
           request,
@@ -1187,7 +1187,7 @@ export async function runCampaign(opts) {
           recordedOutputPath = null;
         }
 
-        // Raw availability before quarantine: missing/invalid poetic raw,
+        // Raw availability before quarantine: missing/invalid build raw,
         // confinement refusal, spawn failures, and command-not-found must not
         // become verified empty raw digests.
         const rawUnavailable = isRawEvidenceUnavailable(
@@ -1224,7 +1224,7 @@ export async function runCampaign(opts) {
           );
         }
 
-        // poetic-adapter: only requestId-bound parsedOutput may supply model evidence.
+        // build-adapter: only requestId-bound parsedOutput may supply model evidence.
         // Never reopen scratch/campaign outputPath as a fallback.
         const modelEv = resolveModelEvidence(
           arm.invocationPath,

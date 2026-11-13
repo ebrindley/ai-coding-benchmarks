@@ -1,5 +1,5 @@
 /**
- * Strict poetic.provider.invoke.result.v1 contract (ProviderInvokeResultV1).
+ * Strict build.provider.invoke.result.v1 contract (ProviderInvokeResultV1).
  */
 
 import { describe, it } from 'node:test';
@@ -11,12 +11,12 @@ import {
   buildValidInvokeResultV1,
   available,
   unavailable,
-} from './helpers/poetic-result-v1.js';
+} from './helpers/build-result-v1.js';
 
-describe('poetic-adapter strict ProviderInvokeResultV1 contract', () => {
+describe('build-adapter strict ProviderInvokeResultV1 contract', () => {
   it('rejects missing each required top-level section', async () => {
     const { parseInvokeResult } = await import(
-      '../harness/invokers/poetic-adapter.js'
+      '../harness/invokers/build-adapter.js'
     );
     const full = buildValidInvokeResultV1();
     const required = [
@@ -53,7 +53,7 @@ describe('poetic-adapter strict ProviderInvokeResultV1 contract', () => {
       valueFromAvailabilityCoded,
       bindInvokeResultToRequest,
       normalizeRequestedModelIdentity,
-    } = await import('../harness/invokers/poetic-adapter.js');
+    } = await import('../harness/invokers/build-adapter.js');
     const base = buildValidInvokeResultV1();
 
     const badAvailable = {
@@ -188,7 +188,7 @@ describe('poetic-adapter strict ProviderInvokeResultV1 contract', () => {
 
   it('validates usage token fields and absolute artifact paths', async () => {
     const { parseInvokeResult } = await import(
-      '../harness/invokers/poetic-adapter.js'
+      '../harness/invokers/build-adapter.js'
     );
     const base = buildValidInvokeResultV1();
 
@@ -310,7 +310,7 @@ describe('poetic-adapter strict ProviderInvokeResultV1 contract', () => {
     const {
       parseInvokeResult,
       bindInvokeResultToRequest,
-    } = await import('../harness/invokers/poetic-adapter.js');
+    } = await import('../harness/invokers/build-adapter.js');
 
     const parsed = parseInvokeResult(
       buildValidInvokeResultV1({
@@ -430,8 +430,8 @@ describe('poetic-adapter strict ProviderInvokeResultV1 contract', () => {
   it('end-to-end adapter: full valid result + raw → success; mismatch → fail', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'aicb-v1-e2e-'));
     try {
-      const { invokePoeticAdapter } = await import(
-        '../harness/invokers/poetic-adapter.js'
+      const { invokeBuildAdapter } = await import(
+        '../harness/invokers/build-adapter.js'
       );
 
       const binOk = path.join(dir, 'fake-ok');
@@ -455,7 +455,7 @@ const unavail = (r) => ({ availability: 'unavailable', reason: r });
 const now = new Date().toISOString();
 const rm = req.model != null && String(req.model).trim() !== '' ? String(req.model) : null;
 fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
+  schema: 'build.provider.invoke.result.v1',
   requestId: req.requestId,
   outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
   provider: { requested: avail(req.provider), resolved: avail(req.provider) },
@@ -464,7 +464,7 @@ fs.writeFileSync(out, JSON.stringify({
     resolved: rm ? avail(rm) : unavail('model not resolved'),
     resolutionSource: rm ? 'provider-result' : 'unavailable',
   },
-  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  versions: { build: avail('t'), providerCli: unavail('n/a') },
   posture: {
     fingerprint: avail('${'c'.repeat(64)}'),
     argvRedacted: avail(['x']),
@@ -495,12 +495,12 @@ process.exit(0);
 
       const campaignDir = path.join(dir, '_camp');
       await mkdir(campaignDir, { recursive: true, mode: 0o700 });
-      const ok = await invokePoeticAdapter({
-        poeticBin: binOk,
+      const ok = await invokeBuildAdapter({
+        buildBin: binOk,
         requestPath: path.join(dir, 'req.json'),
         outputPath: path.join(dir, 'out.json'),
         request: {
-          schema: 'poetic.provider.invoke.request.v1',
+          schema: 'build.provider.invoke.request.v1',
           requestId: 'e2e-ok',
           provider: 'openai',
           model: 'm1',
@@ -537,7 +537,7 @@ const avail = (v) => ({ availability: 'available', value: v });
 const unavail = (r) => ({ availability: 'unavailable', reason: r });
 const now = new Date().toISOString();
 fs.writeFileSync(out, JSON.stringify({
-  schema: 'poetic.provider.invoke.result.v1',
+  schema: 'build.provider.invoke.result.v1',
   requestId: req.requestId,
   outcome: { kind: 'success', exitCode: 0, reasonCode: 'SUCCESS' },
   provider: { requested: avail('WRONG-PROVIDER'), resolved: avail('WRONG-PROVIDER') },
@@ -546,7 +546,7 @@ fs.writeFileSync(out, JSON.stringify({
     resolved: unavail('n/a'),
     resolutionSource: 'unavailable',
   },
-  versions: { poetic: avail('t'), providerCli: unavail('n/a') },
+  versions: { build: avail('t'), providerCli: unavail('n/a') },
   posture: {
     fingerprint: avail('${'d'.repeat(64)}'),
     argvRedacted: avail(['x']),
@@ -569,12 +569,12 @@ process.exit(0);
         'utf8',
       );
       await chmod(binBad, 0o755);
-      const bad = await invokePoeticAdapter({
-        poeticBin: binBad,
+      const bad = await invokeBuildAdapter({
+        buildBin: binBad,
         requestPath: path.join(dir, 'req2.json'),
         outputPath: path.join(dir, 'out2.json'),
         request: {
-          schema: 'poetic.provider.invoke.request.v1',
+          schema: 'build.provider.invoke.request.v1',
           requestId: 'e2e-bad',
           provider: 'openai',
           prompt: 'x',

@@ -83,7 +83,7 @@
         },
         "invocationPath": {
           "type": "string",
-          "enum": ["poetic-adapter", "native-cli", "poetic-system"]
+          "enum": ["build-adapter", "native-cli", "build-system"]
         },
         "command": {
           "type": "string",

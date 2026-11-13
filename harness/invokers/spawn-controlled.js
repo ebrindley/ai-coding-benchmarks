@@ -407,7 +407,7 @@ export async function spawnControlled(opts) {
 
     try {
       // Constrain TMPDIR/TMP/TEMP to the private workspace-bound temp so
-      // confined children (e.g. Poetic raw spool under os.tmpdir()) can write.
+      // confined children (e.g. Build raw spool under os.tmpdir()) can write.
       // Never merges task YAML env — only harness-controlled env + temp keys.
       const childEnv = applyProviderTempEnv(
         resolveHarnessEnv(env),

@@ -191,7 +191,7 @@ export function classifyTrial({
   }
 
   // --- INFRA_FAIL ---
-  // Raw unavailable (truncation, missing poetic raw, command-not-found, etc.)
+  // Raw unavailable (truncation, missing build raw, command-not-found, etc.)
   // forces INFRA_FAIL before write — including when timeout is also true.
   if (rawEvidenceUnavailable === true) {
     signals.push('INFRA_FAIL');

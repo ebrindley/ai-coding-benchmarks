@@ -11,7 +11,7 @@ import { sha256Json } from './digest.js';
 
 /**
  * @typedef {object} PostureInput
- * @property {string} invocationPath - 'poetic-adapter' | 'native-cli' | 'poetic-system'
+ * @property {string} invocationPath - 'build-adapter' | 'native-cli' | 'build-system'
  * @property {string[] | Record<string, string> | null | undefined} envAllowlist
  * @property {string | null | undefined} sandboxMode
  * @property {string} [provider]
@@ -19,7 +19,7 @@ import { sha256Json } from './digest.js';
  * @property {string[]} [args]
  * @property {string} [promptTransport]
  * @property {number} [timeoutMs]
- * @property {string} [poeticBin]
+ * @property {string} [buildBin]
  * @property {unknown} [extra] - optional additional posture-affecting fields
  */
 
@@ -45,8 +45,8 @@ export function resolveTrialTimeoutMs(timeoutMs, legacyArmTimeoutMs) {
  * @param {string} [envBin]
  * @returns {string}
  */
-export function resolvePoeticBin(legacyArmBin, envBin = process.env.AICB_POETIC_BIN) {
-  return legacyArmBin || envBin || 'poetic';
+export function resolveBuildBin(legacyArmBin, envBin = process.env.AICB_BUILD_BIN) {
+  return legacyArmBin || envBin || 'build';
 }
 
 /**
@@ -62,7 +62,7 @@ export function computePostureFingerprint({
   args,
   promptTransport,
   timeoutMs,
-  poeticBin,
+  buildBin,
   extra,
 }) {
   if (invocationPath == null || invocationPath === '') {
@@ -93,7 +93,7 @@ export function computePostureFingerprint({
           args: args ?? [],
           promptTransport: promptTransport ?? 'stdin',
         }
-      : { poeticBin: resolvePoeticBin(poeticBin) }),
+      : { buildBin: resolveBuildBin(buildBin) }),
   };
 
   if (extra !== undefined) {

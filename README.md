@@ -43,9 +43,9 @@ npx aicb export --campaign /path/to/campaign --out /path/to/bundle
 
 Experiment arms must name an explicit `invocationPath`:
 
-- `poetic-adapter` — argv-safe `poetic provider invoke --request … --output …`
+- `build-adapter` — argv-safe `build provider invoke --request … --output …`
 - `native-cli` — harness-driven command/args from the arm (not task YAML)
-- `poetic-system` — harness-driven Poetic system path
+- `build-system` — harness-driven Build system path
 
 The harness never silently aggregates results across different invocation
 paths, resolved model ids, or posture fingerprints. Raw provider output is
@@ -64,9 +64,9 @@ for the methodology, and the ready-to-edit multi-arm experiments in
 [`examples/`](examples/) (`compare-providers`, `compare-models`,
 `compare-harnesses`).
 
-### Neutral protocol evidence (poetic-adapter)
+### Neutral protocol evidence (build-adapter)
 
-For `poetic-adapter` trials the harness persists versioned, neutral invocation
+For `build-adapter` trials the harness persists versioned, neutral invocation
 outcome fields on each trial result — separate from transport `exitCode`:
 
 - `outcomeKind` — bounded kind (`success`, `timeout`, `provider_error`,
@@ -74,10 +74,10 @@ outcome fields on each trial result — separate from transport `exitCode`:
 - `reasonCode` — bounded code (`SUCCESS`, `MODEL_UNRESOLVED`,
   `PROVIDER_TIMEOUT`, `PROVIDER_ERROR`, …)
 - `protocolEvidenceVersion` — currently `1`
-- `protocolSchema` — `poetic.provider.invoke.result.v1`
+- `protocolSchema` — `build.provider.invoke.result.v1`
 
 These fields are export-safe bounded identifiers only (no raw provider text).
-New reportable poetic-adapter records without them fail closed at evidence
+New reportable build-adapter records without them fail closed at evidence
 verify. Subprocess capture joins raw byte chunks before UTF-8 decode so
 multi-byte sequences split across chunk boundaries are not corrupted; invalid
 UTF-8 bytes may still be replaced when a string view is required.

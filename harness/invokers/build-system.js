@@ -1,7 +1,7 @@
 /**
- * Poetic system-path invoker: public surface only.
+ * Build system-path invoker: public surface only.
  *
- *   poetic run <prompt> --provider <provider> --model <model>
+ *   build run <prompt> --provider <provider> --model <model>
  *     --in-place --no-push --profile fast-local --timeout <whole minutes>
  *
  * Runs from the isolated workspace (cwd) on a non-protected trial branch.
@@ -38,7 +38,7 @@ export function timeoutMsToWholeMinutes(timeoutMs) {
 }
 
 /**
- * Build controlled argv for poetic system path (no spawn).
+ * Build controlled argv for build system path (no spawn).
  *
  * @param {object} opts
  * @param {string} opts.prompt
@@ -47,15 +47,15 @@ export function timeoutMsToWholeMinutes(timeoutMs) {
  * @param {number} [opts.timeoutMs]
  * @returns {string[]}
  */
-export function buildPoeticSystemArgv({ prompt, provider, model, timeoutMs }) {
+export function makeBuildSystemArgv({ prompt, provider, model, timeoutMs }) {
   if (prompt == null) {
-    throw new Error('buildPoeticSystemArgv: prompt is required');
+    throw new Error('makeBuildSystemArgv: prompt is required');
   }
   if (provider == null || String(provider).trim() === '') {
-    throw new Error('buildPoeticSystemArgv: provider is required');
+    throw new Error('makeBuildSystemArgv: provider is required');
   }
   if (model == null || String(model).trim() === '') {
-    throw new Error('buildPoeticSystemArgv: model is required');
+    throw new Error('makeBuildSystemArgv: model is required');
   }
   const minutes = timeoutMsToWholeMinutes(timeoutMs);
   return [
@@ -76,7 +76,7 @@ export function buildPoeticSystemArgv({ prompt, provider, model, timeoutMs }) {
 
 /**
  * @param {object} opts
- * @param {string} opts.poeticBin
+ * @param {string} opts.buildBin
  * @param {string} opts.prompt
  * @param {string} opts.provider
  * @param {string} opts.model
@@ -91,8 +91,8 @@ export function buildPoeticSystemArgv({ prompt, provider, model, timeoutMs }) {
  * @param {number} [opts.captureLimit] - optional override for test injection only; production omits (DEFAULT_CAPTURE_LIMIT)
  * @returns {Promise<InvokerResult>}
  */
-export async function invokePoeticSystem({
-  poeticBin,
+export async function invokeBuildSystem({
+  buildBin,
   prompt,
   provider,
   model,
@@ -125,7 +125,7 @@ export async function invokePoeticSystem({
       stdout: '',
       stderr: '',
       infraFailure:
-        'refusing taskEnv: poetic-system does not merge corpus task YAML env/credentials',
+        'refusing taskEnv: build-system does not merge corpus task YAML env/credentials',
       resolvedModel: null,
     };
   }
@@ -136,7 +136,7 @@ export async function invokePoeticSystem({
       stdout: '',
       stderr: '',
       infraFailure:
-        'refusing extraArgs: poetic-system uses a fixed public argv surface only',
+        'refusing extraArgs: build-system uses a fixed public argv surface only',
       resolvedModel: null,
     };
   }
@@ -147,7 +147,7 @@ export async function invokePoeticSystem({
       stdout: '',
       stderr: '',
       infraFailure:
-        'refusing systemPromptPath: obsolete; use poetic run --provider --model --in-place --profile fast-local',
+        'refusing systemPromptPath: obsolete; use build run --provider --model --in-place --profile fast-local',
       resolvedModel: null,
     };
   }
@@ -162,20 +162,20 @@ export async function invokePoeticSystem({
     };
   }
 
-  if (poeticBin == null || String(poeticBin).trim() === '') {
+  if (buildBin == null || String(buildBin).trim() === '') {
     return {
       exitCode: null,
       timedOut: false,
       stdout: '',
       stderr: '',
-      infraFailure: 'poeticBin is required',
+      infraFailure: 'buildBin is required',
       resolvedModel: null,
     };
   }
 
   let args;
   try {
-    args = buildPoeticSystemArgv({ prompt, provider, model, timeoutMs });
+    args = makeBuildSystemArgv({ prompt, provider, model, timeoutMs });
   } catch (err) {
     return {
       exitCode: null,
@@ -188,7 +188,7 @@ export async function invokePoeticSystem({
   }
 
   const result = await spawnControlled({
-    command: String(poeticBin),
+    command: String(buildBin),
     args,
     cwd,
     env,
